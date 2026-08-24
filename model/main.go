@@ -292,6 +292,7 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
+		&RelayAttempt{},
 	)
 	if err != nil {
 		return err
@@ -353,6 +354,7 @@ func migrateDBFast() error {
 		{&SystemInstance{}, "SystemInstance"},
 		{&SystemTask{}, "SystemTask"},
 		{&SystemTaskLock{}, "SystemTaskLock"},
+		{&RelayAttempt{}, "RelayAttempt"},
 	}
 	// 动态计算migration数量，确保errChan缓冲区足够大
 	errChan := make(chan error, len(migrations))
@@ -400,7 +402,7 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{})
+	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{})
 }
 
 func migrateClickHouseLogDB() error {
@@ -408,7 +410,13 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseLogTTL(ttlDays)
+	if err := syncClickHouseTableTTL("logs", ttlDays); err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseRelayAttemptCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	return syncClickHouseTableTTL("relay_attempts", ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -463,25 +471,118 @@ PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
-func syncClickHouseLogTTL(ttlDays int) error {
+// clickHouseRelayAttemptCreateTableSQL mirrors the RelayAttempt struct. GORM
+// AutoMigrate is deliberately bypassed for ClickHouse, so this DDL must be kept
+// in sync with model/relay_attempt.go by hand. Nullable() columns correspond to
+// the pointer fields there, where null means "not observed" rather than zero.
+func clickHouseRelayAttemptCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS relay_attempts (
+	id Int64 DEFAULT 0,
+	created_at Int64 DEFAULT 0,
+	attempt_id String DEFAULT '',
+	request_id String DEFAULT '',
+	attempt_index Int32 DEFAULT 0,
+	channel_id Int32 DEFAULT 0,
+	channel_type Int32 DEFAULT 0,
+	model_name String DEFAULT '',
+	upstream_model_name String DEFAULT '',
+	using_group String DEFAULT '',
+	input_tokens_est Int32 DEFAULT 0,
+	chars_latin Int32 DEFAULT 0,
+	chars_han Int32 DEFAULT 0,
+	chars_other Int32 DEFAULT 0,
+	max_tokens_req Nullable(Int32),
+	is_stream UInt8 DEFAULT 0,
+	has_tools UInt8 DEFAULT 0,
+	tools_count Int32 DEFAULT 0,
+	temperature Nullable(Float64),
+	tenant_id Int32 DEFAULT 0,
+	token_id Int32 DEFAULT 0,
+	relay_format String DEFAULT '',
+	request_path String DEFAULT '',
+	prefix_hash_system String DEFAULT '',
+	prefix_hash_tools String DEFAULT '',
+	prefix_hash_prefix String DEFAULT '',
+	task_type_guess String DEFAULT '',
+	task_type_guess_ver Int32 DEFAULT 0,
+	inflight_requests Int32 DEFAULT 0,
+	inflight_tokens_est Int32 DEFAULT 0,
+	win_sample_count Nullable(Int32),
+	win_success_rate Nullable(Float64),
+	win_429_rate Nullable(Float64),
+	win_timeout_rate Nullable(Float64),
+	win_5xx_rate Nullable(Float64),
+	win_ttft_p50 Nullable(Float64),
+	win_ttft_p95 Nullable(Float64),
+	win_tps_mean Nullable(Float64),
+	consecutive_failures Nullable(Int32),
+	secs_since_last_error Nullable(Int32),
+	prefix_hit_rate_hist Nullable(Float64),
+	prefix_last_hit_secs Nullable(Int32),
+	model_ratio Nullable(Float64),
+	completion_ratio Nullable(Float64),
+	group_ratio Nullable(Float64),
+	cache_ratio Nullable(Float64),
+	model_price Nullable(Float64),
+	circuit_state Nullable(String),
+	rpm_used_ratio Nullable(Float64),
+	tpm_used_ratio Nullable(Float64),
+	size_vs_tpm_ratio Nullable(Float64),
+	ctx_headroom_ratio Nullable(Float64),
+	supports_cache Nullable(UInt8),
+	price_in Nullable(Float64),
+	price_out Nullable(Float64),
+	ts_start Int64 DEFAULT 0,
+	ts_first_token Nullable(Int64),
+	ts_end Int64 DEFAULT 0,
+	ttft_ms Nullable(Int64),
+	total_ms Int64 DEFAULT 0,
+	upstream_ms Nullable(Int64),
+	gateway_overhead_ms Nullable(Int64),
+	ok UInt8 DEFAULT 0,
+	outcome_code String DEFAULT '',
+	http_status Nullable(Int32),
+	upstream_err_hash String DEFAULT '',
+	terminated_by String DEFAULT '',
+	retry_after_hint Nullable(Int32),
+	internal_err_code String DEFAULT '',
+	stream_end_reason String DEFAULT '',
+	input_tokens_actual Nullable(Int32),
+	output_tokens_actual Nullable(Int32),
+	cached_tokens Nullable(Int32),
+	reasoning_tokens Nullable(Int32),
+	finish_reason String DEFAULT '',
+	cost_actual Nullable(Int32),
+	tps_actual Nullable(Float64),
+	stream_chunks Nullable(Int32)
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, channel_id, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+// syncClickHouseTableTTL reconciles the TTL of a log-database ClickHouse table.
+// table is always an internal literal, never user input.
+func syncClickHouseTableTTL(table string, ttlDays int) error {
 	expression := clickHouseLogTTLExpression(ttlDays)
 	if expression != "" {
-		return LOG_DB.Exec("ALTER TABLE logs MODIFY TTL " + expression).Error
+		return LOG_DB.Exec("ALTER TABLE " + table + " MODIFY TTL " + expression).Error
 	}
 
-	hasTTL, err := clickHouseLogTableHasTTL()
+	hasTTL, err := clickHouseTableHasTTL(table)
 	if err != nil {
 		return err
 	}
 	if !hasTTL {
 		return nil
 	}
-	return LOG_DB.Exec("ALTER TABLE logs REMOVE TTL").Error
+	return LOG_DB.Exec("ALTER TABLE " + table + " REMOVE TTL").Error
 }
 
-func clickHouseLogTableHasTTL() (bool, error) {
+func clickHouseTableHasTTL(table string) (bool, error) {
 	var createTableSQL string
-	if err := LOG_DB.Raw("SHOW CREATE TABLE logs").Scan(&createTableSQL).Error; err != nil {
+	if err := LOG_DB.Raw("SHOW CREATE TABLE " + table).Scan(&createTableSQL).Error; err != nil {
 		return false, err
 	}
 	return clickHouseCreateTableHasTTL(createTableSQL), nil

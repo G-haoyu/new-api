@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -523,6 +524,14 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
+	attemptlog.NoteUsage(ctx, attemptlog.UsageNote{
+		InputTokens:     summary.PromptTokens,
+		OutputTokens:    summary.CompletionTokens,
+		CachedTokens:    summary.CacheTokens,
+		ReasoningTokens: reasoningTokensOf(billingUsage),
+		CostActual:      summary.Quota,
+	})
+
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
@@ -540,4 +549,13 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	gopool.Go(func() {
 		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
 	})
+}
+
+// reasoningTokensOf reads the reasoning token count, which billing folds into
+// CompletionTokens and therefore does not surface anywhere on its own.
+func reasoningTokensOf(usage *dto.Usage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.CompletionTokenDetails.ReasoningTokens
 }

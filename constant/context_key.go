@@ -64,6 +64,16 @@ const (
 	// It is not returned to end users, but can be persisted into consume/error logs for debugging.
 	ContextKeyAdminRejectReason ContextKey = "admin_reject_reason"
 
+	// ContextKeyRelayAttempt stores the in-progress relay attempt telemetry
+	// record, so the upstream request layer and the billing layer can annotate
+	// the attempt they are part of without threading a parameter through every
+	// relay handler signature.
+	ContextKeyRelayAttempt ContextKey = "relay_attempt"
+
+	// ContextKeyFinishReason stores the terminal finish/stop reason reported by
+	// the upstream model, extracted where the response is already being parsed.
+	ContextKeyFinishReason ContextKey = "finish_reason"
+
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
