@@ -24,29 +24,33 @@ var _ net.Error = fakeTimeoutError{}
 // success rates would be silently polluted by client behaviour, and because
 // slower channels get cancelled more often the pollution would correlate with
 // latency.
+//
+// client_cancelled is derived only from signals that fire during the failure:
+// the stream scanner's client_gone end reason, or a context.Canceled error.
+// It is deliberately NOT derived from c.Request.Context().Err() at Finish
+// time, which is already done for any normally-completed request and would
+// mislabel successes.
 func TestClassifyClientCancelledWins(t *testing.T) {
 	cases := []struct {
 		name string
 		in   ClassifyInput
 	}{
 		{
-			name: "context cancelled flag alone",
-			in:   ClassifyInput{ClientGone: true},
+			name: "context.Canceled error alone",
+			in:   ClassifyInput{Err: context.Canceled},
 		},
 		{
-			name: "cancelled outranks upstream 500",
+			name: "wrapped Canceled outranks upstream 500",
 			in: ClassifyInput{
-				ClientGone: true,
 				HTTPStatus: 500,
-				Err:        errors.New("internal server error"),
+				Err:        fmt.Errorf("internal server error: %w", context.Canceled),
 			},
 		},
 		{
-			name: "cancelled outranks 429",
+			name: "wrapped Canceled outranks 429",
 			in: ClassifyInput{
-				ClientGone: true,
 				HTTPStatus: 429,
-				Err:        errors.New("rate limited"),
+				Err:        fmt.Errorf("rate limited: %w", context.Canceled),
 			},
 		},
 		{

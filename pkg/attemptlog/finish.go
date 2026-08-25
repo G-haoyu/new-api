@@ -34,8 +34,6 @@ type FinishInput struct {
 	// InitChannelMeta; at BeginAttempt time the embedded ChannelMeta is still
 	// nil, so this is read late.
 	UpstreamModelName string
-	// ClientGone reports whether the downstream request context was cancelled.
-	ClientGone bool
 }
 
 // Finish closes the attempt, classifies its outcome, and enqueues the record.
@@ -69,7 +67,6 @@ func (a *Attempt) Finish(c *gin.Context, in FinishInput) {
 		ErrMessage:      in.ErrMessage,
 		StreamEndReason: in.StreamEndReason,
 		SentFirstToken:  sentFirstToken,
-		ClientGone:      in.ClientGone,
 		IsStream:        a.features.IsStream,
 	}
 
