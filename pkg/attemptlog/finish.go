@@ -29,6 +29,11 @@ type FinishInput struct {
 	FirstTokenTime *time.Time
 	// StreamChunks is the number of upstream chunks received.
 	StreamChunks int
+	// UpstreamModelName is the model the channel actually sent upstream (after
+	// model mapping). Populated at Finish time, after the relay handler has run
+	// InitChannelMeta; at BeginAttempt time the embedded ChannelMeta is still
+	// nil, so this is read late.
+	UpstreamModelName string
 	// ClientGone reports whether the downstream request context was cancelled.
 	ClientGone bool
 }
@@ -99,7 +104,7 @@ func (a *Attempt) buildRecord(
 		ChannelId:         a.target.ChannelId,
 		ChannelType:       a.target.ChannelType,
 		ModelName:         a.features.ModelName,
-		UpstreamModelName: a.target.UpstreamModelName,
+		UpstreamModelName: in.UpstreamModelName,
 		UsingGroup:        a.target.UsingGroup,
 
 		InputTokensEst: a.features.InputTokensEst,
