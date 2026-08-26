@@ -51,23 +51,8 @@ type RelayAttempt struct {
 	TaskTypeGuessVer int    `json:"task_type_guess_ver"`
 
 	/* channel state snapshot, sampled before this attempt was dispatched */
-	InflightRequests  int      `json:"inflight_requests"`
-	InflightTokensEst int      `json:"inflight_tokens_est"`
-	WinSampleCount    *int     `json:"win_sample_count"`
-	WinSuccessRate    *float64 `json:"win_success_rate"`
-	Win429Rate        *float64 `json:"win_429_rate"`
-	WinTimeoutRate    *float64 `json:"win_timeout_rate"`
-	Win5xxRate        *float64 `json:"win_5xx_rate"`
-	WinTtftP50        *float64 `json:"win_ttft_p50"`
-	WinTtftP95        *float64 `json:"win_ttft_p95"`
-	WinTpsMean        *float64 `json:"win_tps_mean"`
-
-	ConsecutiveFailures *int `json:"consecutive_failures"`
-	SecsSinceLastError  *int `json:"secs_since_last_error"`
-
-	/* pairing features (populated from PR2) */
-	PrefixHitRateHist *float64 `json:"prefix_hit_rate_hist"`
-	PrefixLastHitSecs *int     `json:"prefix_last_hit_secs"`
+	InflightRequests  int `json:"inflight_requests"`
+	InflightTokensEst int `json:"inflight_tokens_est"`
 
 	/* pricing, as the ratios this gateway actually bills on.
 	   price_in/price_out below stay null: billing here is a per-model-name ratio,
