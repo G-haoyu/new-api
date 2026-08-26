@@ -46,7 +46,7 @@ type RelayAttempt struct {
 	/* prefix features (populated from PR2) */
 	PrefixHashSystem string `json:"prefix_hash_system" gorm:"type:varchar(32)"`
 	PrefixHashTools  string `json:"prefix_hash_tools" gorm:"type:varchar(32)"`
-	PrefixHashPrefix string `json:"prefix_hash_prefix" gorm:"type:varchar(32);index:idx_relay_attempts_prefix_hash"`
+	PrefixHashPrefix string `json:"prefix_hash_prefix" gorm:"type:text"`
 	TaskTypeGuess    string `json:"task_type_guess" gorm:"type:varchar(32)"`
 	TaskTypeGuessVer int    `json:"task_type_guess_ver"`
 

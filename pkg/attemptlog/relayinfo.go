@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/gin-gonic/gin"
 )
 
 // RelayInfoView is the subset of *relaycommon.RelayInfo this package reads.
@@ -25,7 +26,12 @@ type RelayInfoView interface {
 // meta may be nil: when both token counting and sensitive-word checking are
 // disabled the relay layer skips building CombineText to avoid a large
 // allocation, so character counts are simply absent rather than wrong.
+//
+// c is the gin context, used to read the raw request body for byte-exact
+// prefix hashing. It may be nil in tests, in which case prefix hashes and
+// task_type_guess are left empty.
 func FeaturesFrom(
+	c *gin.Context,
 	requestId string,
 	tenantId int,
 	tokenId int,
@@ -65,6 +71,16 @@ func FeaturesFrom(
 		features.ToolsCount = count
 	}
 	features.HasTools = features.ToolsCount > 0
+
+	// PR2: byte-exact prefix hashes and task type guess.
+	if c != nil {
+		prefixes := ComputePrefixHashes(c, relayFormat)
+		features.PrefixHashSystem = prefixes.System
+		features.PrefixHashTools = prefixes.Tools
+		features.PrefixHashPrefix = prefixes.Prefix
+	}
+	features.TaskTypeGuess = GuessTaskType(meta)
+	features.TaskTypeGuessVer = TaskTypeGuessVersion
 
 	return features
 }

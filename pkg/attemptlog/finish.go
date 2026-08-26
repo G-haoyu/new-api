@@ -118,6 +118,12 @@ func (a *Attempt) buildRecord(
 		RelayFormat:    a.features.RelayFormat,
 		RequestPath:    a.features.RequestPath,
 
+		PrefixHashSystem: a.features.PrefixHashSystem,
+		PrefixHashTools:  a.features.PrefixHashTools,
+		PrefixHashPrefix: a.features.PrefixHashPrefix,
+		TaskTypeGuess:    a.features.TaskTypeGuess,
+		TaskTypeGuessVer: a.features.TaskTypeGuessVer,
+
 		InflightRequests:  a.inflightRequests,
 		InflightTokensEst: a.inflightTokensEst,
 

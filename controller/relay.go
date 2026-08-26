@@ -183,6 +183,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	attemptScope := attemptlog.BeginRequest(attemptlog.FeaturesFrom(
+		c,
 		requestId,
 		relayInfo.UserId,
 		relayInfo.TokenId,
