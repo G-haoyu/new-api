@@ -20,18 +20,18 @@ func BenchmarkComputePrefixHashes_8KB(b *testing.B) {
 	}
 }
 
-func BenchmarkBlockChainHash_8KB(b *testing.B) {
+func BenchmarkSparseChainHash_8KB(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = blockChainHash(benchBody8KB)
+		_ = sparseChainHash(benchBody8KB)
 	}
 }
 
-func BenchmarkBlockChainHash_100KB(b *testing.B) {
+func BenchmarkSparseChainHash_100KB(b *testing.B) {
 	big := strings.Repeat("a", 100*1024)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = blockChainHash([]byte(big))
+		_ = sparseChainHash([]byte(big))
 	}
 }
 
@@ -52,7 +52,7 @@ func BenchmarkGuessTaskType(b *testing.B) {
 
 // Large-body benchmarks model the 1M-context era: 200K/300K/600K/1200K byte
 // bodies correspond roughly to 150K/256K/500K/1M token contexts. The dominant
-// cost is blockChainHash (O(body/256) SHA256 calls); gjson extraction adds an
+// cost is sparseChainHash (O(log(body)) SHA256 calls); gjson extraction adds an
 // O(body) streaming parse. These tell us whether telemetry stays negligible at
 // extreme prompt sizes.
 var benchSizes = []struct {
@@ -76,7 +76,7 @@ func BenchmarkBlockChainHash_Large(b *testing.B) {
 		b.Run(sz.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = blockChainHash(data)
+				_ = sparseChainHash(data)
 			}
 		})
 	}

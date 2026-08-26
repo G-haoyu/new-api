@@ -11,11 +11,21 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// BlockBytes is the chunk size for prefix block-chain hashing. Smaller blocks
-// give finer prefix-match granularity at the cost of more hashes per request.
-// 256 bytes ≈ 50-100 tokens, coarse enough to bound index memory yet fine
-// enough to distinguish prefix boundaries in agent conversations.
-const BlockBytes = 256
+// sparseBlockSizes defines the fixed exponential sampling schedule for prefix
+// hashing. Block sizes double after the first two 256-byte blocks, giving
+// fine-grained matching near the start (system + tools + first message) and
+// coarse coverage for conversation history. The schedule is the same for all
+// body sizes, so absolute byte positions are consistent: a 200KB body and a
+// 1.2MB body sharing the first 200KB produce the same initial block hashes.
+//
+// Coverage: 256+256+512+1024+...+32MB ≈ 64MB, far beyond any realistic prompt.
+var sparseBlockSizes = func() []int {
+	sizes := []int{256, 256}
+	for size := 512; size <= 32*1024*1024; size *= 2 {
+		sizes = append(sizes, size)
+	}
+	return sizes
+}()
 
 // hashHex is SHA-256 truncated to 16 hex characters (64 bits). 64 bits keeps
 // collision probability negligible for training-scale clustering while saving
@@ -28,22 +38,27 @@ func hashHex(data []byte) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// blockChainHash splits data into BlockBytes-sized blocks and computes a
-// chained hash: h[0] = SHA256(block[0]), h[i] = SHA256(h[i-1] || block[i]).
-// The chain preserves prefix matching: two requests sharing the first K blocks
-// share h[0..K-1], so the training pipeline can walk chains to find the
-// longest common prefix without knowing block boundaries in advance.
+// sparseChainHash hashes data at fixed exponential positions using a chained
+// scheme: h[0] = SHA256(block[0]), h[i] = SHA256(h[i-1] || block[i]). The chain
+// preserves prefix matching: two bodies sharing the first K bytes share all
+// block hashes whose offset+size <= K.
 //
-// The last partial block is included verbatim (not padded, not dropped) so
-// that identical full prompts always produce identical chains.
-func blockChainHash(data []byte) string {
+// The last partial block (when the body doesn't fill the scheduled size) is
+// included verbatim so identical full bodies always produce identical chains.
+// For a 1.2MB body this produces ~13 hashes (vs ~4700 for dense 256-byte
+// blocks), and the output is ~208 bytes (vs ~75KB).
+func sparseChainHash(data []byte) string {
 	if len(data) == 0 {
 		return ""
 	}
 	var sb strings.Builder
 	var prevHash []byte
-	for i := 0; i < len(data); i += BlockBytes {
-		end := i + BlockBytes
+	offset := 0
+	for _, blockSize := range sparseBlockSizes {
+		if offset >= len(data) {
+			break
+		}
+		end := offset + blockSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -51,10 +66,11 @@ func blockChainHash(data []byte) string {
 		if prevHash != nil {
 			h.Write(prevHash)
 		}
-		h.Write(data[i:end])
+		h.Write(data[offset:end])
 		sum := h.Sum(nil)
 		sb.WriteString(hex.EncodeToString(sum[:8]))
 		prevHash = sum
+		offset = end
 	}
 	return sb.String()
 }
@@ -69,65 +85,57 @@ type PrefixHashes struct {
 	Prefix string
 }
 
-// ComputePrefixHashes extracts the prompt-relevant raw bytes from the request
-// body via gjson and hashes them. gjson .Raw returns the original JSON bytes
-// including whitespace, so two requests that differ only in JSON formatting
-// (spaces, key order) may hash differently — which is correct for byte-exact
-// prefix tracking.
-//
-// The canonical concatenation order is system → tools → messages, matching the
-// order an upstream model ingests the prompt. For OpenAI chat the system
-// prompt lives inside the messages array, so the system field is empty there.
+// ComputePrefixHashes extracts system and tools raw bytes via gjson (using
+// Result.Index for zero-copy slicing into the original body) and hashes them
+// individually. The prefix hash covers the entire raw body via sparseChainHash
+// — no gjson extraction for messages, avoiding the dominant memory cost on
+// large contexts. The raw body includes non-prompt fields (model, temperature,
+// etc.), but for large bodies these are <0.01% and constant per-agent, so
+// cross-request prefix matching is unaffected.
 func ComputePrefixHashes(body []byte, relayFormat types.RelayFormat) PrefixHashes {
 	if len(body) == 0 {
 		return PrefixHashes{}
 	}
 
-	var system, tools, messages []byte
+	var systemPath, toolsPath string
 	switch relayFormat {
 	case types.RelayFormatOpenAI:
-		// System lives inside messages (role=system or role=developer).
-		// gjson doesn't support OR in path queries, so try both separately.
+		// System lives inside messages; try both roles.
 		if r := gjson.GetBytes(body, `messages.#(role=system).content`); r.Exists() {
-			system = []byte(r.Raw)
+			systemPath = `messages.#(role=system).content`
+		} else if r := gjson.GetBytes(body, `messages.#(role=developer).content`); r.Exists() {
+			systemPath = `messages.#(role=developer).content`
 		}
-		if len(system) == 0 {
-			if r := gjson.GetBytes(body, `messages.#(role=developer).content`); r.Exists() {
-				system = []byte(r.Raw)
-			}
-		}
-		tools = rawOrNil(gjson.GetBytes(body, "tools"))
-		messages = rawOrNil(gjson.GetBytes(body, "messages"))
+		toolsPath = "tools"
 	case types.RelayFormatClaude:
-		system = rawOrNil(gjson.GetBytes(body, "system"))
-		tools = rawOrNil(gjson.GetBytes(body, "tools"))
-		messages = rawOrNil(gjson.GetBytes(body, "messages"))
+		systemPath = "system"
+		toolsPath = "tools"
 	case types.RelayFormatGemini:
-		system = rawOrNil(gjson.GetBytes(body, "systemInstruction"))
-		tools = rawOrNil(gjson.GetBytes(body, "tools"))
-		messages = rawOrNil(gjson.GetBytes(body, "contents"))
+		systemPath = "systemInstruction"
+		toolsPath = "tools"
 	case types.RelayFormatOpenAIResponses:
-		system = rawOrNil(gjson.GetBytes(body, "instructions"))
-		tools = rawOrNil(gjson.GetBytes(body, "tools"))
-		messages = rawOrNil(gjson.GetBytes(body, "input"))
+		systemPath = "instructions"
+		toolsPath = "tools"
 	default:
 		return PrefixHashes{}
 	}
 
-	fullPrompt := concatRaw(system, tools, messages)
 	return PrefixHashes{
-		System: hashHex(system),
-		Tools:  hashHex(tools),
-		Prefix: blockChainHash(fullPrompt),
+		System: hashHex(extractRaw(body, systemPath)),
+		Tools:  hashHex(extractRaw(body, toolsPath)),
+		Prefix: sparseChainHash(body),
 	}
 }
 
-// rawOrNil returns the raw bytes of a gjson result, or nil if the result does
-// not exist or is an empty value (null, empty array, empty string). gjson .Raw
-// includes quotes/brackets/whitespace verbatim. Treating `[]` and `null` as
-// absent matches the semantics that "no tools" and "tools: []" should both
-// produce an empty hash.
-func rawOrNil(r gjson.Result) []byte {
+// extractRaw returns the raw JSON bytes of a gjson path result, slicing the
+// original body via Result.Index to avoid a copy. Falls back to []byte(r.Raw)
+// (one copy) when Index is unavailable. Returns nil for absent, null, empty
+// array, or empty string values.
+func extractRaw(body []byte, path string) []byte {
+	if path == "" {
+		return nil
+	}
+	r := gjson.GetBytes(body, path)
 	if !r.Exists() {
 		return nil
 	}
@@ -135,23 +143,12 @@ func rawOrNil(r gjson.Result) []byte {
 	if raw == "[]" || raw == "null" || raw == "\"\"" {
 		return nil
 	}
+	// Zero-copy slice into the original body when gjson recorded the offset.
+	if r.Index > 0 && r.Index+len(raw) <= len(body) {
+		return body[r.Index : r.Index+len(raw)]
+	}
+	// Fallback: one string→[]byte copy.
 	return []byte(raw)
-}
-
-// concatRaw concatenates non-nil byte slices in order.
-func concatRaw(parts ...[]byte) []byte {
-	var total int
-	for _, p := range parts {
-		total += len(p)
-	}
-	if total == 0 {
-		return nil
-	}
-	buf := make([]byte, 0, total)
-	for _, p := range parts {
-		buf = append(buf, p...)
-	}
-	return buf
 }
 
 // RawBodyBytes returns the raw HTTP request body via the replayable body
