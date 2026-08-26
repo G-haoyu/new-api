@@ -63,18 +63,6 @@ type RelayAttempt struct {
 	CacheRatio      *float64 `json:"cache_ratio"`
 	ModelPrice      *float64 `json:"model_price"`
 
-	/* Reserved and intentionally always null: the subsystems these describe do
-	   not exist in this gateway. Columns exist so the schema stays stable if
-	   they are ever implemented. See PR description for details. */
-	CircuitState     *string  `json:"circuit_state" gorm:"type:varchar(16)"`
-	RpmUsedRatio     *float64 `json:"rpm_used_ratio"`
-	TpmUsedRatio     *float64 `json:"tpm_used_ratio"`
-	SizeVsTpmRatio   *float64 `json:"size_vs_tpm_ratio"`
-	CtxHeadroomRatio *float64 `json:"ctx_headroom_ratio"`
-	SupportsCache    *bool    `json:"supports_cache"`
-	PriceIn          *float64 `json:"price_in"`
-	PriceOut         *float64 `json:"price_out"`
-
 	/* result timing, all monotonic-derived milliseconds rather than the
 	   whole-second use_time on the logs table */
 	TsStart      int64  `json:"ts_start" gorm:"bigint"`
