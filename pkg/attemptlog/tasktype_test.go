@@ -3,13 +3,8 @@ package attemptlog
 import (
 	"testing"
 
-	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 )
-
-func makeMeta(text string) *types.TokenCountMeta {
-	return &types.TokenCountMeta{CombineText: text}
-}
 
 func TestGuessTaskType(t *testing.T) {
 	cases := []struct {
@@ -76,26 +71,20 @@ func TestGuessTaskType(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.expected, GuessTaskType(makeMeta(tc.text)))
+			assert.Equal(t, tc.expected, GuessTaskType(tc.text))
 		})
 	}
 }
 
-func TestGuessTaskTypeNilMeta(t *testing.T) {
-	assert.Equal(t, TaskTypeUnknown, GuessTaskType(nil))
-}
-
-func TestGuessTaskTypeEmptyText(t *testing.T) {
-	assert.Equal(t, TaskTypeUnknown, GuessTaskType(makeMeta("")))
+func TestGuessTaskTypeEmpty(t *testing.T) {
+	assert.Equal(t, TaskTypeUnknown, GuessTaskType(""))
 }
 
 func TestTaskTypeGuessVersion(t *testing.T) {
-	// Pin the version so a rule change forces a version bump.
 	assert.Equal(t, 1, TaskTypeGuessVersion)
 }
 
 func TestGuessTaskTypeCodePriorityOverQA(t *testing.T) {
-	// A code question should be classified as code, not qa.
 	text := "how to fix this error: TypeError: undefined is not a function?"
-	assert.Equal(t, TaskTypeCode, GuessTaskType(makeMeta(text)))
+	assert.Equal(t, TaskTypeCode, GuessTaskType(text))
 }

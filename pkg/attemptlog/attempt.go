@@ -26,6 +26,13 @@ type RequestFeatures struct {
 	HasTools       bool
 	ToolsCount     int
 	Temperature    *float64
+
+	// PR2: prefix hashes (byte-exact) and task type guess.
+	PrefixHashSystem string
+	PrefixHashTools  string
+	PrefixHashPrefix string
+	TaskTypeGuess    string
+	TaskTypeGuessVer int
 }
 
 // RequestScope is the per-request handle returned by BeginRequest.

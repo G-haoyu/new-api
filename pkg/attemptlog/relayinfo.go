@@ -72,14 +72,18 @@ func FeaturesFrom(
 	}
 	features.HasTools = features.ToolsCount > 0
 
-	// PR2: byte-exact prefix hashes and task type guess.
+	// PR2: byte-exact prefix hashes and task type guess. Read the raw body
+	// once and feed it to both extractors.
 	if c != nil {
-		prefixes := ComputePrefixHashes(c, relayFormat)
+		body := RawBodyBytes(c)
+		prefixes := ComputePrefixHashes(body, relayFormat)
 		features.PrefixHashSystem = prefixes.System
 		features.PrefixHashTools = prefixes.Tools
 		features.PrefixHashPrefix = prefixes.Prefix
+		features.TaskTypeGuess = GuessTaskType(LastUserText(body, relayFormat))
+	} else {
+		features.TaskTypeGuess = GuessTaskType("")
 	}
-	features.TaskTypeGuess = GuessTaskType(meta)
 	features.TaskTypeGuessVer = TaskTypeGuessVersion
 
 	return features

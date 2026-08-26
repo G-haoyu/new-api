@@ -2,8 +2,6 @@ package attemptlog
 
 import (
 	"strings"
-
-	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
 // TaskTypeGuessVersion is bumped whenever the classification rules change, so
@@ -22,15 +20,15 @@ const (
 	TaskTypeUnknown   = "unknown"
 )
 
-// GuessTaskType applies simple keyword/pattern heuristics to the combined
-// request text. It is a feature, not a target: the rules are deliberately
-// explainable and cheap so they can be versioned and re-derived. When no
-// text is available (token counting disabled), it returns "unknown".
-func GuessTaskType(meta *types.TokenCountMeta) string {
-	if meta == nil || meta.CombineText == "" {
+// GuessTaskType applies simple keyword/pattern heuristics to the last user
+// message text. It is a feature, not a target: the rules are deliberately
+// explainable and cheap so they can be versioned and re-derived. An empty
+// string returns "unknown".
+func GuessTaskType(text string) string {
+	if text == "" {
 		return TaskTypeUnknown
 	}
-	text := strings.ToLower(meta.CombineText)
+	text = strings.ToLower(text)
 
 	if isCode(text) {
 		return TaskTypeCode
@@ -49,10 +47,6 @@ func GuessTaskType(meta *types.TokenCountMeta) string {
 	}
 	if isQA(text) {
 		return TaskTypeQA
-	}
-	// Short messages with no distinguishing markers are chat.
-	if len(meta.CombineText) < 80 {
-		return TaskTypeChat
 	}
 	return TaskTypeChat
 }
