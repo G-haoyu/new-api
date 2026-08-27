@@ -134,8 +134,12 @@ func toolsCountOf(request dto.Request) (int, bool) {
 //
 // RelayInfo initializes FirstResponseTime to one second before the request
 // start so that HasSendResponse can act as a sentinel. Callers must not read the
-// raw field: this returns nil when no content chunk was ever produced, which is
-// what distinguishes "no first token" from "first token at time zero".
+// raw field: this returns nil when the sentinel never fired, which is what
+// distinguishes "no response" from "response at time zero".
+//
+// The relay layer stamps this on the first chunk of any shape, including role
+// openers and pings, so it is a fallback rather than the TTFT measurement. It is
+// also never reset between retries. resolveFirstTokenTime handles both caveats.
 func FirstTokenTimeOf(info RelayInfoView, firstResponseTime time.Time) *time.Time {
 	if info == nil || !info.HasSendResponse() {
 		return nil
