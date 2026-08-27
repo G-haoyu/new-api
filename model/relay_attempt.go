@@ -51,10 +51,6 @@ type RelayAttempt struct {
 	TaskTypeGuess    string `json:"task_type_guess" gorm:"type:varchar(32)"`
 	TaskTypeGuessVer int    `json:"task_type_guess_ver"`
 
-	/* channel state snapshot, sampled before this attempt was dispatched */
-	InflightRequests  int `json:"inflight_requests"`
-	InflightTokensEst int `json:"inflight_tokens_est"`
-
 	/* pricing, as the ratios this gateway actually bills on.
 	   price_in/price_out below stay null: billing here is a per-model-name ratio,
 	   not a per-token unit price, so a unit price cannot be derived honestly. */

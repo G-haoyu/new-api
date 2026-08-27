@@ -506,8 +506,6 @@ CREATE TABLE IF NOT EXISTS relay_attempts (
 	prefix_hash_prefix String DEFAULT '',
 	task_type_guess String DEFAULT '',
 	task_type_guess_ver Int32 DEFAULT 0,
-	inflight_requests Int32 DEFAULT 0,
-	inflight_tokens_est Int32 DEFAULT 0,
 	model_ratio Nullable(Float64),
 	completion_ratio Nullable(Float64),
 	group_ratio Nullable(Float64),

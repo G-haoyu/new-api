@@ -70,9 +70,6 @@ type Attempt struct {
 	attemptIndex int
 	startTime    time.Time
 
-	inflightRequests  int
-	inflightTokensEst int
-
 	pricing *Pricing
 
 	// annotated by NoteUpstream, from the upstream request layer
@@ -110,30 +107,22 @@ func BeginRequest(features RequestFeatures) *RequestScope {
 	return &RequestScope{features: features, active: true}
 }
 
-// BeginAttempt starts an attempt against a channel and registers it as
-// in-flight. It also samples the channel's load as it was immediately before
-// this attempt joined, which is the value a routing model needs.
-//
-// The returned Attempt is stored on the gin context so the upstream request
-// layer and the billing layer can annotate it. Finish must be called exactly
-// once for every non-nil return, otherwise the in-flight counter leaks.
+// BeginAttempt starts an attempt against a channel. The returned Attempt is
+// stored on the gin context so the upstream request layer and the billing
+// layer can annotate it. Finish must be called exactly once for every non-nil
+// return.
 func (s *RequestScope) BeginAttempt(c *gin.Context, attemptIndex int, target ChannelTarget, pricing *Pricing) *Attempt {
 	if s == nil || !s.active {
 		return nil
 	}
 
-	inflightRequests, inflightTokens := readInflight(target.ChannelId)
-	addInflight(target.ChannelId, s.features.InputTokensEst)
-
 	attempt := &Attempt{
-		features:          s.features,
-		target:            target,
-		attemptId:         common.GetUUID(),
-		attemptIndex:      attemptIndex,
-		startTime:         time.Now(),
-		inflightRequests:  inflightRequests,
-		inflightTokensEst: inflightTokens,
-		pricing:           pricing,
+		features:     s.features,
+		target:       target,
+		attemptId:    common.GetUUID(),
+		attemptIndex: attemptIndex,
+		startTime:    time.Now(),
+		pricing:      pricing,
 	}
 
 	if c != nil {
