@@ -10,8 +10,9 @@ package model
 // Pointer columns mean "not observed", which is deliberately distinct from a
 // zero value. A nil Temperature means the client never sent one; a zero
 // Temperature means the client explicitly asked for deterministic sampling.
-// A nil TtftMs means no content chunk ever arrived. Anything consuming this
-// table for training must not conflate the two.
+// A nil TtftMs means no content chunk ever arrived, which for a stream is a
+// finding rather than missing data: the upstream sent only openers, pings or
+// usage. Anything consuming this table for training must not conflate the two.
 type RelayAttempt struct {
 	Id        int64 `json:"id" gorm:"primaryKey"`
 	CreatedAt int64 `json:"created_at" gorm:"bigint;index:idx_relay_attempts_created_at"`

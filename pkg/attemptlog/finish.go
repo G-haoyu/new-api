@@ -23,10 +23,12 @@ type FinishInput struct {
 	HTTPStatus int
 	// StreamEndReason is StreamStatus.EndReason, empty for non-stream attempts.
 	StreamEndReason string
-	// FirstTokenTime is when the first content chunk was produced, or nil when
-	// none ever was. Callers must resolve the relay layer's sentinel value
-	// before passing it here.
-	FirstTokenTime *time.Time
+	// RelayFirstResponseTime is the relay layer's own first-response timestamp,
+	// or nil when it never fired. It is a fallback: it is stamped on the first
+	// chunk of any shape, so it is only used when chunk inspection could not
+	// reach a verdict. Callers must resolve the relay layer's sentinel value
+	// before passing it here. See resolveFirstTokenTime.
+	RelayFirstResponseTime *time.Time
 	// StreamChunks is the number of upstream chunks received.
 	StreamChunks int
 	// UpstreamModelName is the model the channel actually sent upstream (after
@@ -59,7 +61,8 @@ func (a *Attempt) Finish(c *gin.Context, in FinishInput) {
 		httpStatus = in.HTTPStatus
 	}
 
-	sentFirstToken := in.FirstTokenTime != nil
+	firstTokenTime := a.resolveFirstTokenTime(in.RelayFirstResponseTime)
+	sentFirstToken := firstTokenTime != nil
 	classifyIn := ClassifyInput{
 		Err:             in.Err,
 		InternalErrCode: in.InternalErrCode,
@@ -71,13 +74,49 @@ func (a *Attempt) Finish(c *gin.Context, in FinishInput) {
 	}
 
 	outcome := Classify(classifyIn)
-	record := a.buildRecord(c, in, classifyIn, outcome, httpStatus, endTime)
+	record := a.buildRecord(c, in, classifyIn, outcome, httpStatus, endTime, firstTokenTime)
 	a.mu.Unlock()
 
 	if c != nil {
 		common.SetContextKey(c, constant.ContextKeyRelayAttempt, nil)
 	}
 	enqueue(record)
+}
+
+// resolveFirstTokenTime decides when this attempt produced its first token.
+// Caller must hold a.mu.
+//
+// Chunk inspection wins when it reached a verdict, because the relay layer
+// stamps its own timestamp on the first chunk of any shape and therefore counts
+// role openers, pings and usage-only chunks as content.
+//
+// A nil result is meaningful, not missing: it says the stream was readable and
+// produced nothing, which is what lets the classifier reach empty_response
+// instead of stream_interrupted.
+//
+// The fallback is rejected when it predates this attempt. RelayInfo is
+// per-request and its first-response time is never reset between retries, so
+// after an attempt streams content and fails, the next attempt would otherwise
+// inherit a timestamp from before it began.
+func (a *Attempt) resolveFirstTokenTime(fallback *time.Time) *time.Time {
+	if !a.firstContentTime.IsZero() {
+		t := a.firstContentTime
+		return &t
+	}
+
+	// Chunks arrived, every one was recognized, none carried content.
+	if !a.firstChunkTime.IsZero() && !a.sawUnknownChunk {
+		return nil
+	}
+
+	// Either no chunk was ever observed (non-SSE paths such as image
+	// generation, which never call NoteChunk) or the upstream speaks an
+	// envelope we cannot read. Trust the relay layer rather than discard the
+	// measurement.
+	if fallback == nil || fallback.Before(a.startTime) {
+		return nil
+	}
+	return fallback
 }
 
 // buildRecord assembles the row. Caller must hold a.mu.
@@ -88,6 +127,7 @@ func (a *Attempt) buildRecord(
 	outcome string,
 	httpStatus int,
 	endTime time.Time,
+	firstTokenTime *time.Time,
 ) *model.RelayAttempt {
 	totalMs := endTime.Sub(a.startTime).Milliseconds()
 
@@ -144,10 +184,10 @@ func (a *Attempt) buildRecord(
 		record.HttpStatus = &httpStatus
 	}
 
-	if in.FirstTokenTime != nil {
-		tsFirst := in.FirstTokenTime.UnixMilli()
+	if firstTokenTime != nil {
+		tsFirst := firstTokenTime.UnixMilli()
 		record.TsFirstToken = &tsFirst
-		if ttft := in.FirstTokenTime.Sub(a.startTime).Milliseconds(); ttft >= 0 {
+		if ttft := firstTokenTime.Sub(a.startTime).Milliseconds(); ttft >= 0 {
 			record.TtftMs = &ttft
 		}
 	}
@@ -168,7 +208,7 @@ func (a *Attempt) buildRecord(
 	}
 
 	a.applyPricing(record)
-	a.applyUsage(record, in, endTime)
+	a.applyUsage(record, endTime, firstTokenTime)
 
 	if c != nil {
 		if reason := common.GetContextKeyString(c, constant.ContextKeyFinishReason); reason != "" {
@@ -202,7 +242,7 @@ func (a *Attempt) applyPricing(record *model.RelayAttempt) {
 // applyUsage records settled usage. Nothing is written when billing never
 // reported usage for this attempt, which is the normal case for a failed
 // attempt: nil there means "never settled", not "zero tokens".
-func (a *Attempt) applyUsage(record *model.RelayAttempt, in FinishInput, endTime time.Time) {
+func (a *Attempt) applyUsage(record *model.RelayAttempt, endTime time.Time, firstTokenTime *time.Time) {
 	if !a.usageKnown {
 		return
 	}
@@ -218,10 +258,10 @@ func (a *Attempt) applyUsage(record *model.RelayAttempt, in FinishInput, endTime
 	// Output rate is measured over the generation window, i.e. after the first
 	// token. Using total elapsed time instead would fold queueing and TTFT into
 	// the rate and understate a fast-but-slow-to-start channel.
-	if in.FirstTokenTime == nil || a.outputTokens <= 0 {
+	if firstTokenTime == nil || a.outputTokens <= 0 {
 		return
 	}
-	generationMs := endTime.Sub(*in.FirstTokenTime).Milliseconds()
+	generationMs := endTime.Sub(*firstTokenTime).Milliseconds()
 	if generationMs <= 0 {
 		return
 	}

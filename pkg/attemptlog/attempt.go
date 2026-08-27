@@ -81,6 +81,14 @@ type Attempt struct {
 	httpStatus     int
 	retryAfterHint *int
 
+	// annotated by NoteChunk, from the stream reading layer. Holding these per
+	// attempt rather than on RelayInfo is what keeps a retry from inheriting
+	// the previous attempt's first-token time: RelayInfo lives for the whole
+	// request, this object does not.
+	firstChunkTime   time.Time
+	firstContentTime time.Time
+	sawUnknownChunk  bool
+
 	// annotated by NoteUsage, from the billing layer
 	usageKnown      bool
 	inputTokens     int

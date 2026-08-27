@@ -304,9 +304,9 @@ func addUsedChannel(c *gin.Context, channelId int) {
 // relay layer, including the sentinel semantics of FirstResponseTime.
 func finishInputFor(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) attemptlog.FinishInput {
 	in := attemptlog.FinishInput{
-		FirstTokenTime:    attemptlog.FirstTokenTimeOf(info, info.FirstResponseTime),
-		StreamChunks:      info.ReceivedResponseCount,
-		UpstreamModelName: info.GetUpstreamModelName(),
+		RelayFirstResponseTime: attemptlog.FirstTokenTimeOf(info, info.FirstResponseTime),
+		StreamChunks:           info.ReceivedResponseCount,
+		UpstreamModelName:      info.GetUpstreamModelName(),
 	}
 
 	if info.StreamStatus != nil {
