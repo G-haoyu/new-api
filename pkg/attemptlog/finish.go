@@ -39,8 +39,7 @@ type FinishInput struct {
 }
 
 // Finish closes the attempt, classifies its outcome, and enqueues the record.
-// It is safe to call on a nil Attempt, and it detaches the in-flight counter
-// exactly once even if called more than once.
+// It is safe to call on a nil Attempt, and it is idempotent.
 func (a *Attempt) Finish(c *gin.Context, in FinishInput) {
 	if a == nil {
 		return
@@ -54,7 +53,6 @@ func (a *Attempt) Finish(c *gin.Context, in FinishInput) {
 	a.finished = true
 
 	endTime := time.Now()
-	removeInflight(a.target.ChannelId, a.features.InputTokensEst)
 
 	httpStatus := a.httpStatus
 	if in.HTTPStatus != 0 {
@@ -163,9 +161,6 @@ func (a *Attempt) buildRecord(
 		PrefixHashPrefix: a.features.PrefixHashPrefix,
 		TaskTypeGuess:    a.features.TaskTypeGuess,
 		TaskTypeGuessVer: a.features.TaskTypeGuessVer,
-
-		InflightRequests:  a.inflightRequests,
-		InflightTokensEst: a.inflightTokensEst,
 
 		TsStart: a.startTime.UnixMilli(),
 		TsEnd:   endTime.UnixMilli(),
