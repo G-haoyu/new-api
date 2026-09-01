@@ -250,16 +250,28 @@ func (a *Attempt) applyUsage(record *model.RelayAttempt, endTime time.Time, firs
 		record.ReasoningTokens = &a.reasoningTokens
 	}
 
-	// Output rate is measured over the generation window, i.e. after the first
-	// token. Using total elapsed time instead would fold queueing and TTFT into
-	// the rate and understate a fast-but-slow-to-start channel.
-	if firstTokenTime == nil || a.outputTokens <= 0 {
+	if a.outputTokens <= 0 {
 		return
 	}
-	generationMs := endTime.Sub(*firstTokenTime).Milliseconds()
-	if generationMs <= 0 {
+
+	// Streaming: the rate is measured over the generation window, i.e. after
+	// the first token. Using total elapsed time instead would fold queueing and
+	// TTFT into the rate and understate a fast-but-slow-to-start channel.
+	// Non-streaming: every token arrives with the single response, so the only
+	// honest window is the whole attempt.
+	var windowMs int64
+	if firstTokenTime != nil {
+		windowMs = endTime.Sub(*firstTokenTime).Milliseconds()
+	} else if !a.features.IsStream {
+		windowMs = record.TotalMs
+	} else {
 		return
 	}
-	tps := float64(a.outputTokens) / (float64(generationMs) / 1000)
+	// Sub-millisecond windows (cached instant replies) truncate to 0 ms:
+	// report NULL rather than 0 or Inf.
+	if windowMs <= 0 {
+		return
+	}
+	tps := float64(a.outputTokens) / (float64(windowMs) / 1000)
 	record.TpsActual = &tps
 }

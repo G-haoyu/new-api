@@ -219,3 +219,78 @@ func TestBuildRecordOmitsTtftForContentFreeStream(t *testing.T) {
 	assert.Nil(t, record.TsFirstToken)
 	assert.Nil(t, record.TpsActual)
 }
+
+// TestBuildRecordTpsForNonStream covers the non-streaming rate, whose window is
+// the whole attempt (ts_end - ts_start) because every token arrives with the
+// single response.
+func TestBuildRecordTpsForNonStream(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name         string
+		end          time.Time
+		outputTokens int
+		wantTps      float64
+	}{
+		{
+			name:         "whole-attempt window",
+			end:          start.Add(4 * time.Second),
+			outputTokens: 100,
+			wantTps:      25.0,
+		},
+		{
+			name:         "sub-millisecond window reports NULL, not Inf",
+			end:          start,
+			outputTokens: 100,
+		},
+		{
+			name:         "zero output reports NULL",
+			end:          start.Add(4 * time.Second),
+			outputTokens: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			attempt := &Attempt{
+				startTime:    start,
+				features:     RequestFeatures{IsStream: false},
+				usageKnown:   true,
+				outputTokens: tc.outputTokens,
+			}
+
+			record := attempt.buildRecord(nil, FinishInput{}, ClassifyInput{}, OutcomeOK, 200, tc.end, nil)
+
+			assert.Equal(t, tc.end.UnixMilli()-start.UnixMilli(), record.TsEnd-record.TsStart)
+			if tc.wantTps == 0 {
+				assert.Nil(t, record.TpsActual)
+				return
+			}
+			require.NotNil(t, record.TpsActual)
+			assert.InDelta(t, tc.wantTps, *record.TpsActual, 0.001)
+		})
+	}
+}
+
+// TestBuildRecordTpsSkipsStreamWithoutFirstToken pins the non-stream branch
+// gate: an attempt that claims to stream but never produced a first token keeps
+// TpsActual NULL instead of silently switching to the whole-attempt window.
+func TestBuildRecordTpsSkipsStreamWithoutFirstToken(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	attempt := &Attempt{
+		startTime:    start,
+		features:     RequestFeatures{IsStream: true},
+		usageKnown:   true,
+		outputTokens: 100,
+	}
+
+	record := attempt.buildRecord(nil, FinishInput{}, ClassifyInput{}, OutcomeOK, 200, start.Add(4*time.Second), nil)
+
+	assert.Nil(t, record.TpsActual)
+}
