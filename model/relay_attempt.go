@@ -34,7 +34,7 @@ type RelayAttempt struct {
 	CharsLatin     int      `json:"chars_latin"`
 	CharsHan       int      `json:"chars_han"`
 	CharsOther     int      `json:"chars_other"`
-	MaxTokensReq   *int     `json:"max_tokens_req"`
+	MaxTokensReq   *int32   `json:"max_tokens_req"`
 	IsStream       bool     `json:"is_stream"`
 	HasTools       bool     `json:"has_tools"`
 	ToolsCount     int      `json:"tools_count"`
@@ -74,10 +74,10 @@ type RelayAttempt struct {
 	/* result labels */
 	Ok              bool   `json:"ok"`
 	OutcomeCode     string `json:"outcome_code" gorm:"type:varchar(32);index:idx_relay_attempts_outcome_code"`
-	HttpStatus      *int   `json:"http_status"`
+	HttpStatus      *int32 `json:"http_status"`
 	UpstreamErrHash string `json:"upstream_err_hash" gorm:"type:varchar(16);index:idx_relay_attempts_err_hash"`
 	TerminatedBy    string `json:"terminated_by" gorm:"type:varchar(16)"`
-	RetryAfterHint  *int   `json:"retry_after_hint"`
+	RetryAfterHint  *int32 `json:"retry_after_hint"`
 
 	// InternalErrCode is this gateway's own error code, kept alongside
 	// OutcomeCode so a misclassification can be traced back to its source.
@@ -85,14 +85,14 @@ type RelayAttempt struct {
 	StreamEndReason string `json:"stream_end_reason" gorm:"type:varchar(16)"`
 
 	/* usage and cost */
-	InputTokensActual  *int     `json:"input_tokens_actual"`
-	OutputTokensActual *int     `json:"output_tokens_actual"`
-	CachedTokens       *int     `json:"cached_tokens"`
-	ReasoningTokens    *int     `json:"reasoning_tokens"`
+	InputTokensActual  *int32   `json:"input_tokens_actual"`
+	OutputTokensActual *int32   `json:"output_tokens_actual"`
+	CachedTokens       *int32   `json:"cached_tokens"`
+	ReasoningTokens    *int32   `json:"reasoning_tokens"`
 	FinishReason       string   `json:"finish_reason" gorm:"type:varchar(32)"`
-	CostActual         *int     `json:"cost_actual"`
+	CostActual         *int32   `json:"cost_actual"`
 	TpsActual          *float64 `json:"tps_actual"`
-	StreamChunks       *int     `json:"stream_chunks"`
+	StreamChunks       *int32   `json:"stream_chunks"`
 }
 
 func (RelayAttempt) TableName() string {
