@@ -9,6 +9,28 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// int32Ptr converts the int values used by the relay/billing layers to the
+// exact type expected by ClickHouse Int32 columns. The range guard prevents a
+// 64-bit host value from wrapping before it reaches telemetry storage.
+func int32Ptr(value int) *int32 {
+	const (
+		minInt32 = -1 << 31
+		maxInt32 = 1<<31 - 1
+	)
+	if int64(value) < minInt32 || int64(value) > maxInt32 {
+		return nil
+	}
+	converted := int32(value)
+	return &converted
+}
+
+func int32PtrValue(value *int) *int32 {
+	if value == nil {
+		return nil
+	}
+	return int32Ptr(*value)
+}
+
 // FinishInput carries the attempt's terminal state.
 type FinishInput struct {
 	// Err is the gateway's error for this attempt, nil on success.
@@ -146,7 +168,7 @@ func (a *Attempt) buildRecord(
 		CharsLatin:     a.features.Chars.Latin,
 		CharsHan:       a.features.Chars.Han,
 		CharsOther:     a.features.Chars.Other,
-		MaxTokensReq:   a.features.MaxTokensReq,
+		MaxTokensReq:   int32PtrValue(a.features.MaxTokensReq),
 		IsStream:       a.features.IsStream,
 		HasTools:       a.features.HasTools,
 		ToolsCount:     a.features.ToolsCount,
@@ -172,11 +194,11 @@ func (a *Attempt) buildRecord(
 		TerminatedBy:    TerminatedBy(classifyIn, outcome),
 		InternalErrCode: in.InternalErrCode,
 		StreamEndReason: in.StreamEndReason,
-		RetryAfterHint:  a.retryAfterHint,
+		RetryAfterHint:  int32PtrValue(a.retryAfterHint),
 	}
 
 	if httpStatus != 0 {
-		record.HttpStatus = &httpStatus
+		record.HttpStatus = int32Ptr(httpStatus)
 	}
 
 	if firstTokenTime != nil {
@@ -198,8 +220,7 @@ func (a *Attempt) buildRecord(
 	}
 
 	if in.StreamChunks > 0 {
-		chunks := in.StreamChunks
-		record.StreamChunks = &chunks
+		record.StreamChunks = int32Ptr(in.StreamChunks)
 	}
 
 	a.applyPricing(record)
@@ -242,12 +263,12 @@ func (a *Attempt) applyUsage(record *model.RelayAttempt, endTime time.Time, firs
 		return
 	}
 
-	record.InputTokensActual = &a.inputTokens
-	record.OutputTokensActual = &a.outputTokens
-	record.CachedTokens = &a.cachedTokens
-	record.CostActual = &a.costActual
+	record.InputTokensActual = int32Ptr(a.inputTokens)
+	record.OutputTokensActual = int32Ptr(a.outputTokens)
+	record.CachedTokens = int32Ptr(a.cachedTokens)
+	record.CostActual = int32Ptr(a.costActual)
 	if a.reasoningTokens > 0 {
-		record.ReasoningTokens = &a.reasoningTokens
+		record.ReasoningTokens = int32Ptr(a.reasoningTokens)
 	}
 
 	if a.outputTokens <= 0 {

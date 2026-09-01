@@ -294,3 +294,50 @@ func TestBuildRecordTpsSkipsStreamWithoutFirstToken(t *testing.T) {
 
 	assert.Nil(t, record.TpsActual)
 }
+
+func TestBuildRecordUsesClickHouseInt32PointerTypes(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Second)
+	maxTokens := 4096
+	retryAfter := 3
+
+	attempt := &Attempt{
+		startTime: start,
+		features: RequestFeatures{
+			MaxTokensReq: &maxTokens,
+		},
+		retryAfterHint: &retryAfter,
+		usageKnown:     true,
+		inputTokens:    100,
+		outputTokens:   40,
+		cachedTokens:   10,
+		costActual:     20,
+	}
+
+	record := attempt.buildRecord(nil, FinishInput{}, ClassifyInput{}, OutcomeOK, 200, end, nil)
+
+	require.NotNil(t, record.MaxTokensReq)
+	require.NotNil(t, record.HttpStatus)
+	require.NotNil(t, record.RetryAfterHint)
+	require.NotNil(t, record.InputTokensActual)
+	require.NotNil(t, record.OutputTokensActual)
+	require.NotNil(t, record.CachedTokens)
+	require.NotNil(t, record.CostActual)
+	assert.Equal(t, int32(4096), *record.MaxTokensReq)
+	assert.Equal(t, int32(200), *record.HttpStatus)
+	assert.Equal(t, int32(3), *record.RetryAfterHint)
+	assert.Equal(t, int32(100), *record.InputTokensActual)
+	assert.Equal(t, int32(40), *record.OutputTokensActual)
+	assert.Equal(t, int32(10), *record.CachedTokens)
+	assert.Equal(t, int32(20), *record.CostActual)
+}
+
+func TestInt32PtrRejectsOutOfRangeValues(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, int32Ptr(1<<31))
+	assert.Nil(t, int32Ptr(-1<<31-1))
+	assert.Equal(t, int32(1<<31-1), *int32Ptr(1<<31 - 1))
+}
