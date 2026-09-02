@@ -38,6 +38,25 @@ const (
 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
+	// ContextKeySchedulerKeyIndex is an optional per-attempt hint supplied by
+	// the Scheduler. When present, new-api must consume exactly this enabled
+	// multi-key slot instead of applying its local random/polling policy.
+	ContextKeySchedulerKeyIndex          ContextKey = "scheduler_key_index"
+	ContextKeySchedulerCandidates        ContextKey = "scheduler_candidates"
+	ContextKeySchedulerDecisionID        ContextKey = "scheduler_decision_id"
+	ContextKeySchedulerScoreVersion      ContextKey = "scheduler_score_version"
+	ContextKeySchedulerPreferenceVersion ContextKey = "scheduler_preference_version"
+	ContextKeySchedulerReservationID     ContextKey = "scheduler_reservation_id"
+	ContextKeySchedulerShadowMatch       ContextKey = "scheduler_shadow_match"
+	ContextKeySchedulerUpstreamModel     ContextKey = "scheduler_upstream_model"
+	ContextKeySchedulerAttemptReported   ContextKey = "scheduler_attempt_reported"
+	ContextKeySchedulerInputTokens       ContextKey = "scheduler_input_tokens"
+	ContextKeySchedulerOutputTokens      ContextKey = "scheduler_output_tokens"
+	ContextKeySchedulerUsageUnverified   ContextKey = "scheduler_usage_unverified"
+	ContextKeySchedulerEstimatedTokens   ContextKey = "scheduler_estimated_tokens"
+	ContextKeySchedulerStreamStarted     ContextKey = "scheduler_stream_started"
+	ContextKeySchedulerTTFTMS            ContextKey = "scheduler_ttft_ms"
+	ContextKeySchedulerWorkload          ContextKey = "scheduler_workload"
 
 	ContextKeyAutoGroup           ContextKey = "auto_group"
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"

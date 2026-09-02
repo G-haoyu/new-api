@@ -338,6 +338,9 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.remark?.trim() ||
     values.priority ||
     values.weight ||
+    values.rpm ||
+    values.tpm ||
+    values.max_concurrency ||
     values.proxy?.trim() ||
     values.system_prompt?.trim() ||
     values.force_format ||
@@ -739,6 +742,9 @@ export function ChannelMutateDrawer({
   const currentAdvancedCustom = form.watch('advanced_custom')
   const currentPriority = form.watch('priority')
   const currentWeight = form.watch('weight')
+  const currentRPM = form.watch('rpm')
+  const currentTPM = form.watch('tpm')
+  const currentMaxConcurrency = form.watch('max_concurrency')
   const currentTestModel = form.watch('test_model')
   const currentAutoBan = form.watch('auto_ban')
   const currentTag = form.watch('tag')
@@ -1006,6 +1012,9 @@ export function ChannelMutateDrawer({
   const routingStrategyConfigured = Boolean(
     currentPriority ||
     currentWeight ||
+    currentRPM ||
+    currentTPM ||
+    currentMaxConcurrency ||
     currentTestModel?.trim() ||
     (currentAutoBan ?? 1) !== 1
   )
@@ -3687,6 +3696,89 @@ export function ChannelMutateDrawer({
                                     </FormControl>
                                     <FormDescription>
                                       {t(FIELD_DESCRIPTIONS.WEIGHT)}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='rpm'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('RPM Limit')}</FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Requests per minute; 0 means unlimited'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='tpm'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('TPM Limit')}</FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Tokens per minute; 0 means unlimited'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='max_concurrency'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>
+                                      {t('Max Concurrency')}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Concurrent requests; 0 means unlimited'
+                                      )}
                                     </FormDescription>
                                     <FormMessage />
                                   </FormItem>

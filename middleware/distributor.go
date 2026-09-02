@@ -26,8 +26,9 @@ import (
 )
 
 type ModelRequest struct {
-	Model string `json:"model"`
-	Group string `json:"group,omitempty"`
+	Model    string `json:"model"`
+	Group    string `json:"group,omitempty"`
+	Workload string `json:"workload,omitempty"`
 }
 
 func Distribute() func(c *gin.Context) {
@@ -38,6 +39,9 @@ func Distribute() func(c *gin.Context) {
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
+		}
+		if workload := strings.TrimSpace(modelRequest.Workload); workload != "" {
+			common.SetContextKey(c, constant.ContextKeySchedulerWorkload, workload)
 		}
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
@@ -99,6 +103,15 @@ func Distribute() func(c *gin.Context) {
 						}
 						usingGroup = playgroundRequest.Group
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
+					}
+				}
+				// In Enforced mode the Scheduler must provide the candidate chain
+				// before Relay starts; a native-only selection is not a valid
+				// fallback. Shadow mode remains best-effort below.
+				if service.SchedulerEnforcedForRequest(c) {
+					if err := service.RunSchedulerShadow(c, modelRequest.Model, usingGroup); err != nil {
+						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "scheduler unavailable: "+err.Error(), types.ErrorCodeModelNotFound)
+						return
 					}
 				}
 
@@ -163,7 +176,19 @@ func Distribute() func(c *gin.Context) {
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		// Shadow is opt-in and best-effort. Native routing remains authoritative;
+		// the Scheduler response is retained as metadata for comparison only.
+		if !ok && channel != nil && !service.SchedulerEnforcedForRequest(c) && !common.GetContextKeyBool(c, constant.ContextKeySchedulerAttemptReported) {
+			if err := service.RunSchedulerShadow(c, modelRequest.Model, common.GetContextKeyString(c, constant.ContextKeyUsingGroup)); err != nil {
+				common.SysLog(fmt.Sprintf("scheduler shadow skipped: %v", err))
+			}
+		}
 		c.Next()
+		if !ok && channel != nil && !common.GetContextKeyBool(c, constant.ContextKeySchedulerAttemptReported) {
+			if err := service.ReportSchedulerShadowAttempt(c); err != nil {
+				common.SysLog(fmt.Sprintf("scheduler shadow attempt report skipped: %v", err))
+			}
+		}
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
@@ -219,12 +244,16 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 		return nil, errors.New("invalid JSON request body")
 	}
 
-	values := gjson.GetManyBytes(requestBody, "model", "group")
+	values := gjson.GetManyBytes(requestBody, "model", "group", "workload")
 	model, err := getJSONStringValue(values[0], "model")
 	if err != nil {
 		return nil, err
 	}
 	group, err := getJSONStringValue(values[1], "group")
+	if err != nil {
+		return nil, err
+	}
+	workload, err := getJSONStringValue(values[2], "workload")
 	if err != nil {
 		return nil, err
 	}
@@ -235,8 +264,9 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	c.Request.Body = io.NopCloser(storage)
 
 	return &ModelRequest{
-		Model: model,
-		Group: group,
+		Model:    model,
+		Group:    group,
+		Workload: workload,
 	}, nil
 }
 
@@ -463,7 +493,17 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	var key string
+	var index int
+	var newAPIError *types.NewAPIError
+	if schedulerIndex, ok := common.GetContextKeyType[int](c, constant.ContextKeySchedulerKeyIndex); ok {
+		key, index, newAPIError = channel.GetEnabledKeyAt(schedulerIndex)
+		// The hint is per attempt. Consume it so a later native retry does not
+		// accidentally reuse a stale Scheduler selection.
+		c.Set(string(constant.ContextKeySchedulerKeyIndex), nil)
+	} else {
+		key, index, newAPIError = channel.GetNextEnabledKey()
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}
