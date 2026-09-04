@@ -57,6 +57,18 @@ const (
 	ContextKeySchedulerStreamStarted     ContextKey = "scheduler_stream_started"
 	ContextKeySchedulerTTFTMS            ContextKey = "scheduler_ttft_ms"
 	ContextKeySchedulerWorkload          ContextKey = "scheduler_workload"
+	// ContextKeySchedulerAllowedChannelIDs carries the effective group/model
+	// channel scope into the Scheduler request. An empty-but-present slice
+	// means the group has no usable channel and must not fall back globally.
+	ContextKeySchedulerAllowedChannelIDs ContextKey = "scheduler_allowed_channel_ids"
+	// ContextKeySchedulerAffinityChannelID carries the currently bound
+	// conversation-affinity channel into an enforced Scheduler request.
+	ContextKeySchedulerAffinityChannelID ContextKey = "scheduler_affinity_channel_id"
+	// ContextKeySchedulerEmergencyNative marks a request that explicitly fell
+	// back to native routing because Scheduler infrastructure was unavailable.
+	ContextKeySchedulerEmergencyNative ContextKey = "scheduler_emergency_native"
+	ContextKeySchedulerDegradedReason  ContextKey = "scheduler_degraded_reason"
+	ContextKeySchedulerFailureReason   ContextKey = "scheduler_failure_reason"
 
 	ContextKeyAutoGroup           ContextKey = "auto_group"
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"

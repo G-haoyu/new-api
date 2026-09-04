@@ -160,12 +160,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if canonicalReservationEstimate < tokens { // integer overflow guard
 		canonicalReservationEstimate = tokens
 	}
-	if err := service.ResizeSchedulerReservation(c, canonicalReservationEstimate); err != nil {
-		if service.SchedulerEnforcedForRequest(c) {
-			newAPIError = types.NewError(fmt.Errorf("scheduler reservation resize failed: %w", err), types.ErrorCodeGetChannelFailed, types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
-			return
+	// Channels without a finite TPM gate cannot benefit from a resize. Avoid a
+	// second synchronous Scheduler round trip for the common unlimited-capacity
+	// case; finite-TPM channels retain the safety correction below.
+	if service.SchedulerReservationResizeRequired(c) {
+		if err := service.ResizeSchedulerReservation(c, canonicalReservationEstimate); err != nil {
+			if service.SchedulerEnforcedForRequest(c) {
+				newAPIError = types.NewError(fmt.Errorf("scheduler reservation resize failed: %w", err), types.ErrorCodeGetChannelFailed, types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+				return
+			}
+			logger.LogDebug(c, "scheduler reservation resize skipped: %v", err)
 		}
-		logger.LogDebug(c, "scheduler reservation resize skipped: %v", err)
 	}
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, tokens, meta)
@@ -262,7 +267,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			inputTokens = common.GetContextKeyInt(c, constant.ContextKeyPromptTokens)
 		}
 		outputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerOutputTokens)
-		if err := service.ReportSchedulerAttempt(c, service.SchedulerEndpointForChannel(c, channel.Id), retryParam.GetRetry()+1, attemptStatus, newAPIError == nil, streamStarted, inputTokens, outputTokens); err != nil {
+		if err := service.ReportSchedulerAttemptAsync(c, service.SchedulerEndpointForChannel(c, channel.Id), retryParam.GetRetry()+1, attemptStatus, newAPIError == nil, streamStarted, inputTokens, outputTokens); err != nil {
 			logger.LogDebug(c, "scheduler attempt report skipped: %v", err)
 		}
 		service.FinishSchedulerRuntime(channel.Id, keyIndex, runtimeWindow, attemptStatus, inputTokens, outputTokens, time.Since(attemptStart))
@@ -367,7 +372,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		}
 		return channel, nil
 	}
-	if service.SchedulerEnforcedForRequest(c) {
+	if service.SchedulerEnforcedForRequest(c) && !service.SchedulerEmergencyNativeActive(c) {
 		return nil, types.NewError(fmt.Errorf("scheduler candidate chain exhausted at retry %d", retryParam.GetRetry()), types.ErrorCodeGetChannelFailed)
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)

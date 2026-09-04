@@ -33,8 +33,14 @@ const schedulerConfig: SchedulerConfig = {
   canary_salt: 'scheduler-v2',
   shadow_timeout_ms: 100,
   runtime_prefix: 'new-api:scheduler:runtime',
+  runtime_high_watermark: 0.8,
   signing_secret_set: false,
   catalog_token_set: true,
+  emergency_native_routing: false,
+  emergency_max_duration_seconds: 600,
+  emergency_groups: '',
+  emergency_models: '',
+  emergency_local_switch: false,
 }
 
 type ApiMethod = (

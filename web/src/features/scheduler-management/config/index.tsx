@@ -66,9 +66,18 @@ const defaults: SchedulerConfig = {
   canary_salt: 'scheduler-v2',
   shadow_timeout_ms: 100,
   runtime_prefix: 'new-api:scheduler:runtime',
+  runtime_high_watermark: 0.8,
   signing_secret_set: false,
   catalog_token_set: false,
+  emergency_native_routing: false,
+  emergency_max_duration_seconds: 600,
+  emergency_groups: '',
+  emergency_models: '',
+  emergency_local_switch: false,
 }
+
+const clampRuntimeHighWatermark = (value: number) =>
+  Number.isFinite(value) ? Math.min(0.99, Math.max(0.5, value)) : 0.8
 
 export function SchedulerConfigPage() {
   const { t } = useTranslation()
@@ -89,8 +98,12 @@ export function SchedulerConfigPage() {
   const save = async () => {
     setSaving(true)
     try {
+      const runtimeHighWatermark = clampRuntimeHighWatermark(
+        config.runtime_high_watermark
+      )
       const response = await updateSchedulerConfig({
         ...config,
+        runtime_high_watermark: runtimeHighWatermark,
         token: schedulerToken || undefined,
         signing_secret: signingSecret || undefined,
       })
@@ -137,6 +150,68 @@ export function SchedulerConfigPage() {
                 checked={config.enabled}
                 onCheckedChange={(enabled) => setPendingEnabled(enabled)}
               />
+            </div>
+            <div className='space-y-4 rounded-lg border p-4'>
+              <div className='flex items-center justify-between gap-4'>
+                <div>
+                  <Label>{t('Emergency native routing')}</Label>
+                  <p className='text-muted-foreground text-sm'>
+                    {t(
+                      'When Scheduler has a transient outage, enforced traffic may temporarily use native Priority/Weight routing.'
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  checked={config.emergency_native_routing}
+                  onCheckedChange={(emergency_native_routing) =>
+                    setConfig({ ...config, emergency_native_routing })
+                  }
+                />
+              </div>
+              <p className='text-muted-foreground text-sm'>
+                {config.emergency_local_switch
+                  ? t('The local process switch is enabled.')
+                  : t(
+                      'The local process switch is disabled. Set SCHEDULER_EMERGENCY_NATIVE_ROUTING=true and restart new-api before this option can take effect.'
+                    )}
+              </p>
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <div className='space-y-2'>
+                  <Label>{t('Maximum emergency duration (seconds)')}</Label>
+                  <Input
+                    type='number'
+                    min={1}
+                    max={86400}
+                    value={config.emergency_max_duration_seconds}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        emergency_max_duration_seconds: Number(e.target.value),
+                      })
+                    }
+                  />
+                </div>
+                <div className='space-y-2'>
+                  <Label>{t('Allowed groups')}</Label>
+                  <Input
+                    placeholder={t('Comma-separated; blank allows all groups')}
+                    value={config.emergency_groups}
+                    onChange={(e) =>
+                      setConfig({ ...config, emergency_groups: e.target.value })
+                    }
+                  />
+                </div>
+                <div className='space-y-2 sm:col-span-2'>
+                  <Label>{t('Allowed models')}</Label>
+                  <Input
+                    placeholder={t('Comma-separated; blank allows all models')}
+                    value={config.emergency_models}
+                    onChange={(e) =>
+                      setConfig({ ...config, emergency_models: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
             </div>
             <div className='grid gap-4 sm:grid-cols-2'>
               <div className='space-y-2 sm:col-span-2'>
@@ -216,6 +291,35 @@ export function SchedulerConfigPage() {
                     setConfig({ ...config, runtime_prefix: e.target.value })
                   }
                 />
+              </div>
+              <div className='space-y-2'>
+                <Label>{t('Runtime soft watermark')}</Label>
+                <Input
+                  type='number'
+                  min={0.5}
+                  max={0.99}
+                  step={0.05}
+                  value={config.runtime_high_watermark}
+                  onChange={(e) =>
+                    setConfig({
+                      ...config,
+                      runtime_high_watermark: Number(e.target.value),
+                    })
+                  }
+                  onBlur={() =>
+                    setConfig({
+                      ...config,
+                      runtime_high_watermark: clampRuntimeHighWatermark(
+                        config.runtime_high_watermark
+                      ),
+                    })
+                  }
+                />
+                <p className='text-muted-foreground text-sm'>
+                  {t(
+                    'Endpoints at or above this load ratio are demoted before lower-load endpoints. Hard capacity remains 100%.'
+                  )}
+                </p>
               </div>
             </div>
             <div className='space-y-3 rounded-lg border p-4'>

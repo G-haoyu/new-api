@@ -17,40 +17,56 @@ import (
 )
 
 const (
-	schedulerEnabledKey         = "SchedulerEnabled"
-	schedulerURLKey             = "SchedulerURL"
-	schedulerTokenKey           = "SchedulerToken"
-	schedulerModeKey            = "SchedulerMode"
-	schedulerCanaryPercentKey   = "SchedulerCanaryPercent"
-	schedulerCanarySaltKey      = "SchedulerCanarySalt"
-	schedulerShadowTimeoutMSKey = "SchedulerShadowTimeoutMS"
-	schedulerRuntimePrefixKey   = "SchedulerRuntimePrefix"
-	schedulerSigningSecretKey   = "SchedulerSigningSecret"
+	schedulerEnabledKey              = "SchedulerEnabled"
+	schedulerURLKey                  = "SchedulerURL"
+	schedulerTokenKey                = "SchedulerToken"
+	schedulerModeKey                 = "SchedulerMode"
+	schedulerCanaryPercentKey        = "SchedulerCanaryPercent"
+	schedulerCanarySaltKey           = "SchedulerCanarySalt"
+	schedulerShadowTimeoutMSKey      = "SchedulerShadowTimeoutMS"
+	schedulerRuntimePrefixKey        = "SchedulerRuntimePrefix"
+	schedulerHighWatermarkKey        = "SchedulerRuntimeHighWatermark"
+	schedulerSigningSecretKey        = "SchedulerSigningSecret"
+	schedulerEmergencyNativeKey      = "SchedulerEmergencyNativeRouting"
+	schedulerEmergencyMaxDurationKey = "SchedulerEmergencyMaxDurationSeconds"
+	schedulerEmergencyGroupsKey      = "SchedulerEmergencyGroups"
+	schedulerEmergencyModelsKey      = "SchedulerEmergencyModels"
 )
 
 type SchedulerConfigResponse struct {
-	Enabled          bool   `json:"enabled"`
-	URL              string `json:"url"`
-	TokenSet         bool   `json:"token_set"`
-	Mode             string `json:"mode"`
-	CanaryPercent    int    `json:"canary_percent"`
-	CanarySalt       string `json:"canary_salt"`
-	ShadowTimeoutMS  int    `json:"shadow_timeout_ms"`
-	RuntimePrefix    string `json:"runtime_prefix"`
-	SigningSecretSet bool   `json:"signing_secret_set"`
-	CatalogTokenSet  bool   `json:"catalog_token_set"`
+	Enabled                     bool    `json:"enabled"`
+	URL                         string  `json:"url"`
+	TokenSet                    bool    `json:"token_set"`
+	Mode                        string  `json:"mode"`
+	CanaryPercent               int     `json:"canary_percent"`
+	CanarySalt                  string  `json:"canary_salt"`
+	ShadowTimeoutMS             int     `json:"shadow_timeout_ms"`
+	RuntimePrefix               string  `json:"runtime_prefix"`
+	RuntimeHighWatermark        float64 `json:"runtime_high_watermark"`
+	SigningSecretSet            bool    `json:"signing_secret_set"`
+	CatalogTokenSet             bool    `json:"catalog_token_set"`
+	EmergencyNativeRouting      bool    `json:"emergency_native_routing"`
+	EmergencyMaxDurationSeconds int     `json:"emergency_max_duration_seconds"`
+	EmergencyGroups             string  `json:"emergency_groups"`
+	EmergencyModels             string  `json:"emergency_models"`
+	EmergencyLocalSwitch        bool    `json:"emergency_local_switch"`
 }
 
 type SchedulerConfigUpdateRequest struct {
-	Enabled         *bool   `json:"enabled"`
-	URL             *string `json:"url"`
-	Token           *string `json:"token"`
-	Mode            *string `json:"mode"`
-	CanaryPercent   *int    `json:"canary_percent"`
-	CanarySalt      *string `json:"canary_salt"`
-	ShadowTimeoutMS *int    `json:"shadow_timeout_ms"`
-	RuntimePrefix   *string `json:"runtime_prefix"`
-	SigningSecret   *string `json:"signing_secret"`
+	Enabled                     *bool    `json:"enabled"`
+	URL                         *string  `json:"url"`
+	Token                       *string  `json:"token"`
+	Mode                        *string  `json:"mode"`
+	CanaryPercent               *int     `json:"canary_percent"`
+	CanarySalt                  *string  `json:"canary_salt"`
+	ShadowTimeoutMS             *int     `json:"shadow_timeout_ms"`
+	RuntimePrefix               *string  `json:"runtime_prefix"`
+	RuntimeHighWatermark        *float64 `json:"runtime_high_watermark"`
+	SigningSecret               *string  `json:"signing_secret"`
+	EmergencyNativeRouting      *bool    `json:"emergency_native_routing"`
+	EmergencyMaxDurationSeconds *int     `json:"emergency_max_duration_seconds"`
+	EmergencyGroups             *string  `json:"emergency_groups"`
+	EmergencyModels             *string  `json:"emergency_models"`
 }
 
 func schedulerConfigValue(key, envKey, fallback string) string {
@@ -72,17 +88,31 @@ var getenv = func(key string) string { return os.Getenv(key) }
 func schedulerConfigResponse() SchedulerConfigResponse {
 	percent, _ := strconv.Atoi(schedulerConfigValue(schedulerCanaryPercentKey, "SCHEDULER_CANARY_PERCENT", "0"))
 	timeout, _ := strconv.Atoi(schedulerConfigValue(schedulerShadowTimeoutMSKey, "SCHEDULER_SHADOW_TIMEOUT_MS", "100"))
+	highWatermark, err := strconv.ParseFloat(schedulerConfigValue(schedulerHighWatermarkKey, "SCHEDULER_RUNTIME_HIGH_WATERMARK", "0.8"), 64)
+	if err != nil || highWatermark <= 0 || highWatermark >= 1 {
+		highWatermark = 0.8
+	}
+	emergencyDuration, _ := strconv.Atoi(schedulerConfigValue(schedulerEmergencyMaxDurationKey, "", "600"))
+	if emergencyDuration <= 0 {
+		emergencyDuration = 600
+	}
 	return SchedulerConfigResponse{
-		Enabled:          schedulerConfigValue(schedulerEnabledKey, "SCHEDULER_ENABLED", "false") == "true",
-		URL:              strings.TrimRight(schedulerConfigValue(schedulerURLKey, "SCHEDULER_URL", ""), "/"),
-		TokenSet:         schedulerConfigValue(schedulerTokenKey, "SCHEDULER_TOKEN", "") != "",
-		Mode:             strings.ToLower(schedulerConfigValue(schedulerModeKey, "SCHEDULER_MODE", "shadow")),
-		CanaryPercent:    percent,
-		CanarySalt:       schedulerConfigValue(schedulerCanarySaltKey, "SCHEDULER_CANARY_SALT", "scheduler-v2"),
-		ShadowTimeoutMS:  timeout,
-		RuntimePrefix:    schedulerConfigValue(schedulerRuntimePrefixKey, "SCHEDULER_RUNTIME_PREFIX", service.SchedulerRuntimePrefix),
-		SigningSecretSet: schedulerConfigValue(schedulerSigningSecretKey, "SCHEDULER_SIGNING_SECRET", "") != "",
-		CatalogTokenSet:  strings.TrimSpace(getenv("SCHEDULER_CATALOG_TOKEN")) != "",
+		Enabled:                     schedulerConfigValue(schedulerEnabledKey, "SCHEDULER_ENABLED", "false") == "true",
+		URL:                         strings.TrimRight(schedulerConfigValue(schedulerURLKey, "SCHEDULER_URL", ""), "/"),
+		TokenSet:                    schedulerConfigValue(schedulerTokenKey, "SCHEDULER_TOKEN", "") != "",
+		Mode:                        strings.ToLower(schedulerConfigValue(schedulerModeKey, "SCHEDULER_MODE", "shadow")),
+		CanaryPercent:               percent,
+		CanarySalt:                  schedulerConfigValue(schedulerCanarySaltKey, "SCHEDULER_CANARY_SALT", "scheduler-v2"),
+		ShadowTimeoutMS:             timeout,
+		RuntimePrefix:               schedulerConfigValue(schedulerRuntimePrefixKey, "SCHEDULER_RUNTIME_PREFIX", service.SchedulerRuntimePrefix),
+		RuntimeHighWatermark:        highWatermark,
+		SigningSecretSet:            schedulerConfigValue(schedulerSigningSecretKey, "SCHEDULER_SIGNING_SECRET", "") != "",
+		CatalogTokenSet:             strings.TrimSpace(getenv("SCHEDULER_CATALOG_TOKEN")) != "",
+		EmergencyNativeRouting:      schedulerConfigValue(schedulerEmergencyNativeKey, "", "false") == "true",
+		EmergencyMaxDurationSeconds: emergencyDuration,
+		EmergencyGroups:             strings.TrimSpace(schedulerConfigValue(schedulerEmergencyGroupsKey, "", "")),
+		EmergencyModels:             strings.TrimSpace(schedulerConfigValue(schedulerEmergencyModelsKey, "", "")),
+		EmergencyLocalSwitch:        strings.EqualFold(strings.TrimSpace(getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")), "true") || strings.TrimSpace(getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")) == "1",
 	}
 }
 
@@ -148,6 +178,29 @@ func UpdateSchedulerConfig(c *gin.Context) {
 			return
 		}
 		values[schedulerRuntimePrefixKey] = value
+	}
+	if req.RuntimeHighWatermark != nil {
+		if *req.RuntimeHighWatermark <= 0 || *req.RuntimeHighWatermark >= 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Runtime 软水位必须在 0 和 1 之间"})
+			return
+		}
+		values[schedulerHighWatermarkKey] = strconv.FormatFloat(*req.RuntimeHighWatermark, 'f', -1, 64)
+	}
+	if req.EmergencyNativeRouting != nil {
+		values[schedulerEmergencyNativeKey] = strconv.FormatBool(*req.EmergencyNativeRouting)
+	}
+	if req.EmergencyMaxDurationSeconds != nil {
+		if *req.EmergencyMaxDurationSeconds < 1 || *req.EmergencyMaxDurationSeconds > 86400 {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "应急降级最长时长必须在 1-86400 秒之间"})
+			return
+		}
+		values[schedulerEmergencyMaxDurationKey] = strconv.Itoa(*req.EmergencyMaxDurationSeconds)
+	}
+	if req.EmergencyGroups != nil {
+		values[schedulerEmergencyGroupsKey] = strings.TrimSpace(*req.EmergencyGroups)
+	}
+	if req.EmergencyModels != nil {
+		values[schedulerEmergencyModelsKey] = strings.TrimSpace(*req.EmergencyModels)
 	}
 	if err := model.UpdateOptionsBulk(values); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})

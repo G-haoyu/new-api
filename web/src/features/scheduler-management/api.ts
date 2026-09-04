@@ -27,8 +27,14 @@ export interface SchedulerConfig {
   canary_salt: string
   shadow_timeout_ms: number
   runtime_prefix: string
+  runtime_high_watermark: number
   signing_secret_set: boolean
   catalog_token_set: boolean
+  emergency_native_routing: boolean
+  emergency_max_duration_seconds: number
+  emergency_groups: string
+  emergency_models: string
+  emergency_local_switch: boolean
 }
 
 export interface SchedulerMonitor {

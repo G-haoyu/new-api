@@ -205,7 +205,15 @@ func InitOptionMap() {
 	if common.OptionMap["SchedulerRuntimePrefix"] == "" {
 		common.OptionMap["SchedulerRuntimePrefix"] = "new-api:scheduler:runtime"
 	}
+	common.OptionMap["SchedulerRuntimeHighWatermark"] = os.Getenv("SCHEDULER_RUNTIME_HIGH_WATERMARK")
+	if common.OptionMap["SchedulerRuntimeHighWatermark"] == "" {
+		common.OptionMap["SchedulerRuntimeHighWatermark"] = "0.8"
+	}
 	common.OptionMap["SchedulerSigningSecret"] = os.Getenv("SCHEDULER_SIGNING_SECRET")
+	common.OptionMap["SchedulerEmergencyNativeRouting"] = "false"
+	common.OptionMap["SchedulerEmergencyMaxDurationSeconds"] = "600"
+	common.OptionMap["SchedulerEmergencyGroups"] = ""
+	common.OptionMap["SchedulerEmergencyModels"] = ""
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

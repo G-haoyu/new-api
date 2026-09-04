@@ -20,25 +20,35 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 )
 
 var ErrSchedulerPolicyUnavailable = errors.New("scheduler effective policy is unavailable")
+var ErrSchedulerTemporarilyUnavailable = errors.New("scheduler temporarily unavailable")
 
 // schedulerDefaultMode is the platform default routing mode applied when a user
 // has no explicit routing preference for the requested model.
 const schedulerDefaultMode = "balanced"
 
+const schedulerDefaultRuntimeHighWatermark = 0.8
+
 type SchedulerClientConfig struct {
-	Enabled       bool
-	BaseURL       string
-	Token         string
-	SigningSecret string
-	Timeout       time.Duration
-	Mode          string
-	CanaryPercent int
-	CanarySalt    string
+	Enabled              bool
+	BaseURL              string
+	Token                string
+	SigningSecret        string
+	Timeout              time.Duration
+	Mode                 string
+	CanaryPercent        int
+	CanarySalt           string
+	RuntimeHighWatermark float64
+	EmergencyNative      bool
+	EmergencyMaxDuration time.Duration
+	EmergencyGroups      []string
+	EmergencyModels      []string
+	EmergencyLocalSwitch bool
 }
 type SchedulerCandidate struct {
 	EndpointID    string   `json:"endpoint_id"`
@@ -49,16 +59,19 @@ type SchedulerCandidate struct {
 	Reason        []string `json:"reason"`
 }
 type schedulerRequest struct {
-	RequestID            string         `json:"request_id"`
-	UserID               int64          `json:"user_id,omitempty"`
-	TokenID              int64          `json:"token_id,omitempty"`
-	Group                string         `json:"group,omitempty"`
-	Model                string         `json:"model"`
-	Workload             string         `json:"workload,omitempty"`
-	Capabilities         map[string]any `json:"capabilities"`
-	Policy               map[string]any `json:"policy"`
-	EstimatedInputTokens int            `json:"estimated_input_tokens"`
-	MaxOutputTokens      int            `json:"max_output_tokens"`
+	RequestID              string         `json:"request_id"`
+	UserID                 int64          `json:"user_id,omitempty"`
+	TokenID                int64          `json:"token_id,omitempty"`
+	Group                  string         `json:"group,omitempty"`
+	Model                  string         `json:"model"`
+	Workload               string         `json:"workload,omitempty"`
+	Capabilities           map[string]any `json:"capabilities"`
+	Policy                 map[string]any `json:"policy"`
+	EstimatedInputTokens   int            `json:"estimated_input_tokens"`
+	MaxOutputTokens        int            `json:"max_output_tokens"`
+	AllowedChannelIDs      []int          `json:"allowed_channel_ids"`
+	PreferredChannelID     int            `json:"preferred_channel_id,omitempty"`
+	AffinityKeyFingerprint string         `json:"affinity_key_fingerprint,omitempty"`
 }
 
 type schedulerRequestShape struct {
@@ -120,6 +133,128 @@ var schedulerConfigState struct {
 	config SchedulerClientConfig
 }
 
+var schedulerAttemptAsyncSlots = make(chan struct{}, 256)
+
+const (
+	schedulerCircuitFailureThreshold = 3
+	schedulerCircuitProbeInterval    = 10 * time.Second
+	schedulerEmergencyMaxDuration    = 10 * time.Minute
+)
+
+var schedulerCircuitState struct {
+	sync.Mutex
+	failures       int
+	failedAt       time.Time
+	openedAt       time.Time
+	halfOpen       bool
+	probeSuccesses int
+}
+
+func resetSchedulerCircuit() {
+	schedulerCircuitState.Lock()
+	schedulerCircuitState.failures = 0
+	schedulerCircuitState.failedAt = time.Time{}
+	schedulerCircuitState.openedAt = time.Time{}
+	schedulerCircuitState.halfOpen = false
+	schedulerCircuitState.probeSuccesses = 0
+	schedulerCircuitState.Unlock()
+}
+
+func schedulerCircuitAllows(now time.Time) bool {
+	schedulerCircuitState.Lock()
+	defer schedulerCircuitState.Unlock()
+	if schedulerCircuitState.openedAt.IsZero() {
+		return true
+	}
+	if now.Sub(schedulerCircuitState.openedAt) < schedulerCircuitProbeInterval {
+		return false
+	}
+	if schedulerCircuitState.halfOpen {
+		return false
+	}
+	schedulerCircuitState.halfOpen = true
+	return true
+}
+
+func schedulerCircuitFailure(now time.Time) {
+	schedulerCircuitState.Lock()
+	defer schedulerCircuitState.Unlock()
+	if schedulerCircuitState.openedAt.IsZero() {
+		if schedulerCircuitState.failedAt.IsZero() {
+			schedulerCircuitState.failedAt = now
+		}
+		schedulerCircuitState.failures++
+		if schedulerCircuitState.failures >= schedulerCircuitFailureThreshold {
+			schedulerCircuitState.openedAt = now
+			schedulerCircuitState.halfOpen = false
+		}
+		return
+	}
+	schedulerCircuitState.openedAt = now
+	schedulerCircuitState.halfOpen = false
+	schedulerCircuitState.probeSuccesses = 0
+}
+
+func schedulerCircuitSuccess(now time.Time) {
+	schedulerCircuitState.Lock()
+	defer schedulerCircuitState.Unlock()
+	if !schedulerCircuitState.openedAt.IsZero() {
+		if schedulerCircuitState.halfOpen {
+			schedulerCircuitState.probeSuccesses++
+			schedulerCircuitState.halfOpen = false
+			if schedulerCircuitState.probeSuccesses >= 2 {
+				schedulerCircuitState.failures = 0
+				schedulerCircuitState.failedAt = time.Time{}
+				schedulerCircuitState.openedAt = time.Time{}
+				schedulerCircuitState.probeSuccesses = 0
+			} else {
+				// Keep the circuit open between half-open probes so only one
+				// request probes Scheduler during each interval.
+				schedulerCircuitState.openedAt = now
+			}
+		}
+		return
+	}
+	schedulerCircuitState.failures = 0
+	schedulerCircuitState.failedAt = time.Time{}
+	schedulerCircuitState.probeSuccesses = 0
+}
+
+func schedulerCircuitEmergencyActive(now time.Time, maxDuration time.Duration) bool {
+	schedulerCircuitState.Lock()
+	defer schedulerCircuitState.Unlock()
+	if schedulerCircuitState.failedAt.IsZero() {
+		return false
+	}
+	if maxDuration <= 0 {
+		maxDuration = schedulerEmergencyMaxDuration
+	}
+	return now.Sub(schedulerCircuitState.failedAt) < maxDuration
+}
+
+func isTransientSchedulerError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, ErrSchedulerTemporarilyUnavailable) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "scheduler status 502") ||
+		strings.Contains(message, "scheduler status 503") ||
+		strings.Contains(message, "scheduler status 504")
+}
+
 func SchedulerClient() SchedulerClientConfig {
 	schedulerConfigState.RLock()
 	if schedulerConfigState.loaded {
@@ -141,7 +276,26 @@ func SchedulerClient() SchedulerClientConfig {
 		if mode == "" {
 			mode = "shadow"
 		}
-		schedulerConfigState.config = SchedulerClientConfig{Enabled: schedulerOptionBool("SchedulerEnabled", "SCHEDULER_ENABLED", false), BaseURL: strings.TrimRight(strings.TrimSpace(schedulerOption("SchedulerURL", "SCHEDULER_URL", "")), "/"), Token: schedulerOption("SchedulerToken", "SCHEDULER_TOKEN", ""), SigningSecret: schedulerOption("SchedulerSigningSecret", "SCHEDULER_SIGNING_SECRET", ""), Timeout: timeout, Mode: mode, CanaryPercent: canaryPercent, CanarySalt: canarySalt}
+		highWatermark := schedulerOptionFloat("SchedulerRuntimeHighWatermark", "SCHEDULER_RUNTIME_HIGH_WATERMARK", schedulerDefaultRuntimeHighWatermark)
+		emergencyMaxDuration := time.Duration(schedulerOptionInt("SchedulerEmergencyMaxDurationSeconds", "SCHEDULER_EMERGENCY_MAX_DURATION_SECONDS", int(schedulerEmergencyMaxDuration/time.Second))) * time.Second
+		if emergencyMaxDuration <= 0 {
+			emergencyMaxDuration = schedulerEmergencyMaxDuration
+		}
+		schedulerConfigState.config = SchedulerClientConfig{
+			Enabled:       schedulerOptionBool("SchedulerEnabled", "SCHEDULER_ENABLED", false),
+			BaseURL:       strings.TrimRight(strings.TrimSpace(schedulerOption("SchedulerURL", "SCHEDULER_URL", "")), "/"),
+			Token:         schedulerOption("SchedulerToken", "SCHEDULER_TOKEN", ""),
+			SigningSecret: schedulerOption("SchedulerSigningSecret", "SCHEDULER_SIGNING_SECRET", ""),
+			Timeout:       timeout, Mode: mode, CanaryPercent: canaryPercent, CanarySalt: canarySalt,
+			RuntimeHighWatermark: highWatermark,
+			// Central enablement is persisted in OptionMap. The local process
+			// switch below is intentionally env-only and must be enabled too.
+			EmergencyNative:      schedulerOptionBool("SchedulerEmergencyNativeRouting", "", false),
+			EmergencyMaxDuration: emergencyMaxDuration,
+			EmergencyGroups:      schedulerOptionList("SchedulerEmergencyGroups"),
+			EmergencyModels:      schedulerOptionList("SchedulerEmergencyModels"),
+			EmergencyLocalSwitch: strings.EqualFold(strings.TrimSpace(os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")), "true") || os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING") == "1",
+		}
 		schedulerConfigState.loaded = true
 	}
 	return schedulerConfigState.config
@@ -179,6 +333,26 @@ func schedulerOptionBool(key, envKey string, fallback bool) bool {
 	return fallback
 }
 
+func schedulerOptionFloat(key, envKey string, fallback float64) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(schedulerOption(key, envKey, "")), 64)
+	if err != nil || value <= 0 || value >= 1 {
+		return fallback
+	}
+	return value
+}
+
+func schedulerOptionList(key string) []string {
+	value := schedulerOption(key, "", "")
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
 // ReloadSchedulerClient causes the next request to read the latest persisted
 // configuration. It is used by the admin configuration endpoint after a
 // successful atomic options update.
@@ -186,6 +360,7 @@ func ReloadSchedulerClient() {
 	schedulerConfigState.Lock()
 	schedulerConfigState.loaded = false
 	schedulerConfigState.Unlock()
+	resetSchedulerCircuit()
 }
 
 // ConfigureSchedulerClientForTest allows isolated middleware tests to opt in
@@ -195,6 +370,7 @@ func ConfigureSchedulerClientForTest(config SchedulerClientConfig) {
 	schedulerConfigState.config = config
 	schedulerConfigState.loaded = true
 	schedulerConfigState.Unlock()
+	resetSchedulerCircuit()
 }
 
 func SchedulerEnforced() bool {
@@ -237,6 +413,58 @@ func SchedulerEnforcedForRequest(c *gin.Context) bool {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(key))
 	return int(h.Sum32()%100) < percent
+}
+
+// IsSchedulerTransientUnavailable distinguishes infrastructure failures from
+// policy, permission, capacity, and invalid-response errors. Only the former
+// may enter emergency-native routing.
+func IsSchedulerTransientUnavailable(err error) bool {
+	return isTransientSchedulerError(err)
+}
+
+// SchedulerEmergencyNativeAllowed checks the central option, the local
+// process switch, the circuit window, and optional model/group allowlists.
+// The default is deliberately false so an enforced request fails closed.
+func SchedulerEmergencyNativeAllowed(modelName, group string) bool {
+	config := SchedulerClient()
+	if !config.EmergencyNative || !config.EmergencyLocalSwitch || !schedulerCircuitEmergencyActive(time.Now(), config.EmergencyMaxDuration) {
+		return false
+	}
+	if len(config.EmergencyModels) > 0 && !containsString(config.EmergencyModels, modelName) {
+		return false
+	}
+	if len(config.EmergencyGroups) > 0 && !containsString(config.EmergencyGroups, group) {
+		return false
+	}
+	return true
+}
+
+func containsString(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkSchedulerEmergency records the request-level degraded routing mode.
+// The original error is retained for diagnostics and is never exposed as a
+// native routing success signal.
+func MarkSchedulerEmergency(c *gin.Context, err error) {
+	if c == nil {
+		return
+	}
+	common.SetContextKey(c, constant.ContextKeySchedulerEmergencyNative, true)
+	common.SetContextKey(c, constant.ContextKeySchedulerDegradedReason, "scheduler_unavailable")
+	if err != nil {
+		common.SetContextKey(c, constant.ContextKeySchedulerFailureReason, err.Error())
+	}
+}
+
+func SchedulerEmergencyNativeActive(c *gin.Context) bool {
+	return c != nil && common.GetContextKeyBool(c, constant.ContextKeySchedulerEmergencyNative)
 }
 
 // RecordSchedulerUsage stores the usage reported by an upstream handler on
@@ -294,6 +522,29 @@ func ResetSchedulerAttemptMetrics(c *gin.Context) {
 	common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, 0)
 }
 
+func applySchedulerCandidateContext(c *gin.Context, candidate SchedulerCandidate) {
+	common.SetContextKey(c, constant.ContextKeySchedulerKeyIndex, candidate.KeyIndex)
+	if candidate.UpstreamModel != "" {
+		common.SetContextKey(c, constant.ContextKeySchedulerUpstreamModel, candidate.UpstreamModel)
+	}
+}
+
+// SchedulerCandidateForInitial returns the first Scheduler candidate for the
+// initial attempt. It is intentionally inert unless Enforced (including a
+// selected Canary request) is active; Shadow keeps native routing authoritative.
+func SchedulerCandidateForInitial(c *gin.Context) (SchedulerCandidate, bool) {
+	if !SchedulerEnforcedForRequest(c) {
+		return SchedulerCandidate{}, false
+	}
+	candidates, ok := common.GetContextKeyType[[]SchedulerCandidate](c, constant.ContextKeySchedulerCandidates)
+	if !ok || len(candidates) == 0 {
+		return SchedulerCandidate{}, false
+	}
+	candidate := candidates[0]
+	applySchedulerCandidateContext(c, candidate)
+	return candidate, true
+}
+
 // SchedulerCandidateForRetry is intentionally inert unless Enforced is
 // explicitly selected. It only selects metadata already obtained by Shadow;
 // Reservation re-acquisition per retry is a separate gate.
@@ -306,10 +557,7 @@ func SchedulerCandidateForRetry(c *gin.Context, retry int) (SchedulerCandidate, 
 		return SchedulerCandidate{}, false
 	}
 	candidate := candidates[retry]
-	common.SetContextKey(c, constant.ContextKeySchedulerKeyIndex, candidate.KeyIndex)
-	if candidate.UpstreamModel != "" {
-		common.SetContextKey(c, constant.ContextKeySchedulerUpstreamModel, candidate.UpstreamModel)
-	}
+	applySchedulerCandidateContext(c, candidate)
 	return candidate, true
 }
 
@@ -393,6 +641,9 @@ func ResizeSchedulerReservation(c *gin.Context, estimatedTokens int) error {
 	if estimatedTokens < 0 {
 		estimatedTokens = 0
 	}
+	if initialEstimate := common.GetContextKeyInt(c, constant.ContextKeySchedulerEstimatedTokens); initialEstimate == estimatedTokens {
+		return nil
+	}
 	decisionID := common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID)
 	reservationID := common.GetContextKeyString(c, constant.ContextKeySchedulerReservationID)
 	if decisionID == "" || reservationID == "" {
@@ -436,6 +687,24 @@ func ResizeSchedulerReservation(c *gin.Context, estimatedTokens int) error {
 	}
 	common.SetContextKey(c, constant.ContextKeySchedulerEstimatedTokens, estimatedTokens)
 	return nil
+}
+
+// SchedulerReservationResizeRequired reports whether the selected channel has
+// a finite TPM gate. With unlimited TPM there is nothing for resize to change,
+// so Enforced requests avoid a second Scheduler round trip entirely.
+func SchedulerReservationResizeRequired(c *gin.Context) bool {
+	if c == nil || !SchedulerEnforcedForRequest(c) {
+		return false
+	}
+	channelID := common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	if channelID <= 0 {
+		return true
+	}
+	channel, err := model.CacheGetChannel(channelID)
+	if err != nil || channel == nil {
+		return true
+	}
+	return channel.TPM > 0
 }
 
 // RunSchedulerShadow is best-effort by design: errors never alter native
@@ -502,6 +771,9 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if !config.Enabled || config.BaseURL == "" || config.Token == "" {
 		return nil
 	}
+	if !schedulerCircuitAllows(time.Now()) {
+		return ErrSchedulerTemporarilyUnavailable
+	}
 	if config.Timeout <= 0 {
 		config.Timeout = 100 * time.Millisecond
 	}
@@ -509,6 +781,7 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if err != nil {
 		return err
 	}
+	policy["runtime_high_watermark"] = config.RuntimeHighWatermark
 	requestID := c.GetString(common.RequestIdKey)
 	if requestID == "" {
 		requestID = common.NewRequestId()
@@ -516,7 +789,13 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	}
 	estimatedInput := common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
 	maxOutput := schedulerMaxOutputTokens(c)
-	body := schedulerRequest{RequestID: requestID, UserID: int64(c.GetInt("id")), TokenID: int64(c.GetInt("token_id")), Group: group, Model: modelName, Workload: common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload), Capabilities: schedulerCapabilities(c), Policy: policy, EstimatedInputTokens: estimatedInput, MaxOutputTokens: maxOutput}
+	body := schedulerRequest{RequestID: requestID, UserID: int64(c.GetInt("id")), TokenID: int64(c.GetInt("token_id")), Group: group, Model: modelName, Workload: common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload), Capabilities: schedulerCapabilities(c), Policy: policy, EstimatedInputTokens: estimatedInput, MaxOutputTokens: maxOutput, PreferredChannelID: common.GetContextKeyInt(c, constant.ContextKeySchedulerAffinityChannelID)}
+	if affinity, ok := GetChannelAffinityStatsContext(c); ok {
+		body.AffinityKeyFingerprint = affinity.KeyFingerprint
+	}
+	if allowed, ok := common.GetContextKeyType[[]int](c, constant.ContextKeySchedulerAllowedChannelIDs); ok {
+		body.AllowedChannelIDs = append([]int(nil), allowed...)
+	}
 	payload, err := common.Marshal(body)
 	if err != nil {
 		return err
@@ -532,11 +811,20 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	signSchedulerRequest(req, config.SigningSecret, payload)
 	resp, err := (&http.Client{Timeout: config.Timeout}).Do(req)
 	if err != nil {
+		if isTransientSchedulerError(err) {
+			schedulerCircuitFailure(time.Now())
+			return fmt.Errorf("%w: %v", ErrSchedulerTemporarilyUnavailable, err)
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("scheduler status %d", resp.StatusCode)
+		statusErr := fmt.Errorf("scheduler status %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+			schedulerCircuitFailure(time.Now())
+			return fmt.Errorf("%w: %v", ErrSchedulerTemporarilyUnavailable, statusErr)
+		}
+		return statusErr
 	}
 	var scheduled schedulerResponse
 	if err := common.DecodeJson(resp.Body, &scheduled); err != nil {
@@ -580,6 +868,7 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 		}
 	}
 	common.SetContextKey(c, constant.ContextKeySchedulerShadowMatch, match)
+	schedulerCircuitSuccess(time.Now())
 	return nil
 }
 
@@ -697,7 +986,10 @@ func ReportSchedulerShadowAttempt(c *gin.Context) error {
 
 func ReportSchedulerAttempt(c *gin.Context, endpointID string, attemptNo, statusCode int, success, streamStarted bool, inputTokens, outputTokens int) error {
 	config := SchedulerClient()
-	if !config.Enabled || config.BaseURL == "" || config.Token == "" {
+	// Shadow and non-selected Canary requests are settled by
+	// ReportSchedulerShadowAttempt, which reports the reserved first candidate
+	// rather than the native channel.
+	if !SchedulerEnforcedForRequest(c) || !config.Enabled || config.BaseURL == "" || config.Token == "" {
 		return nil
 	}
 	decisionID := common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID)
@@ -725,6 +1017,63 @@ func ReportSchedulerAttempt(c *gin.Context, endpointID string, attemptNo, status
 		common.SetContextKey(c, constant.ContextKeySchedulerAttemptReported, true)
 	}
 	return err
+}
+
+// ReportSchedulerAttemptAsync queues an Enforced attempt report so upstream
+// response completion does not wait on Scheduler I/O. Queue saturation is
+// intentionally best-effort: routing correctness is already decided, while
+// the bounded queue prevents goroutine growth during a Scheduler outage.
+func ReportSchedulerAttemptAsync(c *gin.Context, endpointID string, attemptNo, statusCode int, success, streamStarted bool, inputTokens, outputTokens int) error {
+	config := SchedulerClient()
+	if !SchedulerEnforcedForRequest(c) || !config.Enabled || config.BaseURL == "" || config.Token == "" {
+		return nil
+	}
+	decisionID := common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID)
+	if decisionID == "" || endpointID == "" {
+		return nil
+	}
+	if config.Timeout <= 0 {
+		config.Timeout = 100 * time.Millisecond
+	}
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	usageUnverified := common.GetContextKeyBool(c, constant.ContextKeySchedulerUsageUnverified)
+	if !usageUnverified && inputTokens == 0 && outputTokens == 0 && (success || streamStarted) {
+		usageUnverified = true
+	}
+	attempt := schedulerAttempt{RequestID: c.GetString(common.RequestIdKey), DecisionID: decisionID, AttemptNo: attemptNo, EndpointID: endpointID, ReservationID: common.GetContextKeyString(c, constant.ContextKeySchedulerReservationID), StatusCode: statusCode, Success: success, StreamStarted: streamStarted, LatencyMS: schedulerAttemptLatencyMS(c), TTFTMS: int64(common.GetContextKeyInt(c, constant.ContextKeySchedulerTTFTMS)), InputTokens: inputTokens, OutputTokens: outputTokens, EstimatedTokens: schedulerEstimatedTokens(c), UsageUnverified: usageUnverified}
+	if err := enqueueSchedulerAttempt(config, attempt); err != nil {
+		return err
+	}
+	common.SetContextKey(c, constant.ContextKeySchedulerAttemptReported, true)
+	return nil
+}
+
+func schedulerAttemptLatencyMS(c *gin.Context) int64 {
+	start := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	if start.IsZero() {
+		return 0
+	}
+	return time.Since(start).Milliseconds()
+}
+
+func enqueueSchedulerAttempt(config SchedulerClientConfig, attempt schedulerAttempt) error {
+	select {
+	case schedulerAttemptAsyncSlots <- struct{}{}:
+		go func() {
+			defer func() { <-schedulerAttemptAsyncSlots }()
+			if err := postSchedulerAttempt(nil, config, attempt); err != nil {
+				common.SysLog(fmt.Sprintf("scheduler async attempt report failed: %v", err))
+			}
+		}()
+		return nil
+	default:
+		// Preserve the lifecycle event under sustained pressure. The normal path
+		// is asynchronous; this bounded fallback avoids silently losing attempt
+		// diagnostics while preventing unbounded goroutine creation.
+		return postSchedulerAttempt(nil, config, attempt)
+	}
 }
 
 func schedulerEstimatedTokens(c *gin.Context) int {
