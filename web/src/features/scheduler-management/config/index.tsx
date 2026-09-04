@@ -74,6 +74,7 @@ const defaults: SchedulerConfig = {
   emergency_groups: '',
   emergency_models: '',
   emergency_local_switch: false,
+  kill_switch: false,
 }
 
 const clampRuntimeHighWatermark = (value: number) =>
@@ -127,7 +128,7 @@ export function SchedulerConfigPage() {
     )
   }
   return (
-    <Main>
+    <Main className='overflow-y-auto'>
       <div className='mx-auto w-full max-w-4xl space-y-4 p-4 sm:p-6'>
         <Card>
           <CardHeader>
@@ -197,7 +198,10 @@ export function SchedulerConfigPage() {
                     placeholder={t('Comma-separated; blank allows all groups')}
                     value={config.emergency_groups}
                     onChange={(e) =>
-                      setConfig({ ...config, emergency_groups: e.target.value })
+                      setConfig({
+                        ...config,
+                        emergency_groups: e.target.value,
+                      })
                     }
                   />
                 </div>
@@ -207,11 +211,30 @@ export function SchedulerConfigPage() {
                     placeholder={t('Comma-separated; blank allows all models')}
                     value={config.emergency_models}
                     onChange={(e) =>
-                      setConfig({ ...config, emergency_models: e.target.value })
+                      setConfig({
+                        ...config,
+                        emergency_models: e.target.value,
+                      })
                     }
                   />
                 </div>
               </div>
+            </div>
+            <div className='border-destructive/50 flex items-center justify-between rounded-lg border p-4'>
+              <div>
+                <Label>{t('Scheduler kill switch')}</Label>
+                <p className='text-muted-foreground text-sm'>
+                  {t(
+                    'Immediately stop new Scheduler decisions and use native routing. In-flight Scheduler reservations continue to be released.'
+                  )}
+                </p>
+              </div>
+              <Switch
+                checked={config.kill_switch}
+                onCheckedChange={(kill_switch) =>
+                  setConfig({ ...config, kill_switch })
+                }
+              />
             </div>
             <div className='grid gap-4 sm:grid-cols-2'>
               <div className='space-y-2 sm:col-span-2'>

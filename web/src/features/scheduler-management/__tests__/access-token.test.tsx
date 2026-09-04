@@ -41,6 +41,7 @@ const schedulerConfig: SchedulerConfig = {
   emergency_groups: '',
   emergency_models: '',
   emergency_local_switch: false,
+  kill_switch: false,
 }
 
 type ApiMethod = (

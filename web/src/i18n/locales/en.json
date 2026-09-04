@@ -5351,6 +5351,8 @@
     "Configure how new-api connects to and consumes Scheduler decisions.": "Configure how new-api connects to and consumes Scheduler decisions.",
     "Enable Scheduler": "Enable Scheduler",
     "When disabled, new-api keeps native routing.": "When disabled, new-api keeps native routing.",
+    "Scheduler kill switch": "Scheduler kill switch",
+    "Immediately stop new Scheduler decisions and use native routing. In-flight Scheduler reservations continue to be released.": "Immediately stop new Scheduler decisions and use native routing. In-flight Scheduler reservations continue to be released.",
     "Emergency native routing": "Emergency native routing",
     "When Scheduler has a transient outage, enforced traffic may temporarily use native Priority/Weight routing.": "When Scheduler has a transient outage, enforced traffic may temporarily use native Priority/Weight routing.",
     "The local process switch is enabled.": "The local process switch is enabled.",

@@ -5351,6 +5351,8 @@
     "Configure how new-api connects to and consumes Scheduler decisions.": "配置 new-api 连接并使用 Scheduler 调度决策的方式。",
     "Enable Scheduler": "启用 Scheduler",
     "When disabled, new-api keeps native routing.": "关闭后，new-api 将继续使用原生路由。",
+    "Scheduler kill switch": "Scheduler 熔断开关",
+    "Immediately stop new Scheduler decisions and use native routing. In-flight Scheduler reservations continue to be released.": "立即停止新的 Scheduler 决策并使用原生路由；已在途的 Scheduler 预留仍会继续释放。",
     "Emergency native routing": "应急原生路由",
     "When Scheduler has a transient outage, enforced traffic may temporarily use native Priority/Weight routing.": "Scheduler 短暂故障时，enforced 流量可临时使用原生优先级/权重路由。",
     "The local process switch is enabled.": "本地进程开关已开启。",

@@ -69,6 +69,7 @@ const (
 	ContextKeySchedulerEmergencyNative ContextKey = "scheduler_emergency_native"
 	ContextKeySchedulerDegradedReason  ContextKey = "scheduler_degraded_reason"
 	ContextKeySchedulerFailureReason   ContextKey = "scheduler_failure_reason"
+	ContextKeySchedulerEnforcedRequest ContextKey = "scheduler_enforced_request"
 
 	ContextKeyAutoGroup           ContextKey = "auto_group"
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"

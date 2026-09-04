@@ -31,6 +31,7 @@ const (
 	schedulerEmergencyMaxDurationKey = "SchedulerEmergencyMaxDurationSeconds"
 	schedulerEmergencyGroupsKey      = "SchedulerEmergencyGroups"
 	schedulerEmergencyModelsKey      = "SchedulerEmergencyModels"
+	schedulerKillSwitchKey           = "SchedulerKillSwitch"
 )
 
 type SchedulerConfigResponse struct {
@@ -50,6 +51,7 @@ type SchedulerConfigResponse struct {
 	EmergencyGroups             string  `json:"emergency_groups"`
 	EmergencyModels             string  `json:"emergency_models"`
 	EmergencyLocalSwitch        bool    `json:"emergency_local_switch"`
+	KillSwitch                  bool    `json:"kill_switch"`
 }
 
 type SchedulerConfigUpdateRequest struct {
@@ -67,6 +69,7 @@ type SchedulerConfigUpdateRequest struct {
 	EmergencyMaxDurationSeconds *int     `json:"emergency_max_duration_seconds"`
 	EmergencyGroups             *string  `json:"emergency_groups"`
 	EmergencyModels             *string  `json:"emergency_models"`
+	KillSwitch                  *bool    `json:"kill_switch"`
 }
 
 func schedulerConfigValue(key, envKey, fallback string) string {
@@ -113,6 +116,7 @@ func schedulerConfigResponse() SchedulerConfigResponse {
 		EmergencyGroups:             strings.TrimSpace(schedulerConfigValue(schedulerEmergencyGroupsKey, "", "")),
 		EmergencyModels:             strings.TrimSpace(schedulerConfigValue(schedulerEmergencyModelsKey, "", "")),
 		EmergencyLocalSwitch:        strings.EqualFold(strings.TrimSpace(getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")), "true") || strings.TrimSpace(getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")) == "1",
+		KillSwitch:                  schedulerConfigValue(schedulerKillSwitchKey, "SCHEDULER_KILL_SWITCH", "false") == "true",
 	}
 }
 
@@ -201,6 +205,9 @@ func UpdateSchedulerConfig(c *gin.Context) {
 	}
 	if req.EmergencyModels != nil {
 		values[schedulerEmergencyModelsKey] = strings.TrimSpace(*req.EmergencyModels)
+	}
+	if req.KillSwitch != nil {
+		values[schedulerKillSwitchKey] = strconv.FormatBool(*req.KillSwitch)
 	}
 	if err := model.UpdateOptionsBulk(values); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})

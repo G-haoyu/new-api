@@ -156,6 +156,85 @@ func TestSchedulerEmergencyNativeRequiresBothSwitchesAndFailureWindow(t *testing
 	}
 }
 
+func TestSchedulerKillSwitchIsReadDynamicallyAndPreservesInFlightRequest(t *testing.T) {
+	ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "enforced"})
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = map[string]string{}
+	}
+	previous, existed := common.OptionMap["SchedulerKillSwitch"]
+	common.OptionMap["SchedulerKillSwitch"] = "true"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		if existed {
+			common.OptionMap["SchedulerKillSwitch"] = previous
+		} else {
+			delete(common.OptionMap, "SchedulerKillSwitch")
+		}
+		common.OptionMapRWMutex.Unlock()
+	})
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	if SchedulerEnforcedForRequest(c) {
+		t.Fatal("kill switch did not disable a new enforced request")
+	}
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap["SchedulerKillSwitch"] = "false"
+	common.OptionMapRWMutex.Unlock()
+	if !SchedulerEnforcedForRequest(c) {
+		t.Fatal("dynamic kill switch disable did not take effect")
+	}
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap["SchedulerKillSwitch"] = "true"
+	common.OptionMapRWMutex.Unlock()
+	if !SchedulerEnforcedForRequest(c) {
+		t.Fatal("kill switch interrupted an in-flight Scheduler request")
+	}
+}
+
+func TestSchedulerClientReadsModeAndEmergencyConfigWithoutReload(t *testing.T) {
+	ReloadSchedulerClient()
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = map[string]string{}
+	}
+	keys := []string{"SchedulerEnabled", "SchedulerMode", "SchedulerCanaryPercent", "SchedulerEmergencyNativeRouting"}
+	previous := make(map[string]string, len(keys))
+	present := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		previous[key], present[key] = common.OptionMap[key]
+	}
+	common.OptionMap["SchedulerEnabled"] = "true"
+	common.OptionMap["SchedulerMode"] = "shadow"
+	common.OptionMap["SchedulerCanaryPercent"] = "0"
+	common.OptionMap["SchedulerEmergencyNativeRouting"] = "false"
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		for _, key := range keys {
+			if present[key] {
+				common.OptionMap[key] = previous[key]
+			} else {
+				delete(common.OptionMap, key)
+			}
+		}
+		common.OptionMapRWMutex.Unlock()
+		ReloadSchedulerClient()
+	})
+	if got := SchedulerClient().Mode; got != "shadow" {
+		t.Fatalf("initial mode=%q", got)
+	}
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap["SchedulerMode"] = "enforced"
+	common.OptionMap["SchedulerEmergencyNativeRouting"] = "true"
+	common.OptionMapRWMutex.Unlock()
+	config := SchedulerClient()
+	if config.Mode != "enforced" || !config.EmergencyNative {
+		t.Fatalf("dynamic config not observed: %+v", config)
+	}
+}
+
 func TestRunSchedulerShadowClassifiesTransientStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -35,6 +35,7 @@ export interface SchedulerConfig {
   emergency_groups: string
   emergency_models: string
   emergency_local_switch: boolean
+  kill_switch: boolean
 }
 
 export interface SchedulerMonitor {

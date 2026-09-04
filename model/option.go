@@ -214,6 +214,10 @@ func InitOptionMap() {
 	common.OptionMap["SchedulerEmergencyMaxDurationSeconds"] = "600"
 	common.OptionMap["SchedulerEmergencyGroups"] = ""
 	common.OptionMap["SchedulerEmergencyModels"] = ""
+	common.OptionMap["SchedulerKillSwitch"] = os.Getenv("SCHEDULER_KILL_SWITCH")
+	if common.OptionMap["SchedulerKillSwitch"] == "" {
+		common.OptionMap["SchedulerKillSwitch"] = "false"
+	}
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()

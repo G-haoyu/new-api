@@ -129,8 +129,9 @@ type schedulerAttempt struct {
 
 var schedulerConfigState struct {
 	sync.RWMutex
-	loaded bool
-	config SchedulerClientConfig
+	loaded       bool
+	testOverride bool
+	config       SchedulerClientConfig
 }
 
 var schedulerAttemptAsyncSlots = make(chan struct{}, 256)
@@ -257,48 +258,50 @@ func isTransientSchedulerError(err error) bool {
 
 func SchedulerClient() SchedulerClientConfig {
 	schedulerConfigState.RLock()
-	if schedulerConfigState.loaded {
+	if schedulerConfigState.testOverride {
 		c := schedulerConfigState.config
 		schedulerConfigState.RUnlock()
 		return c
 	}
 	schedulerConfigState.RUnlock()
-	schedulerConfigState.Lock()
-	defer schedulerConfigState.Unlock()
-	if !schedulerConfigState.loaded {
-		timeout := time.Duration(schedulerOptionInt("SchedulerShadowTimeoutMS", "SCHEDULER_SHADOW_TIMEOUT_MS", 100)) * time.Millisecond
-		canaryPercent, _ := strconv.Atoi(strings.TrimSpace(schedulerOption("SchedulerCanaryPercent", "SCHEDULER_CANARY_PERCENT", "0")))
-		canarySalt := strings.TrimSpace(schedulerOption("SchedulerCanarySalt", "SCHEDULER_CANARY_SALT", "scheduler-v2"))
-		if canarySalt == "" {
-			canarySalt = "scheduler-v2"
-		}
-		mode := strings.ToLower(strings.TrimSpace(schedulerOption("SchedulerMode", "SCHEDULER_MODE", "shadow")))
-		if mode == "" {
-			mode = "shadow"
-		}
-		highWatermark := schedulerOptionFloat("SchedulerRuntimeHighWatermark", "SCHEDULER_RUNTIME_HIGH_WATERMARK", schedulerDefaultRuntimeHighWatermark)
-		emergencyMaxDuration := time.Duration(schedulerOptionInt("SchedulerEmergencyMaxDurationSeconds", "SCHEDULER_EMERGENCY_MAX_DURATION_SECONDS", int(schedulerEmergencyMaxDuration/time.Second))) * time.Second
-		if emergencyMaxDuration <= 0 {
-			emergencyMaxDuration = schedulerEmergencyMaxDuration
-		}
-		schedulerConfigState.config = SchedulerClientConfig{
-			Enabled:       schedulerOptionBool("SchedulerEnabled", "SCHEDULER_ENABLED", false),
-			BaseURL:       strings.TrimRight(strings.TrimSpace(schedulerOption("SchedulerURL", "SCHEDULER_URL", "")), "/"),
-			Token:         schedulerOption("SchedulerToken", "SCHEDULER_TOKEN", ""),
-			SigningSecret: schedulerOption("SchedulerSigningSecret", "SCHEDULER_SIGNING_SECRET", ""),
-			Timeout:       timeout, Mode: mode, CanaryPercent: canaryPercent, CanarySalt: canarySalt,
-			RuntimeHighWatermark: highWatermark,
-			// Central enablement is persisted in OptionMap. The local process
-			// switch below is intentionally env-only and must be enabled too.
-			EmergencyNative:      schedulerOptionBool("SchedulerEmergencyNativeRouting", "", false),
-			EmergencyMaxDuration: emergencyMaxDuration,
-			EmergencyGroups:      schedulerOptionList("SchedulerEmergencyGroups"),
-			EmergencyModels:      schedulerOptionList("SchedulerEmergencyModels"),
-			EmergencyLocalSwitch: strings.EqualFold(strings.TrimSpace(os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")), "true") || os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING") == "1",
-		}
-		schedulerConfigState.loaded = true
+	return schedulerClientConfigFromOptions()
+}
+
+// schedulerClientConfigFromOptions builds a fresh production configuration on
+// every call. OptionMap is already protected by its RWMutex and is refreshed by
+// SyncOptions on every node, so mode/canary/emergency changes cannot remain
+// trapped in a stale process-local SchedulerClient cache.
+func schedulerClientConfigFromOptions() SchedulerClientConfig {
+	timeout := time.Duration(schedulerOptionInt("SchedulerShadowTimeoutMS", "SCHEDULER_SHADOW_TIMEOUT_MS", 100)) * time.Millisecond
+	canaryPercent, _ := strconv.Atoi(strings.TrimSpace(schedulerOption("SchedulerCanaryPercent", "SCHEDULER_CANARY_PERCENT", "0")))
+	canarySalt := strings.TrimSpace(schedulerOption("SchedulerCanarySalt", "SCHEDULER_CANARY_SALT", "scheduler-v2"))
+	if canarySalt == "" {
+		canarySalt = "scheduler-v2"
 	}
-	return schedulerConfigState.config
+	mode := strings.ToLower(strings.TrimSpace(schedulerOption("SchedulerMode", "SCHEDULER_MODE", "shadow")))
+	if mode == "" {
+		mode = "shadow"
+	}
+	highWatermark := schedulerOptionFloat("SchedulerRuntimeHighWatermark", "SCHEDULER_RUNTIME_HIGH_WATERMARK", schedulerDefaultRuntimeHighWatermark)
+	emergencyMaxDuration := time.Duration(schedulerOptionInt("SchedulerEmergencyMaxDurationSeconds", "SCHEDULER_EMERGENCY_MAX_DURATION_SECONDS", int(schedulerEmergencyMaxDuration/time.Second))) * time.Second
+	if emergencyMaxDuration <= 0 {
+		emergencyMaxDuration = schedulerEmergencyMaxDuration
+	}
+	return SchedulerClientConfig{
+		Enabled:       schedulerOptionBool("SchedulerEnabled", "SCHEDULER_ENABLED", false),
+		BaseURL:       strings.TrimRight(strings.TrimSpace(schedulerOption("SchedulerURL", "SCHEDULER_URL", "")), "/"),
+		Token:         schedulerOption("SchedulerToken", "SCHEDULER_TOKEN", ""),
+		SigningSecret: schedulerOption("SchedulerSigningSecret", "SCHEDULER_SIGNING_SECRET", ""),
+		Timeout:       timeout, Mode: mode, CanaryPercent: canaryPercent, CanarySalt: canarySalt,
+		RuntimeHighWatermark: highWatermark,
+		// Central enablement is persisted in OptionMap. The local process
+		// switch below is intentionally env-only and must be enabled too.
+		EmergencyNative:      schedulerOptionBool("SchedulerEmergencyNativeRouting", "", false),
+		EmergencyMaxDuration: emergencyMaxDuration,
+		EmergencyGroups:      schedulerOptionList("SchedulerEmergencyGroups"),
+		EmergencyModels:      schedulerOptionList("SchedulerEmergencyModels"),
+		EmergencyLocalSwitch: strings.EqualFold(strings.TrimSpace(os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING")), "true") || os.Getenv("SCHEDULER_EMERGENCY_NATIVE_ROUTING") == "1",
+	}
 }
 
 func schedulerOption(key, envKey, fallback string) string {
@@ -359,6 +362,7 @@ func schedulerOptionList(key string) []string {
 func ReloadSchedulerClient() {
 	schedulerConfigState.Lock()
 	schedulerConfigState.loaded = false
+	schedulerConfigState.testOverride = false
 	schedulerConfigState.Unlock()
 	resetSchedulerCircuit()
 }
@@ -369,6 +373,7 @@ func ConfigureSchedulerClientForTest(config SchedulerClientConfig) {
 	schedulerConfigState.Lock()
 	schedulerConfigState.config = config
 	schedulerConfigState.loaded = true
+	schedulerConfigState.testOverride = true
 	schedulerConfigState.Unlock()
 	resetSchedulerCircuit()
 }
@@ -381,38 +386,73 @@ func SchedulerEnforced() bool {
 // SchedulerEnforcedForRequest applies the stable-hash canary gate. The hash
 // input is request-scoped and contains no prompt or credential material.
 func SchedulerEnforcedForRequest(c *gin.Context) bool {
+	// Once an enforced request has started, keep its Scheduler lifecycle
+	// enabled so an operator toggling kill switch cannot strand an existing
+	// Reservation before its attempt/release is reported.
+	if c != nil {
+		if value, exists := c.Get(string(constant.ContextKeySchedulerEnforcedRequest)); exists {
+			if enforced, ok := value.(bool); ok {
+				return enforced
+			}
+		}
+	}
+	if SchedulerKillSwitchActive() {
+		return false
+	}
 	config := SchedulerClient()
 	if !config.Enabled {
 		return false
 	}
+	result := false
 	if config.Mode == "enforced" {
-		return true
-	}
-	if config.Mode != "canary" || config.CanaryPercent <= 0 {
-		return false
-	}
-	percent := config.CanaryPercent
-	if percent > 100 {
-		percent = 100
-	}
-	key := ""
-	if c != nil {
-		if userID := c.GetInt("id"); userID > 0 {
-			key = "user:" + strconv.Itoa(userID)
-		} else if tokenID := c.GetInt("token_id"); tokenID > 0 {
-			key = "token:" + strconv.Itoa(tokenID)
-		} else {
-			key = "request:" + c.GetString(common.RequestIdKey)
+		result = true
+	} else if config.Mode != "canary" || config.CanaryPercent <= 0 {
+		result = false
+	} else {
+		percent := config.CanaryPercent
+		if percent > 100 {
+			percent = 100
+		}
+		key := ""
+		if c != nil {
+			if userID := c.GetInt("id"); userID > 0 {
+				key = "user:" + strconv.Itoa(userID)
+			} else if tokenID := c.GetInt("token_id"); tokenID > 0 {
+				key = "token:" + strconv.Itoa(tokenID)
+			} else {
+				key = "request:" + c.GetString(common.RequestIdKey)
+			}
+		}
+		if key != "" {
+			h := fnv.New32a()
+			_, _ = h.Write([]byte(config.CanarySalt))
+			_, _ = h.Write([]byte{0})
+			_, _ = h.Write([]byte(key))
+			result = int(h.Sum32()%100) < percent
 		}
 	}
-	if key == "" {
+	if c != nil && result {
+		c.Set(string(constant.ContextKeySchedulerEnforcedRequest), true)
+	}
+	return result
+}
+
+// SchedulerKillSwitchActive is intentionally read on every request. The
+// management API updates OptionMap synchronously, so operators can stop new
+// Scheduler decisions without restarting the process or reloading the client.
+func SchedulerKillSwitchActive() bool {
+	common.OptionMapRWMutex.RLock()
+	value, ok := common.OptionMap["SchedulerKillSwitch"]
+	common.OptionMapRWMutex.RUnlock()
+	if !ok || strings.TrimSpace(value) == "" {
+		value = os.Getenv("SCHEDULER_KILL_SWITCH")
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
 		return false
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(config.CanarySalt))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(key))
-	return int(h.Sum32()%100) < percent
 }
 
 // IsSchedulerTransientUnavailable distinguishes infrastructure failures from
@@ -767,6 +807,9 @@ func schedulerEffectivePolicy(c *gin.Context, modelName string) (map[string]any,
 }
 
 func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
+	if SchedulerKillSwitchActive() {
+		return nil
+	}
 	config := SchedulerClient()
 	if !config.Enabled || config.BaseURL == "" || config.Token == "" {
 		return nil
