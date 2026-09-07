@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -43,11 +44,66 @@ const (
 	streamSpanName          = "newapi.stream.consume"
 )
 
+type contentCaptureMode string
+
+const (
+	captureModeFull  contentCaptureMode = "full"
+	captureModeError contentCaptureMode = "error"
+	captureModeOff   contentCaptureMode = "off"
+)
+
+// captureModeOverride is the console-set content capture mode. It takes
+// precedence over the env-derived per-Runtime default so an admin change in
+// the UI applies to every subsequent request without a restart. A stored empty
+// string, or an unset value, means no override, so the startup default stands.
+var captureModeOverride atomic.Value
+
+func loadCaptureModeOverride() (contentCaptureMode, bool) {
+	mode, ok := captureModeOverride.Load().(contentCaptureMode)
+	return mode, ok && mode != ""
+}
+
+func normalizeCaptureMode(raw string) (contentCaptureMode, bool) {
+	switch mode := contentCaptureMode(strings.ToLower(strings.TrimSpace(raw))); mode {
+	case captureModeFull, captureModeError, captureModeOff:
+		return mode, true
+	default:
+		return captureModeOff, false
+	}
+}
+
+// IsValidContentCaptureMode reports whether raw names a known capture mode.
+func IsValidContentCaptureMode(raw string) bool {
+	_, ok := normalizeCaptureMode(raw)
+	return ok
+}
+
+// SetContentCaptureMode overrides the active content capture mode at runtime.
+// An invalid value is rejected so a bad console write cannot silently disable
+// capture; the caller is expected to have validated it already.
+func SetContentCaptureMode(raw string) bool {
+	mode, ok := normalizeCaptureMode(raw)
+	if !ok {
+		return false
+	}
+	captureModeOverride.Store(mode)
+	return true
+}
+
+// ContentCaptureMode returns the effective content capture mode: the console
+// override when set, otherwise the env-derived startup default.
+func ContentCaptureMode() string {
+	if mode, ok := loadCaptureModeOverride(); ok {
+		return string(mode)
+	}
+	return string(resolveCaptureMode())
+}
+
 type runtimeContextKey struct{}
 
 type Runtime struct {
 	enabled         bool
-	captureContent  bool
+	captureMode     contentCaptureMode
 	captureMaxBytes int64
 	langfuseHost    string
 	langfuseProject string
@@ -90,9 +146,10 @@ type BillingCostDetails struct {
 
 func NewFromEnv() (*Runtime, error) {
 	enabled := envBool("NEW_API_OTEL_ENABLED", false)
+	captureMode := resolveCaptureMode()
 	runtime := &Runtime{
 		enabled:         enabled,
-		captureContent:  envString("NEW_API_OTEL_CAPTURE_CONTENT", "") == "full",
+		captureMode:     captureMode,
 		captureMaxBytes: envInt64("NEW_API_OTEL_CAPTURE_MAX_BYTES", defaultCaptureMaxBytes),
 		langfuseHost:    strings.TrimRight(firstNonEmptyEnv("LANGFUSE_BASE_URL", "LANGFUSE_HOST"), "/"),
 		langfuseProject: os.Getenv("LANGFUSE_PROJECT_ID"),
@@ -212,6 +269,7 @@ func (r *Runtime) StartLLMRequest(ctx context.Context, info *relaycommon.RelayIn
 		attribute.String("new_api.request_id", info.RequestId),
 		attribute.String("new_api.relay_format", string(info.RelayFormat)),
 		attribute.Bool("new_api.request.stream", info.IsStream),
+		attribute.String("new_api.capture.mode", string(r.resolvedCaptureMode())),
 	}
 	startOptions := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindInternal)}
 	// RelayInfo.StartTime is the gateway request boundary used by the existing
@@ -232,7 +290,7 @@ func (r *Runtime) StartLLMRequest(ctx context.Context, info *relaycommon.RelayIn
 // Langfuse. It must be called after relay conversion and all request policies
 // have been applied, immediately before the upstream request is sent.
 func (r *Runtime) RecordInput(ctx context.Context, body []byte, format types.RelayFormat) {
-	if !r.Enabled() || !r.captureContent || len(body) == 0 {
+	if !r.Enabled() || !r.contentCaptureEnabled() || len(body) == 0 {
 		return
 	}
 	state := stateFromContext(ctx)
@@ -297,7 +355,7 @@ func (r *Runtime) Inject(ctx context.Context, req *http.Request) {
 }
 
 func (r *Runtime) RecordStreamChunk(ctx context.Context, data string) {
-	if !r.Enabled() || !r.captureContent || data == "" {
+	if !r.Enabled() || !r.contentCaptureEnabled() || data == "" {
 		return
 	}
 	state := stateFromContext(ctx)
@@ -308,7 +366,7 @@ func (r *Runtime) RecordStreamChunk(ctx context.Context, data string) {
 }
 
 func (r *Runtime) WrapResponseBody(ctx context.Context, body io.ReadCloser) io.ReadCloser {
-	if !r.Enabled() || !r.captureContent || body == nil {
+	if !r.Enabled() || !r.contentCaptureEnabled() || body == nil {
 		return body
 	}
 	return &captureReadCloser{ReadCloser: body, state: stateFromContext(ctx)}
@@ -431,19 +489,21 @@ func (r *Runtime) FinishLLM(ctx context.Context, span trace.Span, err error, inf
 			)
 		}
 	}
-	if state := stateFromContext(ctx); state != nil {
+	if state := stateFromContext(ctx); state != nil && r.contentCaptureEnabled() {
 		state.mu.Lock()
 		state.finalizeStreamOutput(span)
 		state.finalizeCapturedOutput(span)
-		if state.input.Len() > 0 {
-			span.SetAttributes(
-				attribute.String("gen_ai.input.messages", state.input.String()),
-			)
-		}
-		if state.output.Len() > 0 {
-			span.SetAttributes(
-				attribute.String("gen_ai.output.messages", state.output.String()),
-			)
+		if r.shouldRecordContent(err) {
+			if state.input.Len() > 0 {
+				span.SetAttributes(
+					attribute.String("gen_ai.input.messages", state.input.String()),
+				)
+			}
+			if state.output.Len() > 0 {
+				span.SetAttributes(
+					attribute.String("gen_ai.output.messages", state.output.String()),
+				)
+			}
 		}
 		state.mu.Unlock()
 	}
@@ -452,6 +512,39 @@ func (r *Runtime) FinishLLM(ctx context.Context, span trace.Span, err error, inf
 		span.SetStatus(codes.Error, err.Error())
 	}
 	span.End()
+}
+
+func (r *Runtime) resolvedCaptureMode() contentCaptureMode {
+	if r == nil {
+		return captureModeOff
+	}
+	if mode, ok := loadCaptureModeOverride(); ok {
+		return mode
+	}
+	if mode, ok := normalizeCaptureMode(string(r.captureMode)); ok {
+		return mode
+	}
+	return captureModeOff
+}
+
+func (r *Runtime) contentCaptureEnabled() bool {
+	return r.resolvedCaptureMode() != captureModeOff
+}
+
+func (r *Runtime) shouldRecordContent(err error) bool {
+	switch r.resolvedCaptureMode() {
+	case captureModeFull:
+		return true
+	case captureModeError:
+		return err != nil
+	default:
+		return false
+	}
+}
+
+func resolveCaptureMode() contentCaptureMode {
+	mode, _ := normalizeCaptureMode(os.Getenv("NEW_API_OTEL_CAPTURE_MODE"))
+	return mode
 }
 
 func (r *Runtime) FinishSpan(span trace.Span, err error) {
@@ -674,8 +767,12 @@ func (s *traceState) finalizeCapturedOutput(span trace.Span) {
 	}
 	normalized, ok := normalizeLangfuseOutput([]byte(s.output.String()))
 	if !ok {
+		// Raw provider responses can be protocol envelopes (including error
+		// objects), not model output. Never export an unrecognized envelope as
+		// Langfuse output; retain only a valid empty JSON array when truncation
+		// already occurred.
+		s.output.Reset()
 		if s.outputTrunc {
-			s.output.Reset()
 			s.output.WriteString("[]")
 		}
 		return
