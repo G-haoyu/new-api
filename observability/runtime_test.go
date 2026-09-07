@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,13 +24,37 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	collectortest "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewFromEnvDisabled(t *testing.T) {
 	t.Setenv("NEW_API_OTEL_ENABLED", "false")
+	t.Setenv("NEW_API_OTEL_CAPTURE_MODE", "")
 	runtime, err := NewFromEnv()
 	require.NoError(t, err)
 	require.False(t, runtime.Enabled())
+	require.Equal(t, captureModeOff, runtime.resolvedCaptureMode())
+}
+
+func TestResolveCaptureMode(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want contentCaptureMode
+	}{
+		{name: "full", mode: "full", want: captureModeFull},
+		{name: "error", mode: "error", want: captureModeError},
+		{name: "off", mode: "off", want: captureModeOff},
+		{name: "missing", mode: "", want: captureModeOff},
+		{name: "invalid", mode: "unknown", want: captureModeOff},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("NEW_API_OTEL_CAPTURE_MODE", tt.mode)
+			require.Equal(t, tt.want, resolveCaptureMode())
+		})
+	}
 }
 
 func TestNewFromEnvAcceptsLangfuseBaseURL(t *testing.T) {
@@ -50,9 +76,14 @@ func TestNewFromEnvExportsToLangfuseEndpoint(t *testing.T) {
 	received := make(chan struct{}, 1)
 	var requestPath string
 	var authorization string
+	var receivedRequest collectortest.ExportTraceServiceRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath = r.URL.Path
 		authorization = r.Header.Get("Authorization")
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			_ = proto.Unmarshal(body, &receivedRequest)
+		}
 		received <- struct{}{}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -69,6 +100,7 @@ func TestNewFromEnvExportsToLangfuseEndpoint(t *testing.T) {
 
 	info := &common.RelayInfo{RequestId: "req-export", OriginModelName: "gpt-test", RelayFormat: "openai"}
 	ctx, span := runtime.StartLLMRequest(context.Background(), info, &dto.GeneralOpenAIRequest{Model: "gpt-test"})
+	runtime.RecordInput(ctx, []byte(`{"messages":[{"role":"user","content":"secret"}]}`), types.RelayFormatOpenAI)
 	runtime.FinishLLM(ctx, span, nil, info)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -80,6 +112,76 @@ func TestNewFromEnvExportsToLangfuseEndpoint(t *testing.T) {
 	}
 	require.Equal(t, "/api/public/otel/v1/traces", requestPath)
 	require.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("pk-test:sk-test")), authorization)
+	var attrs []string
+	for _, resourceSpans := range receivedRequest.ResourceSpans {
+		for _, scopeSpans := range resourceSpans.ScopeSpans {
+			for _, exportedSpan := range scopeSpans.Spans {
+				for _, attr := range exportedSpan.Attributes {
+					if attr.Key == "gen_ai.input.messages" {
+						attrs = append(attrs, attr.Value.GetStringValue())
+					}
+				}
+			}
+		}
+	}
+	require.Empty(t, attrs, "default capture mode must not export content")
+}
+
+func TestNewFromEnvErrorModeEndToEndExportPolicy(t *testing.T) {
+	received := make(chan *collectortest.ExportTraceServiceRequest, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err == nil {
+			request := &collectortest.ExportTraceServiceRequest{}
+			if proto.Unmarshal(body, request) == nil {
+				received <- request
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("NEW_API_OTEL_ENABLED", "true")
+	t.Setenv("NEW_API_OTEL_CAPTURE_MODE", "error")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
+	t.Setenv("LANGFUSE_OTEL_ENDPOINT", "")
+	t.Setenv("LANGFUSE_HOST", "")
+	t.Setenv("LANGFUSE_BASE_URL", "")
+	t.Setenv("LANGFUSE_PUBLIC_KEY", "")
+	t.Setenv("LANGFUSE_SECRET_KEY", "")
+	runtime, err := NewFromEnv()
+	require.NoError(t, err)
+
+	info := &common.RelayInfo{RequestId: "req-e2e-error", OriginModelName: "gpt-test", RelayFormat: types.RelayFormatOpenAI}
+	ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+	runtime.RecordInput(ctx, []byte(`{"messages":[{"role":"user","content":"secret"}]}`), types.RelayFormatOpenAI)
+	runtime.RecordStreamChunk(ctx, `{"choices":[{"delta":{"content":"partial"}}]}`)
+	runtime.FinishLLM(ctx, span, errors.New("upstream unavailable"), info)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, runtime.Shutdown(shutdownCtx))
+	select {
+	case request := <-received:
+		var foundInput, foundOutput bool
+		for _, resourceSpans := range request.ResourceSpans {
+			for _, scopeSpans := range resourceSpans.ScopeSpans {
+				for _, exportedSpan := range scopeSpans.Spans {
+					for _, attr := range exportedSpan.Attributes {
+						switch attr.Key {
+						case "gen_ai.input.messages":
+							foundInput = true
+						case "gen_ai.output.messages":
+							foundOutput = true
+						}
+					}
+				}
+			}
+		}
+		require.True(t, foundInput)
+		require.True(t, foundOutput)
+	case <-time.After(time.Second):
+		t.Fatal("OTLP exporter did not send error-mode trace")
+	}
 }
 
 func TestResolveExporterConfigUsesLangfuseCredentials(t *testing.T) {
@@ -98,7 +200,7 @@ func TestRecordInputCapturesFilteredInputAndUsage(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -137,6 +239,93 @@ func TestRecordInputCapturesFilteredInputAndUsage(t *testing.T) {
 	require.Equal(t, "", attributeValue(spans[0].Attributes, "langfuse.observation.usage_details").AsString())
 	require.Equal(t, "", attributeValue(spans[0].Attributes, "new_api.billing.gateway_cost_usd").AsString())
 	require.JSONEq(t, `{"total":0.000084}`, attributeValue(spans[0].Attributes, "langfuse.observation.cost_details").AsString())
+}
+
+func TestCaptureModeErrorDefersContentUntilFinalError(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+	runtime := &Runtime{
+		enabled:         true,
+		captureMode:     captureModeError,
+		captureMaxBytes: 1024,
+		tracerProvider:  provider,
+		tracer:          provider.Tracer("test"),
+		propagator:      propagationTraceContextForTest(),
+	}
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+
+	info := &common.RelayInfo{RequestId: "req-error-mode", OriginModelName: "gpt-test", RelayFormat: "openai"}
+	input := `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`
+
+	t.Run("success omits content", func(t *testing.T) {
+		ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+		runtime.RecordInput(ctx, []byte(input), types.RelayFormatOpenAI)
+		runtime.RecordStreamChunk(ctx, `{"choices":[{"delta":{"content":"hello"}}]}`)
+		runtime.FinishLLM(ctx, span, nil, info)
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.input.messages").AsString())
+		require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.output.messages").AsString())
+	})
+
+	t.Run("final error records content", func(t *testing.T) {
+		ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+		runtime.RecordInput(ctx, []byte(input), types.RelayFormatOpenAI)
+		runtime.RecordStreamChunk(ctx, `{"choices":[{"delta":{"content":"hello"}}]}`)
+		runtime.FinishLLM(ctx, span, errors.New("upstream failed"), info)
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 2)
+		got := spans[1]
+		require.JSONEq(t, `{"messages":[{"role":"user","content":"hello"}]}`, attributeValue(got.Attributes, "gen_ai.input.messages").AsString())
+		require.JSONEq(t, `[{"role":"assistant","content":"hello"}]`, attributeValue(got.Attributes, "gen_ai.output.messages").AsString())
+	})
+}
+
+func TestCaptureModeOffDoesNotCollectOrExportContent(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+	runtime := &Runtime{
+		enabled:         true,
+		captureMode:     captureModeOff,
+		captureMaxBytes: 1024,
+		tracerProvider:  provider,
+		tracer:          provider.Tracer("test"),
+		propagator:      propagationTraceContextForTest(),
+	}
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	info := &common.RelayInfo{RequestId: "req-off-mode", OriginModelName: "gpt-test", RelayFormat: "openai"}
+	ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+	runtime.RecordInput(ctx, []byte(`{"messages":[{"role":"user","content":"secret"}]}`), types.RelayFormatOpenAI)
+	runtime.RecordStreamChunk(ctx, `{"choices":[{"delta":{"content":"secret"}}]}`)
+	runtime.FinishLLM(ctx, span, errors.New("failed"), info)
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	require.Equal(t, "off", attributeValue(spans[0].Attributes, "new_api.capture.mode").AsString())
+	require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.input.messages").AsString())
+	require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.output.messages").AsString())
+}
+
+func TestProviderErrorEnvelopeIsNotExportedAsOutput(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+	runtime := &Runtime{
+		enabled:         true,
+		captureMode:     captureModeFull,
+		captureMaxBytes: 1024,
+		tracerProvider:  provider,
+		tracer:          provider.Tracer("test"),
+		propagator:      propagationTraceContextForTest(),
+	}
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	info := &common.RelayInfo{RequestId: "req-provider-error", OriginModelName: "gpt-test", RelayFormat: types.RelayFormatOpenAI}
+	ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+	body := runtime.WrapResponseBody(ctx, io.NopCloser(strings.NewReader(`{"error":{"message":"provider failed"}}`)))
+	_, readErr := io.ReadAll(body)
+	require.NoError(t, readErr)
+	runtime.FinishLLM(ctx, span, errors.New("upstream failed"), info)
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.output.messages").AsString())
 }
 
 func TestBuildLangfuseInputKeepsProtocolContextOnly(t *testing.T) {
@@ -282,7 +471,7 @@ func TestRecordStreamChunkCapturesOneFinalJSONEvent(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -318,7 +507,7 @@ func TestRecordStreamChunkFallsBackToDeltaWhenCompletedOutputIsEmpty(t *testing.
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -347,7 +536,7 @@ func TestRecordStreamChunkKeepsPartialResponsesOutput(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -373,7 +562,7 @@ func TestRecordStreamChunkAggregatesChatCompletionsDeltas(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -403,7 +592,7 @@ func TestRecordStreamChunkAggregatesLegacyCompletionsText(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -430,7 +619,7 @@ func TestRecordStreamChunkRebuildsClaudeTextMessage(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -466,7 +655,7 @@ func TestRecordStreamChunkRebuildsClaudeThinkingAndToolUse(t *testing.T) {
 	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
 	runtime := &Runtime{
 		enabled:         true,
-		captureContent:  true,
+		captureMode:     captureModeFull,
 		captureMaxBytes: 1024,
 		tracerProvider:  provider,
 		tracer:          provider.Tracer("test"),
@@ -662,6 +851,51 @@ func TestParseHeaders(t *testing.T) {
 func TestNormalizeTraceEndpoint(t *testing.T) {
 	require.Equal(t, "http://langfuse:3000/api/public/otel/v1/traces", normalizeTraceEndpoint("http://langfuse:3000/api/public/otel"))
 	require.Equal(t, "http://collector:4318/v1/traces", normalizeTraceEndpoint("http://collector:4318/v1/traces"))
+}
+
+func TestSetContentCaptureModeOverridesLive(t *testing.T) {
+	t.Cleanup(func() { captureModeOverride.Store(contentCaptureMode("")) })
+	captureModeOverride.Store(contentCaptureMode(""))
+
+	runtime := &Runtime{enabled: true, captureMode: captureModeOff}
+	require.Equal(t, captureModeOff, runtime.resolvedCaptureMode())
+	require.False(t, runtime.contentCaptureEnabled())
+
+	require.True(t, SetContentCaptureMode("error"))
+	require.Equal(t, captureModeError, runtime.resolvedCaptureMode())
+	require.True(t, runtime.contentCaptureEnabled())
+	require.True(t, runtime.shouldRecordContent(errors.New("boom")))
+	require.False(t, runtime.shouldRecordContent(nil))
+	require.Equal(t, "error", ContentCaptureMode())
+
+	require.True(t, SetContentCaptureMode("FULL"))
+	require.Equal(t, captureModeFull, runtime.resolvedCaptureMode())
+	require.True(t, runtime.shouldRecordContent(nil))
+
+	require.False(t, SetContentCaptureMode("bogus"))
+	require.Equal(t, captureModeFull, runtime.resolvedCaptureMode())
+
+	require.True(t, SetContentCaptureMode("off"))
+	require.Equal(t, captureModeOff, runtime.resolvedCaptureMode())
+	require.False(t, runtime.contentCaptureEnabled())
+}
+
+func TestContentCaptureModeFallsBackToEnv(t *testing.T) {
+	t.Cleanup(func() { captureModeOverride.Store(contentCaptureMode("")) })
+	captureModeOverride.Store(contentCaptureMode(""))
+	t.Setenv("NEW_API_OTEL_CAPTURE_MODE", "error")
+	require.Equal(t, "error", ContentCaptureMode())
+	t.Setenv("NEW_API_OTEL_CAPTURE_MODE", "")
+	require.Equal(t, "off", ContentCaptureMode())
+}
+
+func TestIsValidContentCaptureMode(t *testing.T) {
+	for _, valid := range []string{"full", "error", "off", "FULL", " off "} {
+		require.True(t, IsValidContentCaptureMode(valid), valid)
+	}
+	for _, invalid := range []string{"", "on", "verbose"} {
+		require.False(t, IsValidContentCaptureMode(invalid), invalid)
+	}
 }
 
 func attributeValue(attrs []attribute.KeyValue, key string) attribute.Value {

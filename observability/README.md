@@ -11,7 +11,7 @@ LANGFUSE_BASE_URL=http://langfuse:3000
 LANGFUSE_PROJECT_ID=your-project-id
 LANGFUSE_PUBLIC_KEY=pk-...
 LANGFUSE_SECRET_KEY=sk-...
-NEW_API_OTEL_CAPTURE_CONTENT=full
+NEW_API_OTEL_CAPTURE_MODE=error
 NEW_API_OTEL_CAPTURE_MAX_BYTES=4194304
 ```
 
@@ -22,10 +22,30 @@ may point to a collector or another OTLP/HTTP backend. `OTEL_EXPORTER_OTLP_HEADE
 can add custom headers, while Langfuse credentials add the Basic Auth and
 ingestion-version headers automatically.
 
-`NEW_API_OTEL_CAPTURE_CONTENT=full` records serialized input and one valid output
-JSON value on the trace, subject to `NEW_API_OTEL_CAPTURE_MAX_BYTES` per
-direction. Stream frames are aggregated in memory and never exported
-individually.
+`NEW_API_OTEL_CAPTURE_MODE` controls serialized model content on the trace:
+
+- `full` records input and output for every completed request.
+- `error` records input and semantic model output only when the final gateway
+  result is an error. A request that succeeds after an upstream retry does not
+  export content.
+- `off` records no input/output content.
+
+The setting defaults to `off` when absent or invalid.
+
+The capture mode is also editable at runtime from the admin console under
+Operations Settings, Log Maintenance, as `OtelCaptureMode`. A console value is
+persisted and takes precedence over `NEW_API_OTEL_CAPTURE_MODE`, and it applies
+to every subsequent request without a restart. The env var remains the startup
+default when no console value has been saved.
+
+Input and output remain bounded independently by
+`NEW_API_OTEL_CAPTURE_MAX_BYTES`. Stream frames are aggregated in memory and
+never exported individually, including in `error` mode. The mode reduces
+exported content, not the peak per-request capture memory.
+
+Provider error envelopes and response metadata are never exported as model
+output. On an error, only already-generated semantic assistant content is
+eligible for output capture.
 
 Each upstream protocol has its own aggregator behind the `streamAggregator`
 interface in `stream_aggregator.go`, one per file. The first frame that an

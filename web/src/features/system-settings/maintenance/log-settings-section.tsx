@@ -86,6 +86,21 @@ type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
 type LogSettingsSectionProps = {
   defaultEnabled: boolean
+  defaultCaptureMode: string
+}
+
+const CAPTURE_MODES = ['off', 'error', 'full'] as const
+
+const captureModeLabelKey: Record<string, string> = {
+  off: 'Off (no request or response content)',
+  error: 'Errors only (capture content on failed requests)',
+  full: 'Full (capture content on every request)',
+}
+
+function normalizeCaptureMode(value: string): string {
+  return CAPTURE_MODES.includes(value as (typeof CAPTURE_MODES)[number])
+    ? value
+    : 'off'
 }
 
 type ServerLogInfo = {
@@ -139,17 +154,36 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
   return task?.status === 'pending' || task?.status === 'running'
 }
 
-export function LogSettingsSection({
-  defaultEnabled,
-}: LogSettingsSectionProps) {
+export function LogSettingsSection(props: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const defaultEnabled = props.defaultEnabled
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
       LogConsumeEnabled: defaultEnabled,
     },
   })
+
+  const [captureMode, setCaptureMode] = useState(() =>
+    normalizeCaptureMode(props.defaultCaptureMode)
+  )
+
+  useEffect(() => {
+    setCaptureMode(normalizeCaptureMode(props.defaultCaptureMode))
+  }, [props.defaultCaptureMode])
+
+  const handleCaptureModeChange = async (value: string | null) => {
+    const next = normalizeCaptureMode(value ?? 'off')
+    if (next === captureMode) return
+    const previous = captureMode
+    setCaptureMode(next)
+    try {
+      await updateOption.mutateAsync({ key: 'OtelCaptureMode', value: next })
+    } catch {
+      setCaptureMode(previous)
+    }
+  }
 
   const [purgeDate, setPurgeDate] = useState<Date | undefined>(() =>
     getDateDaysAgo(30)
@@ -366,6 +400,41 @@ export function LogSettingsSection({
               </SettingsSwitchItem>
             )}
           />
+
+          <SettingsControlGroup className='space-y-3'>
+            <div>
+              <h4 className='text-sm font-medium'>
+                {t('Trace content capture')}
+              </h4>
+              <p className='text-muted-foreground text-sm'>
+                {t(
+                  'Choose whether request and response content is attached to OpenTelemetry traces. Changes apply immediately.'
+                )}
+              </p>
+            </div>
+            <Select
+              items={CAPTURE_MODES.map((mode) => ({
+                value: mode,
+                label: t(captureModeLabelKey[mode]),
+              }))}
+              value={captureMode}
+              onValueChange={handleCaptureModeChange}
+              disabled={updateOption.isPending}
+            >
+              <SelectTrigger className='w-[360px] max-w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                <SelectGroup>
+                  {CAPTURE_MODES.map((mode) => (
+                    <SelectItem key={mode} value={mode}>
+                      {t(captureModeLabelKey[mode])}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </SettingsControlGroup>
 
           <SettingsControlGroup className='space-y-3'>
             <div>
