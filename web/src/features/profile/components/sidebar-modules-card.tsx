@@ -120,11 +120,6 @@ export function SidebarModulesCard() {
           title: t('Personal Settings'),
           description: t('Personal info settings'),
         },
-        {
-          key: 'routing',
-          title: t('Routing'),
-          description: t('Scheduler channel preference settings'),
-        },
       ],
     },
   ]

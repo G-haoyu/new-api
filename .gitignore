@@ -8,8 +8,6 @@ upload
 *.db
 build
 *.db-journal
-.spec-workflow
-run-local-dev.sh
 logs
 web/dist
 web/node_modules
