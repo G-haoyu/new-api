@@ -21,7 +21,6 @@ import {
   Box,
   CreditCard,
   Layout,
-  Route,
   Settings,
   Shield,
   ShieldAlert,
@@ -70,20 +69,6 @@ function getSystemSettingsNavGroups(t: TFunction): NavGroup[] {
           title: t('Models & Routing'),
           icon: Box,
           items: getModelsSectionNavItems(t),
-        },
-        {
-          title: t('Scheduling Management'),
-          icon: Route,
-          items: [
-            {
-              title: t('Scheduling Configuration'),
-              url: '/system-settings/scheduler/config',
-            },
-            {
-              title: t('Scheduling Monitor'),
-              url: '/system-settings/scheduler/monitor',
-            },
-          ],
         },
         {
           title: t('Security & Limits'),
