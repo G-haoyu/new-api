@@ -29,7 +29,7 @@ var logGroupCol string
 
 // jsonScanBytes 归一化 json 列的驱动返回值:不同驱动/协议模式下同一列可能
 // 以 []byte 或 string 返回,静默丢弃 string 会导致字段被清零而不报错。
-func jsonScanBytes(value interface{}) []byte {
+func jsonScanBytes(value any) []byte {
 	switch v := value.(type) {
 	case []byte:
 		return v
@@ -153,10 +153,10 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 			common.SysLog("using PostgreSQL as database")
 			// 同时关闭 pgx 隐式与 GORM 显式预处理语句:命名 prepared statement 与
 			// 事务池代理(PgBouncer/Neon/Supabase)不兼容,会触发 FATAL 08P01/42P05。
-			db, err := gorm.Open(postgres.New(postgres.Config{
+			db, err := gorm.Open(postgresMigrationDialector{postgres.Dialector{Config: &postgres.Config{
 				DSN:                  dsn,
 				PreferSimpleProtocol: true,
-			}), newGormConfig(false))
+			}}}, newGormConfig(false))
 			return db, common.DatabaseTypePostgreSQL, err
 		}
 		if strings.HasPrefix(dsn, "local") {
@@ -174,7 +174,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 				dsn += "?parseTime=true"
 			}
 		}
-		db, err := gorm.Open(mysql.Open(dsn), newGormConfig(true))
+		db, err := gorm.Open(mysqlMigrationDialector{mysql.Dialector{Config: &mysql.Config{DSN: dsn}}}, newGormConfig(true))
 		return db, common.DatabaseTypeMySQL, err
 	}
 	// Use SQLite
@@ -232,6 +232,9 @@ func InitLogDB() (err error) {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
+		if common.IsMasterNode {
+			return MigrateAuditLogs()
+		}
 		return
 	}
 	db, dbType, err := chooseDB("LOG_SQL_DSN", true)
@@ -327,6 +330,9 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	if err := migrateOptionPrimaryKey(DB); err != nil {
+		common.SysError("failed to migrate options primary key: " + err.Error())
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -364,7 +370,6 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&CasbinRule{},
 		&AuthzRole{},
-		&RelayAttempt{},
 	)
 	if err != nil {
 		return err
@@ -388,10 +393,13 @@ func migrateDB() error {
 }
 
 func migrateLOGDB() error {
+	if err := MigrateAuditLogs(); err != nil {
+		return err
+	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{})
+	return LOG_DB.AutoMigrate(&Log{})
 }
 
 func migrateClickHouseLogDB() error {
@@ -399,13 +407,7 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	if err := syncClickHouseTableTTL("logs", ttlDays); err != nil {
-		return err
-	}
-	if err := LOG_DB.Exec(clickHouseRelayAttemptCreateTableSQL(ttlDays)).Error; err != nil {
-		return err
-	}
-	return syncClickHouseTableTTL("relay_attempts", ttlDays)
+	return syncClickHouseLogTTL(ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -460,96 +462,25 @@ PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
-// clickHouseRelayAttemptCreateTableSQL mirrors the RelayAttempt struct. GORM
-// AutoMigrate is deliberately bypassed for ClickHouse, so this DDL must be kept
-// in sync with model/relay_attempt.go by hand. Nullable() columns correspond to
-// the pointer fields there, where null means "not observed" rather than zero.
-func clickHouseRelayAttemptCreateTableSQL(ttlDays int) string {
-	return fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS relay_attempts (
-	id Int64 DEFAULT 0,
-	created_at Int64 DEFAULT 0,
-	attempt_id String DEFAULT '',
-	request_id String DEFAULT '',
-	attempt_index Int32 DEFAULT 0,
-	channel_id Int32 DEFAULT 0,
-	channel_type Int32 DEFAULT 0,
-	model_name String DEFAULT '',
-	upstream_model_name String DEFAULT '',
-	using_group String DEFAULT '',
-	input_tokens_est Int32 DEFAULT 0,
-	chars_latin Int32 DEFAULT 0,
-	chars_han Int32 DEFAULT 0,
-	chars_other Int32 DEFAULT 0,
-	max_tokens_req Nullable(Int32),
-	is_stream UInt8 DEFAULT 0,
-	has_tools UInt8 DEFAULT 0,
-	tools_count Int32 DEFAULT 0,
-	temperature Nullable(Float64),
-	tenant_id Int32 DEFAULT 0,
-	token_id Int32 DEFAULT 0,
-	relay_format String DEFAULT '',
-	request_path String DEFAULT '',
-	prefix_hash_system String DEFAULT '',
-	prefix_hash_tools String DEFAULT '',
-	prefix_hash_prefix String DEFAULT '',
-	task_type_guess String DEFAULT '',
-	task_type_guess_ver Int32 DEFAULT 0,
-	model_ratio Nullable(Float64),
-	completion_ratio Nullable(Float64),
-	group_ratio Nullable(Float64),
-	cache_ratio Nullable(Float64),
-	model_price Nullable(Float64),
-	ts_start Int64 DEFAULT 0,
-	ts_first_token Nullable(Int64),
-	ts_end Int64 DEFAULT 0,
-	ttft_ms Nullable(Int64),
-	total_ms Int64 DEFAULT 0,
-	upstream_ms Nullable(Int64),
-	gateway_overhead_ms Nullable(Int64),
-	ok UInt8 DEFAULT 0,
-	outcome_code String DEFAULT '',
-	http_status Nullable(Int32),
-	upstream_err_hash String DEFAULT '',
-	terminated_by String DEFAULT '',
-	retry_after_hint Nullable(Int32),
-	internal_err_code String DEFAULT '',
-	stream_end_reason String DEFAULT '',
-	input_tokens_actual Nullable(Int32),
-	output_tokens_actual Nullable(Int32),
-	cached_tokens Nullable(Int32),
-	reasoning_tokens Nullable(Int32),
-	finish_reason String DEFAULT '',
-	cost_actual Nullable(Int32),
-	tps_actual Nullable(Float64),
-	stream_chunks Nullable(Int32)
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(toDateTime(created_at))
-ORDER BY (created_at, channel_id, request_id)%s`, clickHouseLogTTLClause(ttlDays))
-}
-
-// syncClickHouseTableTTL reconciles the TTL of a log-database ClickHouse table.
-// table is always an internal literal, never user input.
-func syncClickHouseTableTTL(table string, ttlDays int) error {
+func syncClickHouseLogTTL(ttlDays int) error {
 	expression := clickHouseLogTTLExpression(ttlDays)
 	if expression != "" {
-		return LOG_DB.Exec("ALTER TABLE " + table + " MODIFY TTL " + expression).Error
+		return LOG_DB.Exec("ALTER TABLE logs MODIFY TTL " + expression).Error
 	}
 
-	hasTTL, err := clickHouseTableHasTTL(table)
+	hasTTL, err := clickHouseLogTableHasTTL()
 	if err != nil {
 		return err
 	}
 	if !hasTTL {
 		return nil
 	}
-	return LOG_DB.Exec("ALTER TABLE " + table + " REMOVE TTL").Error
+	return LOG_DB.Exec("ALTER TABLE logs REMOVE TTL").Error
 }
 
-func clickHouseTableHasTTL(table string) (bool, error) {
+func clickHouseLogTableHasTTL() (bool, error) {
 	var createTableSQL string
-	if err := LOG_DB.Raw("SHOW CREATE TABLE " + table).Scan(&createTableSQL).Error; err != nil {
+	if err := LOG_DB.Raw("SHOW CREATE TABLE logs").Scan(&createTableSQL).Error; err != nil {
 		return false, err
 	}
 	return clickHouseCreateTableHasTTL(createTableSQL), nil

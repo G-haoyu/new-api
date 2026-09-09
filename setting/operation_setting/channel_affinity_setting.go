@@ -1,11 +1,6 @@
 package operation_setting
 
-import (
-	"strings"
-	"sync"
-
-	"github.com/QuantumNous/new-api/setting/config"
-)
+import "github.com/QuantumNous/new-api/setting/config"
 
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
@@ -23,7 +18,7 @@ type ChannelAffinityRule struct {
 	ValueRegex string `json:"value_regex"`
 	TTLSeconds int    `json:"ttl_seconds"`
 
-	ParamOverrideTemplate map[string]interface{} `json:"param_override_template,omitempty"`
+	ParamOverrideTemplate map[string]any `json:"param_override_template,omitempty"`
 
 	SkipRetryOnFailure bool `json:"skip_retry_on_failure"`
 
@@ -86,11 +81,11 @@ var claudeCliPassThroughHeaders = []string{
 	"Anthropic-Version",
 }
 
-func buildPassHeaderTemplate(headers []string) map[string]interface{} {
+func buildPassHeaderTemplate(headers []string) map[string]any {
 	clonedHeaders := make([]string, 0, len(headers))
 	clonedHeaders = append(clonedHeaders, headers...)
-	return map[string]interface{}{
-		"operations": []map[string]interface{}{
+	return map[string]any{
+		"operations": []map[string]any{
 			{
 				"mode":        "pass_headers",
 				"value":       clonedHeaders,
@@ -100,11 +95,11 @@ func buildPassHeaderTemplate(headers []string) map[string]interface{} {
 	}
 }
 
-func buildCodexPassHeaderTemplate() map[string]interface{} {
+func buildCodexPassHeaderTemplate() map[string]any {
 	requestHeaders := make([]string, 0, len(codexCliPassThroughHeaders))
 	requestHeaders = append(requestHeaders, codexCliPassThroughHeaders...)
-	return map[string]interface{}{
-		"operations": []map[string]interface{}{
+	return map[string]any{
+		"operations": []map[string]any{
 			{
 				"mode":        "pass_headers",
 				"value":       requestHeaders,
@@ -151,66 +146,13 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			IncludeRuleName:       true,
 			UserAgentInclude:      nil,
 		},
-		{
-			// Generic conversation affinity applies to every model/protocol. A
-			// client may send conversation_id in the JSON body or one of the
-			// conventional headers; model and effective group remain part of the
-			// cache key so unrelated conversations never share a binding.
-			Name:       "conversation id",
-			ModelRegex: []string{"^.+$"},
-			KeySources: []ChannelAffinityKeySource{
-				{Type: "gjson", Path: "conversation_id"},
-				{Type: "gjson", Path: "conversation.id"},
-				{Type: "gjson", Path: "metadata.conversation_id"},
-				{Type: "request_header", Key: "X-Conversation-ID"},
-				{Type: "request_header", Key: "Conversation-ID"},
-				{Type: "request_header", Key: "X-Conversation-Id"},
-			},
-			TTLSeconds:         86400,
-			SkipRetryOnFailure: false,
-			IncludeUsingGroup:  true,
-			IncludeModelName:   true,
-			IncludeRuleName:    true,
-		},
 	},
 }
-
-var channelAffinityDefaultsMu sync.Mutex
 
 func init() {
 	config.GlobalConfig.Register("channel_affinity_setting", &channelAffinitySetting)
 }
 
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
-	// Older installations may have a persisted Rules slice containing only
-	// protocol-specific Codex/Claude entries. Add the generic conversation rule
-	// lazily so those installations gain all-model affinity without requiring a
-	// manual settings migration. A user-defined rule with the same name wins.
-	channelAffinityDefaultsMu.Lock()
-	hasConversationRule := false
-	for _, rule := range channelAffinitySetting.Rules {
-		if strings.EqualFold(strings.TrimSpace(rule.Name), "conversation id") {
-			hasConversationRule = true
-			break
-		}
-	}
-	if !hasConversationRule {
-		channelAffinitySetting.Rules = append(channelAffinitySetting.Rules, ChannelAffinityRule{
-			Name: "conversation id", ModelRegex: []string{"^.+$"},
-			KeySources: []ChannelAffinityKeySource{
-				{Type: "gjson", Path: "conversation_id"},
-				{Type: "gjson", Path: "conversation.id"},
-				{Type: "gjson", Path: "metadata.conversation_id"},
-				{Type: "request_header", Key: "X-Conversation-ID"},
-				{Type: "request_header", Key: "Conversation-ID"},
-				{Type: "request_header", Key: "X-Conversation-Id"},
-			},
-			TTLSeconds:        86400,
-			IncludeUsingGroup: true,
-			IncludeModelName:  true,
-			IncludeRuleName:   true,
-		})
-	}
-	channelAffinityDefaultsMu.Unlock()
 	return &channelAffinitySetting
 }
