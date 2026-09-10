@@ -6,7 +6,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -19,8 +18,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
-const chatToGeminiStreamStateKey = "relaykit.chat_to_gemini_stream_state"
 
 // 辅助函数
 func HandleStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
@@ -69,7 +66,7 @@ func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 		return err
 	}
 
-	state, err := chatToGeminiStreamState(c, &streamResponse)
+	state, err := chatToGeminiStreamState(info, &streamResponse)
 	if err != nil {
 		return err
 	}
@@ -80,11 +77,11 @@ func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 	return sendGeminiStreamResults(c, results)
 }
 
-func chatToGeminiStreamState(c *gin.Context, streamResponse *dto.ChatCompletionsStreamResponse) (*relayconvert.ResponseStreamState, error) {
-	if value, ok := c.Get(chatToGeminiStreamStateKey); ok {
-		state, ok := value.(*relayconvert.ResponseStreamState)
+func chatToGeminiStreamState(info *relaycommon.RelayInfo, streamResponse *dto.ChatCompletionsStreamResponse) (*relayconvert.ResponseStreamState, error) {
+	if info != nil && info.ChatToGeminiStreamState != nil {
+		state, ok := info.ChatToGeminiStreamState.(*relayconvert.ResponseStreamState)
 		if !ok || state == nil {
-			return nil, fmt.Errorf("invalid Chat-to-Gemini stream state %T", value)
+			return nil, fmt.Errorf("invalid Chat-to-Gemini stream state %T", info.ChatToGeminiStreamState)
 		}
 		return state, nil
 	}
@@ -97,7 +94,9 @@ func chatToGeminiStreamState(c *gin.Context, streamResponse *dto.ChatCompletions
 	if err != nil {
 		return nil, err
 	}
-	c.Set(chatToGeminiStreamStateKey, state)
+	if info != nil {
+		info.ChatToGeminiStreamState = state
+	}
 	return state, nil
 }
 
@@ -162,25 +161,6 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 	}
 }
 
-// noteStreamFinishReason extracts the terminal finish reason from the last
-// stream chunk. This covers every OpenAI-compatible channel, since all of them
-// funnel their final chunk through HandleFinalResponse.
-func noteStreamFinishReason(c *gin.Context, lastStreamData string) {
-	if lastStreamData == "" {
-		return
-	}
-	var lastResponse dto.ChatCompletionsStreamResponse
-	if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &lastResponse); err != nil {
-		return
-	}
-	for _, choice := range lastResponse.Choices {
-		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			attemptlog.NoteFinishReason(c, *choice.FinishReason)
-			return
-		}
-	}
-}
-
 func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
 	systemFingerprint *string, model *string, usage **dto.Usage,
 	containStreamUsage *bool, info *relaycommon.RelayInfo,
@@ -212,8 +192,6 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStreamData string,
 	responseId string, createAt int64, model string, systemFingerprint string,
 	usage *dto.Usage, containStreamUsage bool) {
-
-	noteStreamFinishReason(c, lastStreamData)
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
@@ -255,7 +233,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 			return
 		}
 
-		state, err := chatToGeminiStreamState(c, &streamResponse)
+		state, err := chatToGeminiStreamState(info, &streamResponse)
 		if err != nil {
 			common.SysLog("error creating Gemini stream state: " + err.Error())
 			return
