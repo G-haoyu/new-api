@@ -338,12 +338,25 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		if !autoBan {
 			autoBanInt = 0
 		}
-		return &model.Channel{
-			Id:      c.GetInt("channel_id"),
+		channelID := c.GetInt("channel_id")
+		stub := &model.Channel{
+			Id:      channelID,
 			Type:    c.GetInt("channel_type"),
 			Name:    c.GetString("channel_name"),
 			AutoBan: &autoBanInt,
-		}, nil
+		}
+		// The stub is rebuilt from context, which only carries id/type/name. The
+		// operator-configured capacity (RPM/TPM/MaxConcurrency) must be recovered
+		// from the Channel record so BeginSchedulerRuntimeWithCapacity publishes a
+		// truthful runtime snapshot instead of reporting the channel as unlimited.
+		if channelID > 0 {
+			if full, err := model.CacheGetChannel(channelID); err == nil && full != nil {
+				stub.RPM = full.RPM
+				stub.TPM = full.TPM
+				stub.MaxConcurrency = full.MaxConcurrency
+			}
+		}
+		return stub, nil
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
