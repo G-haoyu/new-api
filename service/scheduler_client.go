@@ -86,9 +86,26 @@ type schedulerRequestShape struct {
 	Tools               json.RawMessage `json:"tools"`
 	MaxTokens           int             `json:"max_tokens"`
 	MaxCompletionTokens int             `json:"max_completion_tokens"`
-	ResponseFormat      *struct {
+	// OpenAI Chat Completions structured output.
+	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
+	// Anthropic Messages structured output (Claude output_format).
+	OutputFormat json.RawMessage `json:"output_format"`
+	// Gemini native structured output. Both camelCase and snake_case spellings
+	// are accepted because new-api's Relay tolerates either on ingress.
+	GenerationConfig *struct {
+		ResponseMimeType      string          `json:"responseMimeType"`
+		ResponseMimeTypeSnake string          `json:"response_mime_type"`
+		ResponseSchema        json.RawMessage `json:"responseSchema"`
+		ResponseSchemaSnake   json.RawMessage `json:"response_schema"`
+	} `json:"generationConfig"`
+	// OpenAI Responses structured output (text.format).
+	Text *struct {
+		Format *struct {
+			Type string `json:"type"`
+		} `json:"format"`
+	} `json:"text"`
 }
 type schedulerResponse struct {
 	DecisionID        string `json:"decision_id"`
@@ -1148,11 +1165,56 @@ func schedulerCapabilities(c *gin.Context) map[string]any {
 		return capabilities
 	}
 	capabilities["stream"] = shape.Stream
-	capabilities["tools"] = len(shape.Tools) > 0 && string(shape.Tools) != "null" && string(shape.Tools) != "[]"
-	if shape.ResponseFormat != nil {
-		capabilities["json_mode"] = shape.ResponseFormat.Type == "json_object" || shape.ResponseFormat.Type == "json_schema"
-	}
+	capabilities["tools"] = rawMessagePresent(shape.Tools)
+	capabilities["json_mode"] = shape.wantsJSONMode()
+	// vision is intentionally never reported here: the Catalog cannot yet prove
+	// per-model vision support, so it publishes vision=false for every endpoint.
+	// Emitting vision=true would make Supports() reject every image request. Keep
+	// vision unset until the Catalog carries authoritative per-model metadata.
 	return capabilities
+}
+
+// rawMessagePresent reports whether a JSON field carries a non-empty tools
+// payload across all relay protocols. OpenAI/Claude/Responses send an array,
+// Gemini may send a single object; both spellings of "empty" are excluded so a
+// request that merely includes an empty container is not treated as needing
+// tool support.
+func rawMessagePresent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null" && trimmed != "[]" && trimmed != "{}"
+}
+
+// wantsJSONMode detects structured-output requests across the OpenAI Chat
+// Completions, Anthropic Messages, Gemini native, and OpenAI Responses
+// envelopes. Any one signal is enough; the extraction stays permissive so it
+// never reports a capability the Relay would not actually honor.
+func (shape schedulerRequestShape) wantsJSONMode() bool {
+	if shape.ResponseFormat != nil {
+		if shape.ResponseFormat.Type == "json_object" || shape.ResponseFormat.Type == "json_schema" {
+			return true
+		}
+	}
+	if rawMessagePresent(shape.OutputFormat) {
+		return true
+	}
+	if cfg := shape.GenerationConfig; cfg != nil {
+		mime := cfg.ResponseMimeType
+		if mime == "" {
+			mime = cfg.ResponseMimeTypeSnake
+		}
+		if strings.Contains(mime, "json") {
+			return true
+		}
+		if rawMessagePresent(cfg.ResponseSchema) || rawMessagePresent(cfg.ResponseSchemaSnake) {
+			return true
+		}
+	}
+	if shape.Text != nil && shape.Text.Format != nil {
+		if shape.Text.Format.Type == "json_object" || shape.Text.Format.Type == "json_schema" {
+			return true
+		}
+	}
+	return false
 }
 
 func schedulerMaxOutputTokens(c *gin.Context) int {

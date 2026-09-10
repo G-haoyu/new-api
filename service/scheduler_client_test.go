@@ -511,6 +511,70 @@ func TestSchedulerCapabilitiesReadsCachedBodyAndRewinds(t *testing.T) {
 	}
 }
 
+func TestSchedulerCapabilitiesDetectsCapabilitiesAcrossProtocols(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		name     string
+		body     string
+		wantTool bool
+		wantJSON bool
+	}{
+		{
+			name:     "openai chat completions json_object",
+			body:     `{"model":"m","tools":[{"type":"function"}],"response_format":{"type":"json_object"}}`,
+			wantTool: true,
+			wantJSON: true,
+		},
+		{
+			name:     "anthropic messages output_format",
+			body:     `{"model":"m","tools":[{"name":"lookup"}],"output_format":{"type":"json_schema"}}`,
+			wantTool: true,
+			wantJSON: true,
+		},
+		{
+			name:     "gemini generationConfig responseMimeType",
+			body:     `{"contents":[],"tools":{"functionDeclarations":[{"name":"x"}]},"generationConfig":{"responseMimeType":"application/json"}}`,
+			wantTool: true,
+			wantJSON: true,
+		},
+		{
+			name:     "gemini snake_case response_schema",
+			body:     `{"contents":[],"generationConfig":{"response_schema":{"type":"object"}}}`,
+			wantTool: false,
+			wantJSON: true,
+		},
+		{
+			name:     "openai responses text.format",
+			body:     `{"model":"m","tools":[{"type":"web_search_preview"}],"text":{"format":{"type":"json_schema"}}}`,
+			wantTool: true,
+			wantJSON: true,
+		},
+		{
+			name:     "empty tool containers are not tool requests",
+			body:     `{"model":"m","tools":[],"generationConfig":{"responseMimeType":"text/plain"}}`,
+			wantTool: false,
+			wantJSON: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			caps := schedulerCapabilities(c)
+			if caps["tools"] != tc.wantTool {
+				t.Fatalf("tools=%v want %v (body=%s)", caps["tools"], tc.wantTool, tc.body)
+			}
+			if caps["json_mode"] != tc.wantJSON {
+				t.Fatalf("json_mode=%v want %v (body=%s)", caps["json_mode"], tc.wantJSON, tc.body)
+			}
+			if caps["vision"] != false {
+				t.Fatalf("vision must never be reported until the Catalog is authoritative, got %v", caps["vision"])
+			}
+		})
+	}
+}
+
 func TestRunSchedulerShadowRejectsIncompleteResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"candidates":[{"endpoint_id":"ep1","channel_id":1,"key_index":0,"model":"m","reason":["healthy"]}]}`))

@@ -116,7 +116,12 @@ func BuildSchedulerCatalogFromChannels(modelName string, channels []*model.Chann
 				Group:        firstGroup(channel.GetGroups()),
 				Priority:     channel.GetPriority(),
 				Weight:       int64(channel.GetWeight()),
-				Capabilities: SchedulerCapabilities{Stream: true},
+				// Channel configuration currently has no authoritative per-model
+				// capability metadata. These flags describe request envelopes that
+				// new-api's relay accepts. Leaving them at the Go zero value would
+				// incorrectly turn "unknown" into an explicit Scheduler denial and
+				// reject every tools/JSON-mode request before it reaches the relay.
+				Capabilities: SchedulerCapabilities{Stream: true, Tools: true, JSONMode: true},
 				Limits:       SchedulerLimits{RPM: channel.RPM, TPM: channel.TPM, MaxConcurrency: channel.MaxConcurrency},
 			})
 		}

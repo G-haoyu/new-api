@@ -8,6 +8,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildSchedulerCatalogFromChannelsIsCredentialFreeAndExpandsKeys(t *testing.T) {
@@ -73,6 +75,20 @@ func TestBuildSchedulerCatalogRejectsUnknownModel(t *testing.T) {
 	if _, err := BuildSchedulerCatalogFromChannels("missing-model", []*model.Channel{channel}); err == nil {
 		t.Fatal("expected unknown model error")
 	}
+}
+
+func TestBuildSchedulerCatalogAdvertisesRelayRequestCapabilities(t *testing.T) {
+	channel := &model.Channel{Id: 1, Type: constant.ChannelTypeOpenAI, Key: "secret", Status: common.ChannelStatusEnabled, Models: "m"}
+
+	catalog, err := BuildSchedulerCatalogFromChannels("m", []*model.Channel{channel})
+	require.NoError(t, err)
+	require.Len(t, catalog.Endpoints, 1)
+
+	capabilities := catalog.Endpoints[0].Capabilities
+	assert.True(t, capabilities.Stream)
+	assert.True(t, capabilities.Tools)
+	assert.True(t, capabilities.JSONMode)
+	assert.False(t, capabilities.Vision)
 }
 
 func mustJSON(t *testing.T, value any) []byte {
