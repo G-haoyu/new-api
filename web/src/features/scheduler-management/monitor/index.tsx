@@ -222,10 +222,11 @@ export function SchedulerMonitorPage() {
                             endpoint.rpm_used,
                             endpoint.rpm_capacity
                           )}
-                          {endpoint.rpm_attempts !== undefined &&
-                            endpoint.rpm_attempts !== endpoint.rpm_used && (
+                          {endpoint.error_rate !== undefined &&
+                            endpoint.error_rate > 0 &&
+                            endpoint.rpm_attempts !== undefined && (
                               <div className='text-muted-foreground text-xs'>
-                                {t('尝试 {{n}}', {
+                                {t('请求 {{n}}', {
                                   n: endpoint.rpm_attempts,
                                 })}
                               </div>
@@ -236,10 +237,11 @@ export function SchedulerMonitorPage() {
                             endpoint.tpm_used,
                             endpoint.tpm_capacity
                           )}
-                          {endpoint.tpm_attempts !== undefined &&
-                            endpoint.tpm_attempts !== endpoint.tpm_used && (
+                          {endpoint.error_rate !== undefined &&
+                            endpoint.error_rate > 0 &&
+                            endpoint.tpm_attempts !== undefined && (
                               <div className='text-muted-foreground text-xs'>
-                                {t('尝试 {{n}}', {
+                                {t('请求 {{n}}', {
                                   n: endpoint.tpm_attempts,
                                 })}
                               </div>
