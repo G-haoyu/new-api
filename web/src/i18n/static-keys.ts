@@ -84,6 +84,13 @@ export const STATIC_I18N_KEYS = [
   'Custom endpoints',
   'Catalog visibility',
 
+  // Routing provider sort labels
+  'Default (balanced)',
+  'Price (cheapest first)',
+  'Throughput (highest first)',
+  'Latency (lowest first)',
+  'Exacto (tool-call quality first)',
+
   // Header navigation
   'Home',
   'Console',
