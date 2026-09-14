@@ -222,12 +222,28 @@ export function SchedulerMonitorPage() {
                             endpoint.rpm_used,
                             endpoint.rpm_capacity
                           )}
+                          {endpoint.rpm_attempts !== undefined &&
+                            endpoint.rpm_attempts !== endpoint.rpm_used && (
+                              <div className='text-muted-foreground text-xs'>
+                                {t('尝试 {{n}}', {
+                                  n: endpoint.rpm_attempts,
+                                })}
+                              </div>
+                            )}
                         </td>
                         <td className='px-2 py-3'>
                           {formatCapacity(
                             endpoint.tpm_used,
                             endpoint.tpm_capacity
                           )}
+                          {endpoint.tpm_attempts !== undefined &&
+                            endpoint.tpm_attempts !== endpoint.tpm_used && (
+                              <div className='text-muted-foreground text-xs'>
+                                {t('尝试 {{n}}', {
+                                  n: endpoint.tpm_attempts,
+                                })}
+                              </div>
+                            )}
                         </td>
                         {profileNames.map((profile) => {
                           const score = endpoint.profiles?.[profile]

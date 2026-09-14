@@ -80,11 +80,17 @@ export interface SchedulerMonitorEndpoint {
   enabled?: boolean
   health?: string
   runtime_known?: boolean
+  // rpm_used/tpm_used are success-scoped (real passthrough) and drive load_ratio.
+  // rpm_attempts/tpm_attempts are the attempt-scoped counters used by admission.
   rpm_used?: number
   tpm_used?: number
+  rpm_attempts?: number
+  tpm_attempts?: number
   rpm_capacity?: number
   tpm_capacity?: number
   inflight?: number
+  success_rate?: number
+  error_rate?: number
   load_ratio?: number
   updated_at?: string
   profiles?: Record<string, { score?: number; gate_tier: number }>

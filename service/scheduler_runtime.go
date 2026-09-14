@@ -81,7 +81,8 @@ func observeSchedulerRuntimeAt(channelID, keyIndex int, window time.Time, starte
 	} else {
 		pipe.HIncrBy(ctx, key, "requests_finished", 1)
 		pipe.HIncrBy(ctx, key, "inflight", -1)
-		if statusCode >= 200 && statusCode < 400 {
+		succeeded := statusCode >= 200 && statusCode < 400
+		if succeeded {
 			pipe.HIncrBy(ctx, key, "success_total", 1)
 		} else {
 			pipe.HIncrBy(ctx, key, "error_total", 1)
@@ -91,6 +92,17 @@ func observeSchedulerRuntimeAt(channelID, keyIndex int, window time.Time, starte
 		}
 		if outputTokens > 0 {
 			pipe.HIncrBy(ctx, key, "output_tokens", int64(outputTokens))
+		}
+		// Success-scoped token counters power the monitor's "real passthrough"
+		//水位, so a channel that only fails no longer looks busy. Attempt-scoped
+		// input_tokens/output_tokens above remain the admission-rate signal.
+		if succeeded {
+			if inputTokens > 0 {
+				pipe.HIncrBy(ctx, key, "success_input_tokens", int64(inputTokens))
+			}
+			if outputTokens > 0 {
+				pipe.HIncrBy(ctx, key, "success_output_tokens", int64(outputTokens))
+			}
 		}
 		if latency > 0 {
 			pipe.HIncrBy(ctx, key, "latency_sum_ms", latency.Milliseconds())
