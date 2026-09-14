@@ -2,6 +2,11 @@ FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f
 
 WORKDIR /build/web
 COPY web/package.json web/bun.lock ./
+# Use the npmmirror.com registry inside the build: it is a byte-identical
+# mirror of registry.npmjs.org, so bun.lock integrity hashes still match and
+# --frozen-lockfile stays valid, while避免国内直连 npmjs 拉取 tarball 被截断
+# 导致的 "Integrity check failed / Fail extracting tarball" 批量报错。
+ENV BUN_CONFIG_REGISTRY=https://registry.npmmirror.com
 RUN bun install --frozen-lockfile
 COPY ./web ./
 COPY ./VERSION /build/VERSION
