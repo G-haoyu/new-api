@@ -10,6 +10,8 @@ build
 *.db-journal
 *.db-shm
 *.db-wal
+.spec-workflow
+run-local-dev.sh
 logs
 web/dist
 web/node_modules

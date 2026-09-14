@@ -131,6 +131,11 @@ export function SidebarModulesCard() {
           title: t('Security & Access'),
           description: t('Manage your security settings and account access'),
         },
+        {
+          key: 'routing',
+          title: t('Routing'),
+          description: t('Scheduler channel preference settings'),
+        },
       ],
     },
   ]
