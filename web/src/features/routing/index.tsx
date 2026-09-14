@@ -178,6 +178,10 @@ export function Routing() {
                         <FormItem className='max-w-xl'>
                           <FormLabel>{t('Provider sort')}</FormLabel>
                           <Select
+                            items={modeValues.map((mode) => ({
+                              value: mode,
+                              label: t(modeLabels[mode]),
+                            }))}
                             value={field.value}
                             onValueChange={field.onChange}
                           >
