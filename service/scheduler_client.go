@@ -457,7 +457,10 @@ func schedulerClientConfigFromOptions() SchedulerClientConfig {
 		emergencyMaxDuration = schedulerEmergencyMaxDuration
 	}
 	bootstrapURLs := schedulerOptionList("SchedulerBootstrapURLs")
-	localURL := strings.TrimRight(strings.TrimSpace(schedulerOption("SchedulerLocalURL", "SCHEDULER_LOCAL_URL", "")), "/")
+	// Local Scheduler 地址故意只从 .env 读取,不落 DB、不受 OptionMap 覆盖:
+	// 这是每个节点的本机连接地址,应由部署环境决定,而非通过管理页面持久化到
+	// 共享数据库(否则多节点会互相覆盖成同一个本机地址)。
+	localURL := strings.TrimRight(strings.TrimSpace(os.Getenv("SCHEDULER_LOCAL_URL")), "/")
 	baseURL := ""
 	switch {
 	case localURL != "":

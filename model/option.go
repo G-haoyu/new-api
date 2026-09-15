@@ -194,7 +194,8 @@ func InitOptionMap() {
 	}
 	common.OptionMap["SchedulerURL"] = os.Getenv("SCHEDULER_URL")
 	common.OptionMap["SchedulerBootstrapURLs"] = os.Getenv("SCHEDULER_BOOTSTRAP_URLS")
-	common.OptionMap["SchedulerLocalURL"] = os.Getenv("SCHEDULER_LOCAL_URL")
+	// SchedulerLocalURL 不再放入 OptionMap:本机地址只从 .env 实时读取
+	// (见 service.schedulerClientConfigFromOptions),不落 DB、不被 DB 覆盖。
 	common.OptionMap["SchedulerToken"] = os.Getenv("SCHEDULER_TOKEN")
 	common.OptionMap["SchedulerMode"] = os.Getenv("SCHEDULER_MODE")
 	if common.OptionMap["SchedulerMode"] == "" {
