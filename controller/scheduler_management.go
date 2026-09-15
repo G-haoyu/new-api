@@ -155,16 +155,8 @@ func UpdateSchedulerConfig(c *gin.Context) {
 	if req.BootstrapURLs != nil {
 		values[schedulerBootstrapURLsKey] = strings.TrimSpace(*req.BootstrapURLs)
 	}
-	if req.LocalURL != nil {
-		value := strings.TrimSpace(*req.LocalURL)
-		if value != "" {
-			if _, err := url.ParseRequestURI(value); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Scheduler 本机地址无效"})
-				return
-			}
-		}
-		values[schedulerLocalURLKey] = strings.TrimRight(value, "/")
-	}
+	// Local Scheduler 地址只从 .env 读取(见 service.schedulerClientConfigFromOptions),
+	// 不接受页面写入、不落 DB。忽略 req.LocalURL。
 	if req.Token != nil && strings.TrimSpace(*req.Token) != "" {
 		values[schedulerTokenKey] = strings.TrimSpace(*req.Token)
 	}
