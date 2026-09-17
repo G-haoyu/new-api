@@ -20,6 +20,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
@@ -406,6 +407,13 @@ func isTransientSchedulerError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
+	// A Scheduler (or an intermediate proxy such as socat) may accept the TCP
+	// connection and close it before returning HTTP response headers while the
+	// node is stopping. net/http reports that condition as EOF. It is a
+	// transport failure and should fall back just like connection refused/reset.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	if errors.Is(err, ErrSchedulerTemporarilyUnavailable) {
 		return true
 	}
@@ -561,9 +569,12 @@ func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientC
 	var lastErr error
 	var transientFailures int
 	now := time.Now()
-	for _, endpoint := range endpoints {
+	for endpointIndex, endpoint := range endpoints {
+		attempt := endpointIndex + 1
+		hasFallback := attempt < len(endpoints)
 		if !schedulerEndpointCircuitAllows(endpoint, now) {
 			lastErr = ErrSchedulerTemporarilyUnavailable
+			logger.LogWarn(ctx, "scheduler request endpoint skipped: path=%s endpoint=%s attempt=%d/%d reason=circuit_open fallback_available=%t", path, endpoint, attempt, len(endpoints), hasFallback)
 			continue
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, config.Timeout)
@@ -586,8 +597,10 @@ func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientC
 				schedulerEndpointCircuitFailure(endpoint, time.Now())
 				transientFailures++
 				lastErr = fmt.Errorf("%w: %v", ErrSchedulerTemporarilyUnavailable, err)
+				logger.LogWarn(ctx, "scheduler request endpoint failed: path=%s endpoint=%s attempt=%d/%d phase=request error=%v fallback_available=%t", path, endpoint, attempt, len(endpoints), err, hasFallback)
 				continue
 			}
+			logger.LogWarn(ctx, "scheduler request failed without fallback: path=%s endpoint=%s attempt=%d/%d phase=request error=%v", path, endpoint, attempt, len(endpoints), err)
 			return schedulerRequestOutcome{}, err
 		}
 		body, readErr := io.ReadAll(resp.Body)
@@ -597,25 +610,33 @@ func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientC
 			schedulerEndpointCircuitFailure(endpoint, time.Now())
 			transientFailures++
 			lastErr = fmt.Errorf("%w: %v", ErrSchedulerTemporarilyUnavailable, readErr)
+			logger.LogWarn(ctx, "scheduler request endpoint failed: path=%s endpoint=%s attempt=%d/%d phase=response_body error=%v fallback_available=%t", path, endpoint, attempt, len(endpoints), readErr, hasFallback)
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			schedulerEndpointCircuitSuccess(endpoint, time.Now())
 			schedulerCircuitSuccess(time.Now())
+			if attempt > 1 {
+				logger.LogInfo(ctx, fmt.Sprintf("scheduler request fallback succeeded: path=%s endpoint=%s attempt=%d/%d prior_failures=%d", path, endpoint, attempt, len(endpoints), transientFailures))
+			}
 			return schedulerRequestOutcome{endpoint: endpoint, status: resp.StatusCode, body: body}, nil
 		}
 		if resp.StatusCode >= 500 {
 			schedulerEndpointCircuitFailure(endpoint, time.Now())
 			transientFailures++
 			lastErr = fmt.Errorf("%w: scheduler status %d", ErrSchedulerTemporarilyUnavailable, resp.StatusCode)
+			logger.LogWarn(ctx, "scheduler request endpoint failed: path=%s endpoint=%s attempt=%d/%d phase=response_status status=%d fallback_available=%t", path, endpoint, attempt, len(endpoints), resp.StatusCode, hasFallback)
 			continue
 		}
+		logger.LogWarn(ctx, "scheduler request rejected without fallback: path=%s endpoint=%s attempt=%d/%d status=%d", path, endpoint, attempt, len(endpoints), resp.StatusCode)
 		return schedulerRequestOutcome{endpoint: endpoint, status: resp.StatusCode, body: body, err: fmt.Errorf("scheduler status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}, nil
 	}
 	schedulerCircuitFailure(time.Now())
 	if transientFailures > 0 && lastErr != nil {
+		logger.LogWarn(ctx, "scheduler request all endpoints failed: path=%s endpoints=%d transient_failures=%d error=%v", path, len(endpoints), transientFailures, lastErr)
 		return schedulerRequestOutcome{}, lastErr
 	}
+	logger.LogWarn(ctx, "scheduler request unavailable: path=%s endpoints=%d reason=all_endpoint_circuits_open", path, len(endpoints))
 	return schedulerRequestOutcome{}, ErrSchedulerTemporarilyUnavailable
 }
 
