@@ -140,6 +140,54 @@ func TestRunSchedulerShadowFallsBackToNextSchedulerURL(t *testing.T) {
 	}
 }
 
+func TestRunSchedulerShadowFallsBackAfterEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var firstHits int32
+	var secondHits int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&firstHits, 1)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack first scheduler connection: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&secondHits, 1)
+		if r.URL.Path != "/v1/schedule" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"decision_id":"d-eof-fallback","catalog_version":"catalog-v1","candidates":[{"endpoint_id":"ep2","channel_id":8,"key_index":1,"model":"m","reason":["healthy"]}]}`))
+	}))
+	defer second.Close()
+
+	ConfigureSchedulerClientForTest(SchedulerClientConfig{
+		Enabled:       true,
+		LocalURL:      first.URL,
+		BootstrapURLs: []string{second.URL},
+		Token:         "scheduler-test",
+		Timeout:       time.Second,
+	})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set(common.RequestIdKey, "req-eof-fallback")
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), common.RequestIdKey, "req-eof-fallback"))
+	if err := RunSchedulerShadow(c, "m", "default"); err != nil {
+		t.Fatalf("fallback after EOF failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&firstHits); got == 0 {
+		t.Fatal("local scheduler was not tried first")
+	}
+	if got := atomic.LoadInt32(&secondHits); got == 0 {
+		t.Fatal("bootstrap scheduler was not used after EOF")
+	}
+	if got := common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID); got != "d-eof-fallback" {
+		t.Fatalf("decision=%s", got)
+	}
+}
+
 func TestRunSchedulerShadowDefaultsToBalancedPolicy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
