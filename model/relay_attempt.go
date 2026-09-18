@@ -85,6 +85,9 @@ type RelayAttempt struct {
 	StreamEndReason string `json:"stream_end_reason" gorm:"type:varchar(16)"`
 
 	/* usage and cost */
+	// InputTokensActual is the normalized total input: base input plus cache
+	// read plus cache write, with the same meaning across provider dialects.
+	// CachedTokens is the cache read subset of it.
 	InputTokensActual  *int32   `json:"input_tokens_actual"`
 	OutputTokensActual *int32   `json:"output_tokens_actual"`
 	CachedTokens       *int32   `json:"cached_tokens"`
