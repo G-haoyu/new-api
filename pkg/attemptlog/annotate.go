@@ -61,6 +61,9 @@ func parseRetryAfter(raw string) *int {
 }
 
 // UsageNote carries the settled usage and cost for an attempt.
+// InputTokens is the normalized total input size: base input plus cache read
+// plus cache write, regardless of provider dialect. CachedTokens is the cache
+// read subset of that total.
 type UsageNote struct {
 	InputTokens     int
 	OutputTokens    int
