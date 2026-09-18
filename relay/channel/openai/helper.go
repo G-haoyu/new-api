@@ -6,6 +6,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -131,6 +132,25 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 	}
 }
 
+// noteStreamFinishReason extracts the terminal finish reason from the last
+// stream chunk. This covers every OpenAI-compatible channel, since all of them
+// funnel their final chunk through HandleFinalResponse.
+func noteStreamFinishReason(c *gin.Context, lastStreamData string) {
+	if lastStreamData == "" {
+		return
+	}
+	var lastResponse dto.ChatCompletionsStreamResponse
+	if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &lastResponse); err != nil {
+		return
+	}
+	for _, choice := range lastResponse.Choices {
+		if choice.FinishReason != nil && *choice.FinishReason != "" {
+			attemptlog.NoteFinishReason(c, *choice.FinishReason)
+			return
+		}
+	}
+}
+
 func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
 	systemFingerprint *string, model *string, usage **dto.Usage,
 	containStreamUsage *bool, info *relaycommon.RelayInfo,
@@ -162,6 +182,8 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStreamData string,
 	responseId string, createAt int64, model string, systemFingerprint string,
 	usage *dto.Usage, containStreamUsage bool) {
+
+	noteStreamFinishReason(c, lastStreamData)
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:

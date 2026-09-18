@@ -14,6 +14,7 @@ import (
 	common2 "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/observability"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -541,7 +542,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		req = req.WithContext(providerCtx)
 		otelRuntime.Inject(providerCtx, req)
 	}
+	upstreamStart := time.Now()
 	resp, err := relayClient.Do(req)
+	attemptlog.NoteUpstream(c, upstreamStart, resp)
 	if err != nil {
 		if otelRuntime != nil {
 			otelRuntime.FinishSpan(providerSpan, err)
