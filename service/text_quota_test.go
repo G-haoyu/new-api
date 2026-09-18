@@ -73,6 +73,9 @@ func TestCalculateTextQuotaSummaryUnifiedForClaudeSemantic(t *testing.T) {
 	require.Equal(t, messageSummary.CacheCreationTokens1h, chatSummary.CacheCreationTokens1h)
 	require.True(t, chatSummary.IsClaudeUsageSemantic)
 	require.Equal(t, 1488, chatSummary.Quota)
+	// normalized input = 1000 base + 100 cache read + 50 cache write
+	require.Equal(t, 1150, chatSummary.NormalizedInputTokens)
+	require.Equal(t, chatSummary.NormalizedInputTokens, messageSummary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryUsesSplitClaudeCacheCreationRatios(t *testing.T) {
@@ -202,6 +205,8 @@ func TestCalculateTextQuotaSummaryUsesClaudeBillingUsageBeforeTopLevelUsage(t *t
 	require.Equal(t, 12, summary.CacheCreationTokens5m)
 	require.Equal(t, 8, summary.CacheCreationTokens1h)
 	require.Equal(t, 118, summary.Quota)
+	// normalized input = 70 base + 30 cache read + 20 cache write
+	require.Equal(t, 120, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryUsesGeminiBillingUsageBeforeTopLevelUsage(t *testing.T) {
@@ -244,6 +249,8 @@ func TestCalculateTextQuotaSummaryUsesGeminiBillingUsageBeforeTopLevelUsage(t *t
 	require.Equal(t, 7, summary.CacheTokens)
 	require.Equal(t, 128, summary.TotalTokens)
 	require.Equal(t, 145, summary.Quota)
+	// gemini prompt tokens already include cached content
+	require.Equal(t, 105, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryUsesOpenAIBillingUsageBeforeTopLevelUsage(t *testing.T) {
@@ -281,6 +288,7 @@ func TestCalculateTextQuotaSummaryUsesOpenAIBillingUsageBeforeTopLevelUsage(t *t
 	require.Equal(t, 9, summary.CompletionTokens)
 	require.Equal(t, 89, summary.TotalTokens)
 	require.Equal(t, 98, summary.Quota)
+	require.Equal(t, 80, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryUsesOpenAIResponsesInputTokenDetails(t *testing.T) {
@@ -324,6 +332,8 @@ func TestCalculateTextQuotaSummaryUsesOpenAIResponsesInputTokenDetails(t *testin
 	require.Equal(t, 40, summary.CacheTokens)
 	// 60 uncached input + 40*0.25 cached input + 10*2 output = 90.
 	require.Equal(t, 90, summary.Quota)
+	// openai prompt tokens already include the cached subset
+	require.Equal(t, 100, summary.NormalizedInputTokens)
 }
 
 func TestUsageFromOpenAIBillingUsageNormalizesCacheDetailsWithoutOverwritingCanonicalValues(t *testing.T) {
@@ -473,6 +483,9 @@ func TestCalculateTextQuotaSummaryHandlesLegacyClaudeDerivedOpenAIUsage(t *testi
 
 	// 62 + 3544*0.1 + 586*1.25 + 95*5 = 1624.9 => 1624
 	require.Equal(t, 1624, summary.Quota)
+	// legacy claude-derived prompt tokens are exclusive of cache parts:
+	// normalized input = 62 + 3544 cache read + 586 cache write
+	require.Equal(t, 4192, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryBillsOpenAICacheWriteTokens(t *testing.T) {
@@ -566,6 +579,7 @@ func TestCalculateTextQuotaSummarySeparatesOpenRouterCacheReadFromPromptBilling(
 	// quota = (2604 - 2432) + 2432*0.1 + 383 = 798.2 => 798
 	require.Equal(t, 2604, summary.PromptTokens)
 	require.Equal(t, 798, summary.Quota)
+	require.Equal(t, 2604, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummarySeparatesOpenRouterCacheCreationFromPromptBilling(t *testing.T) {
@@ -601,6 +615,7 @@ func TestCalculateTextQuotaSummarySeparatesOpenRouterCacheCreationFromPromptBill
 	// quota = (2604 - 100) + 100*1.25 + 383 = 3012
 	require.Equal(t, 2604, summary.PromptTokens)
 	require.Equal(t, 3012, summary.Quota)
+	require.Equal(t, 2604, summary.NormalizedInputTokens)
 }
 
 func TestCalculateTextQuotaSummaryKeepsPrePRClaudeOpenRouterBilling(t *testing.T) {
@@ -640,6 +655,8 @@ func TestCalculateTextQuotaSummaryKeepsPrePRClaudeOpenRouterBilling(t *testing.T
 	require.True(t, summary.IsClaudeUsageSemantic)
 	require.Equal(t, 172, summary.PromptTokens)
 	require.Equal(t, 798, summary.Quota)
+	// normalized input adds the cache read back: 172 + 2432
+	require.Equal(t, 2604, summary.NormalizedInputTokens)
 }
 
 func TestComposeTieredTextQuotaKeepsToolCallSurcharges(t *testing.T) {
