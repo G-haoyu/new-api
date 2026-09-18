@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/observability"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -285,6 +286,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					otelRuntime.RecordStreamChunk(streamCtx, data)
 				}
 				info.SetFirstResponseTime()
+				attemptlog.NoteChunk(c, data)
 				info.ReceivedResponseCount++
 
 				select {

@@ -43,6 +43,16 @@ const (
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
 
+	// ContextKeyRelayAttempt stores the in-progress relay attempt telemetry
+	// record, so the upstream request layer and the billing layer can annotate
+	// the attempt they are part of without threading a parameter through every
+	// relay handler signature.
+	ContextKeyRelayAttempt ContextKey = "relay_attempt"
+
+	// ContextKeyFinishReason stores the terminal finish/stop reason reported by
+	// the upstream model, extracted where the response is already being parsed.
+	ContextKeyFinishReason ContextKey = "finish_reason"
+
 	ContextKeyAutoGroup           ContextKey = "auto_group"
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"
 	ContextKeyAutoGroupRetryIndex ContextKey = "auto_group_retry_index"
