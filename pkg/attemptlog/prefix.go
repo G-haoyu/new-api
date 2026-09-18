@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"unsafe"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -38,39 +39,66 @@ func hashHex(data []byte) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// sparseChainHash hashes data at fixed exponential positions using a chained
-// scheme: h[0] = SHA256(block[0]), h[i] = SHA256(h[i-1] || block[i]). The chain
-// preserves prefix matching: two bodies sharing the first K bytes share all
-// block hashes whose offset+size <= K.
+// sparseChainHashSpans hashes the virtual concatenation of spans at fixed
+// exponential positions using a chained scheme: h[0] = SHA256(block[0]),
+// h[i] = SHA256(h[i-1] || block[i]). The chain preserves prefix matching: two
+// inputs sharing the first K bytes share all block hashes whose
+// offset+size <= K.
 //
-// The last partial block (when the body doesn't fill the scheduled size) is
-// included verbatim so identical full bodies always produce identical chains.
-// For a 1.2MB body this produces ~13 hashes (vs ~4700 for dense 256-byte
-// blocks), and the output is ~208 bytes (vs ~75KB).
-func sparseChainHash(data []byte) string {
-	if len(data) == 0 {
+// The concatenation is never materialized. Blocks are contiguous — every input
+// byte is hashed exactly once, and "sparse" refers to the checkpoints emitted,
+// not to sampling. A block straddling a span boundary writes its fragments into
+// the same hasher, so the result is identical to hashing one contiguous buffer
+// while allocating nothing beyond the output string. Zero-length spans are
+// skipped rather than emitting a block that covers nothing.
+//
+// The last partial block (when the input doesn't fill the scheduled size) is
+// included verbatim so identical inputs always produce identical chains. For
+// 1.2MB of prompt this produces 14 hashes (vs ~4700 for dense 256-byte blocks),
+// and the output is ~224 bytes (vs ~75KB).
+func sparseChainHashSpans(spans [][]byte) string {
+	total := 0
+	for _, s := range spans {
+		total += len(s)
+	}
+	if total == 0 {
 		return ""
 	}
+
 	var sb strings.Builder
 	var prevHash []byte
-	offset := 0
+	spanIdx, spanOff := 0, 0
 	for _, blockSize := range sparseBlockSizes {
-		if offset >= len(data) {
+		// Advance past exhausted spans before deciding whether input remains,
+		// so a trailing nil span cannot emit a spurious final block.
+		for spanIdx < len(spans) && spanOff >= len(spans[spanIdx]) {
+			spanIdx++
+			spanOff = 0
+		}
+		if spanIdx >= len(spans) {
 			break
 		}
-		end := offset + blockSize
-		if end > len(data) {
-			end = len(data)
-		}
+
 		h := sha256.New()
 		if prevHash != nil {
 			h.Write(prevHash)
 		}
-		h.Write(data[offset:end])
+		remaining := blockSize
+		for remaining > 0 && spanIdx < len(spans) {
+			avail := len(spans[spanIdx]) - spanOff
+			if avail <= 0 {
+				spanIdx++
+				spanOff = 0
+				continue
+			}
+			n := min(avail, remaining)
+			h.Write(spans[spanIdx][spanOff : spanOff+n])
+			spanOff += n
+			remaining -= n
+		}
 		sum := h.Sum(nil)
 		sb.WriteString(hex.EncodeToString(sum[:8]))
 		prevHash = sum
-		offset = end
 	}
 	return sb.String()
 }
@@ -85,57 +113,93 @@ type PrefixHashes struct {
 	Prefix string
 }
 
-// ComputePrefixHashes extracts system and tools raw bytes via gjson (using
-// Result.Index for zero-copy slicing into the original body) and hashes them
-// individually. The prefix hash covers the entire raw body via sparseChainHash
-// — no gjson extraction for messages, avoiding the dominant memory cost on
-// large contexts. The raw body includes non-prompt fields (model, temperature,
-// etc.), but for large bodies these are <0.01% and constant per-agent, so
-// cross-request prefix matching is unaffected.
+// ComputePrefixHashes extracts the prompt-bearing subtrees from the raw body
+// via gjson (using Result.Index for zero-copy slicing into the original body)
+// and chain-hashes them in a fixed per-format order — the order those fields
+// occupy in the rendered prompt (tool definitions are injected into the system
+// region ahead of the conversation by most chat templates).
+//
+// The chain deliberately never reads envelope fields (model, stream, sampling
+// params, and volatile identity fields such as metadata.user_id, user, or
+// prompt_cache_key). The chain is cascading — one differing byte in an early
+// block invalidates every later block hash — so hashing the whole body let a
+// per-request session ID destroy cross-request prefix matching entirely. Only
+// prompt content reaches the chain, mirroring what upstream KV caches
+// (vLLM/SGLang) actually key on: the tokenized rendered prompt.
+//
+// Known limitation: Claude clients move cache_control breakpoints between
+// turns, which mutates bytes mid-messages and shifts later offsets, degrading
+// (not breaking) prefix matching for such requests. Stripping cache_control
+// would require rewriting the messages array, conflicting with zero-copy
+// extraction.
 func ComputePrefixHashes(body []byte, relayFormat types.RelayFormat) PrefixHashes {
 	if len(body) == 0 {
 		return PrefixHashes{}
 	}
 
-	var systemPath, toolsPath string
+	var hashes PrefixHashes
 	switch relayFormat {
 	case types.RelayFormatOpenAI:
-		// System lives inside messages; try both roles.
-		if r := gjson.GetBytes(body, `messages.#(role=system).content`); r.Exists() {
-			systemPath = `messages.#(role=system).content`
-		} else if r := gjson.GetBytes(body, `messages.#(role=developer).content`); r.Exists() {
-			systemPath = `messages.#(role=developer).content`
+		tools := extractRaw(body, "tools")
+		hashes.Tools = hashHex(tools)
+		messages := extractRaw(body, "messages")
+		if messages == nil {
+			// Legacy /v1/completions shares this relay format; prompt is the
+			// whole conversation there.
+			messages = extractRaw(body, "prompt")
+		} else {
+			// System lives inside messages; try both roles. The filter runs
+			// over the already-extracted span instead of rescanning the body.
+			system := extractRaw(messages, `#(role=system).content`)
+			if system == nil {
+				system = extractRaw(messages, `#(role=developer).content`)
+			}
+			hashes.System = hashHex(system)
 		}
-		toolsPath = "tools"
+		hashes.Prefix = sparseChainHashSpans([][]byte{tools, messages})
 	case types.RelayFormatClaude:
-		systemPath = "system"
-		toolsPath = "tools"
+		system := extractRaw(body, "system")
+		tools := extractRaw(body, "tools")
+		messages := extractRaw(body, "messages")
+		hashes.System = hashHex(system)
+		hashes.Tools = hashHex(tools)
+		hashes.Prefix = sparseChainHashSpans([][]byte{system, tools, messages})
 	case types.RelayFormatGemini:
-		systemPath = "systemInstruction"
-		toolsPath = "tools"
+		system := extractRaw(body, "systemInstruction")
+		tools := extractRaw(body, "tools")
+		contents := extractRaw(body, "contents")
+		hashes.System = hashHex(system)
+		hashes.Tools = hashHex(tools)
+		hashes.Prefix = sparseChainHashSpans([][]byte{system, tools, contents})
 	case types.RelayFormatOpenAIResponses:
-		systemPath = "instructions"
-		toolsPath = "tools"
+		instructions := extractRaw(body, "instructions")
+		tools := extractRaw(body, "tools")
+		input := extractRaw(body, "input")
+		hashes.System = hashHex(instructions)
+		hashes.Tools = hashHex(tools)
+		hashes.Prefix = sparseChainHashSpans([][]byte{instructions, tools, input})
 	default:
 		return PrefixHashes{}
 	}
-
-	return PrefixHashes{
-		System: hashHex(extractRaw(body, systemPath)),
-		Tools:  hashHex(extractRaw(body, toolsPath)),
-		Prefix: sparseChainHash(body),
-	}
+	return hashes
 }
 
 // extractRaw returns the raw JSON bytes of a gjson path result, slicing the
-// original body via Result.Index to avoid a copy. Falls back to []byte(r.Raw)
-// (one copy) when Index is unavailable. Returns nil for absent, null, empty
-// array, or empty string values.
+// original body via Result.Index to avoid a copy. Returns nil for absent,
+// null, empty array, or empty string values.
+//
+// gjson.GetBytes cannot be used here: it converts the result Raw to a Go
+// string (copying the whole span) and callers then copy it again when
+// converting back to bytes — two full copies of messages-sized spans. Instead
+// this views the body as a string without copying (safe: nothing writes
+// through the view) and slices the view back into the body's backing array.
+// The result aliases body, so callers must keep body alive while using it.
 func extractRaw(body []byte, path string) []byte {
 	if path == "" {
 		return nil
 	}
-	r := gjson.GetBytes(body, path)
+	bodyStr := unsafe.String(unsafe.SliceData(body), len(body))
+	r := gjson.Get(bodyStr, path)
 	if !r.Exists() {
 		return nil
 	}
@@ -143,11 +207,11 @@ func extractRaw(body []byte, path string) []byte {
 	if raw == "[]" || raw == "null" || raw == "\"\"" {
 		return nil
 	}
-	// Zero-copy slice into the original body when gjson recorded the offset.
-	if r.Index > 0 && r.Index+len(raw) <= len(body) {
+	// Slice the original body when gjson recorded the offset into bodyStr.
+	if r.Index > 0 && r.Index+len(raw) <= len(bodyStr) {
 		return body[r.Index : r.Index+len(raw)]
 	}
-	// Fallback: one string→[]byte copy.
+	// Fallback (modifiers, sub-selectors): one string→[]byte copy.
 	return []byte(raw)
 }
 
