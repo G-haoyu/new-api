@@ -138,7 +138,7 @@ func TestModelProviderPriceCalculatesDiscountedPrices(t *testing.T) {
 }
 
 func TestModelProviderPriceRejectsInvalidDiscount(t *testing.T) {
-	price := &ModelProviderPrice{InputPrice: 1, OutputPrice: 2}
+	price := &ModelProviderPrice{ModelId: 1, ProviderSlug: "test", InputPrice: 1, OutputPrice: 2}
 	discount := 100.1
 	price.DiscountRate = &discount
 
