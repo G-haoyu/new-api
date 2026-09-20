@@ -265,3 +265,40 @@ func TestModelSquareProviderNameFallsBackWhenMetadataNameIsEmpty(t *testing.T) {
 	require.Len(t, item.Providers, 1)
 	assert.Equal(t, "Provider label", item.Providers[0].Name)
 }
+
+func TestBuildDefaultProviderPricesUsesModelPricingForMissingProviders(t *testing.T) {
+	prices := buildDefaultProviderPrices(
+		model.Pricing{
+			ModelName:       "default-price-model",
+			ModelRatio:      1.5,
+			CompletionRatio: 2,
+			Providers:       []model.ProviderSummary{{Slug: "openai"}},
+		},
+		map[string]model.ModelProviderPrice{},
+	)
+
+	require.Contains(t, prices, "openai")
+	assert.Equal(t, 3.0, prices["openai"].InputPrice)
+	assert.Equal(t, 6.0, prices["openai"].OutputPrice)
+}
+
+func TestBuildDefaultProviderPricesPreservesExplicitProviderPricing(t *testing.T) {
+	prices := buildDefaultProviderPrices(
+		model.Pricing{
+			ModelName:       "configured-price-model",
+			ModelRatio:      1.5,
+			CompletionRatio: 2,
+			Providers:       []model.ProviderSummary{{Slug: "openai"}},
+		},
+		map[string]model.ModelProviderPrice{
+			"openai": {
+				ProviderSlug: "openai",
+				InputPrice:   9,
+				OutputPrice:  10,
+			},
+		},
+	)
+
+	assert.Equal(t, 9.0, prices["openai"].InputPrice)
+	assert.Equal(t, 10.0, prices["openai"].OutputPrice)
+}

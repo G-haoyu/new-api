@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/observability"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	channelmetrics "github.com/QuantumNous/new-api/pkg/channel_metrics"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -201,6 +202,20 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}()
 
+	attemptScope := attemptlog.BeginRequest(attemptlog.FeaturesFrom(
+		c,
+		requestId,
+		relayInfo.UserId,
+		relayInfo.TokenId,
+		relayFormat,
+		c.Request.URL.Path,
+		relayInfo.OriginModelName,
+		tokens,
+		relayInfo.IsStream,
+		meta,
+		request,
+	))
+
 	retryParam := &service.RetryParam{
 		Ctx:             c,
 		TokenGroup:      relayInfo.TokenGroup,
@@ -238,6 +253,20 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		attempt := attemptScope.BeginAttempt(c, retryParam.GetRetry(), attemptlog.ChannelTarget{
+			ChannelId:         channel.Id,
+			ChannelType:       channel.Type,
+			UpstreamModelName: relayInfo.GetUpstreamModelName(),
+			UsingGroup:        relayInfo.UsingGroup,
+		}, &attemptlog.Pricing{
+			ModelRatio:      priceData.ModelRatio,
+			CompletionRatio: priceData.CompletionRatio,
+			GroupRatio:      priceData.GroupRatioInfo.GroupRatio,
+			CacheRatio:      priceData.CacheRatio,
+			ModelPrice:      priceData.ModelPrice,
+			UsePrice:        priceData.UsePrice,
+		})
+
 		// The closure keeps the in-flight counter balanced even when the relay
 		// panics, because the deferred decrement still runs while unwinding.
 		attemptParentCtx := c.Request.Context()
@@ -271,6 +300,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				otelRuntime.FinishSpan(attemptSpan, newAPIError)
 			}
 		}
+
+		attempt.Finish(c, finishInputFor(c, relayInfo, newAPIError))
 
 		if newAPIError == nil {
 			relayInfo.LastError = nil
@@ -311,6 +342,30 @@ func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
 	useChannel = append(useChannel, fmt.Sprintf("%d", channelId))
 	c.Set("use_channel", useChannel)
+}
+
+// finishInputFor collects the terminal state of one relay attempt for telemetry.
+// It is the single place that knows how to read an attempt's outcome out of the
+// relay layer, including the sentinel semantics of FirstResponseTime.
+func finishInputFor(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) attemptlog.FinishInput {
+	in := attemptlog.FinishInput{
+		RelayFirstResponseTime: attemptlog.FirstTokenTimeOf(info, info.FirstResponseTime),
+		StreamChunks:           info.ReceivedResponseCount,
+		UpstreamModelName:      info.GetUpstreamModelName(),
+	}
+
+	if info.StreamStatus != nil {
+		in.StreamEndReason = string(info.StreamStatus.EndReason)
+	}
+
+	if apiErr != nil {
+		in.Err = apiErr
+		in.InternalErrCode = string(apiErr.GetErrorCode())
+		in.HTTPStatus = apiErr.StatusCode
+		in.ErrMessage = apiErr.Error()
+	}
+
+	return in
 }
 
 func getProviderRouting(c *gin.Context) *model.ProviderRouting {

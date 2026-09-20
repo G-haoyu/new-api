@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/observability"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -40,9 +41,17 @@ func appendToolSurchargeLogInfo(other map[string]interface{}, items []ToolSurcha
 }
 
 type textQuotaSummary struct {
-	PromptTokens          int
-	CompletionTokens      int
-	TotalTokens           int
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	// NormalizedInputTokens is the total input size with a provider-independent
+	// meaning: base input plus cache read plus cache write. Anthropic-style
+	// usage (native Claude semantics and legacy claude-derived OpenAI payloads)
+	// reports prompt tokens excluding cache parts, so they are added back;
+	// OpenAI/Gemini-style usage already counts cache reads inside prompt
+	// tokens, and native OpenAI cache writes are unadjusted prefix counts that
+	// must not be added on top.
+	NormalizedInputTokens int
 	CacheTokens           int
 	CacheCreationTokens   int
 	CacheCreationTokens5m int
@@ -286,6 +295,15 @@ func calculateTextQuotaSummary(ctx *gin.Context, relayInfo *relaycommon.RelayInf
 			}
 		}
 		summary.PromptTokens -= summary.CacheCreationTokens
+	}
+
+	// Anthropic-style usage reports prompt tokens excluding cache parts, so the
+	// true total input is the sum of the three disjoint counters. OpenAI/Gemini
+	// style already counts cache reads (and native OpenAI cache writes) inside
+	// prompt tokens, where adding them back would double-count.
+	summary.NormalizedInputTokens = summary.PromptTokens
+	if summary.IsClaudeUsageSemantic || legacyClaudeDerived {
+		summary.NormalizedInputTokens += summary.CacheTokens + cacheWriteTokensTotal(summary)
 	}
 
 	dPromptTokens := decimal.NewFromInt(int64(summary.PromptTokens))
@@ -583,6 +601,14 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
+	attemptlog.NoteUsage(ctx, attemptlog.UsageNote{
+		InputTokens:     summary.NormalizedInputTokens,
+		OutputTokens:    summary.CompletionTokens,
+		CachedTokens:    summary.CacheTokens,
+		ReasoningTokens: reasoningTokensOf(billingUsage),
+		CostActual:      summary.Quota,
+	})
+
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     summary.PromptTokens,
@@ -601,4 +627,13 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	gopool.Go(func() {
 		perfmetrics.RecordRelaySample(relayInfo, true, int64(summary.CompletionTokens))
 	})
+}
+
+// reasoningTokensOf reads the reasoning token count, which billing folds into
+// CompletionTokens and therefore does not surface anywhere on its own.
+func reasoningTokensOf(usage *dto.Usage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.CompletionTokenDetails.ReasoningTokens
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/observability"
+	"github.com/QuantumNous/new-api/pkg/attemptlog"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -22,7 +23,6 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 
 	"github.com/gin-gonic/gin"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -286,6 +286,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					otelRuntime.RecordStreamChunk(streamCtx, data)
 				}
 				info.SetFirstResponseTime()
+				attemptlog.NoteChunk(c, data)
 				info.ReceivedResponseCount++
 
 				select {
@@ -325,10 +326,6 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	cleanup()
 	if otelRuntime != nil {
-		streamSpan.SetAttributes(
-			attribute.Int("new_api.stream.chunk_count", info.ReceivedResponseCount),
-			attribute.String("new_api.stream.end_reason", string(info.StreamStatus.EndReason)),
-		)
 		if !info.StreamStatus.IsNormalEnd() || info.StreamStatus.HasErrors() {
 			streamSpan.SetStatus(codes.Error, string(info.StreamStatus.EndReason))
 		}
