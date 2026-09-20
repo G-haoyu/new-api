@@ -237,12 +237,14 @@ type ModelMutateDrawerProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   currentRow?: Model | null
+  initialSection?: 'metadata' | 'pricing'
 }
 
 export function ModelMutateDrawer({
   open,
   onOpenChange,
   currentRow,
+  initialSection,
 }: ModelMutateDrawerProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -263,6 +265,17 @@ export function ModelMutateDrawer({
   // depending on it: modelSettings is a fresh object on every system-options
   // refetch, and including it in the deps would reset the form under the user.
   const modelSettingsRef = useRef<ModelSettings | null>(null)
+  const pricingSectionRef = useRef<HTMLDivElement | null>(null)
+
+  // Opening for pricing (e.g. from `setOpen('price-model')`) scrolls straight
+  // to the pricing section once the drawer is mounted.
+  useEffect(() => {
+    if (!open || initialSection !== 'pricing') return
+    const timer = window.setTimeout(() => {
+      pricingSectionRef.current?.scrollIntoView({ block: 'start' })
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [open, initialSection])
 
   // Fetch vendors for dropdown
   const { data: vendorsData } = useQuery({
@@ -1058,10 +1071,11 @@ export function ModelMutateDrawer({
             </SideDrawerSection>
 
             {/* Pricing Configuration */}
-            <SideDrawerSection>
-              <h3 className='text-sm font-semibold'>
-                {t('Pricing Configuration')}
-              </h3>
+            <div ref={pricingSectionRef}>
+              <SideDrawerSection>
+                <h3 className='text-sm font-semibold'>
+                  {t('Pricing Configuration')}
+                </h3>
 
               <div className='space-y-4'>
                 <Label>{t('Pricing mode')}</Label>
@@ -1399,6 +1413,7 @@ export function ModelMutateDrawer({
                 </>
               )}
             </SideDrawerSection>
+            </div>
 
             {/* Status & Sync */}
             <SideDrawerSection>

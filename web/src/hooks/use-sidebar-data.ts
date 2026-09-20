@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   CircleUserRound,
+  ClipboardList,
   Cuboid,
   Gauge,
   KeyRound,
@@ -28,7 +29,9 @@ import {
   PlugZap,
   RadioTower,
   ReceiptText,
+  Route,
   ScrollText,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Store,
@@ -110,6 +113,11 @@ export function useSidebarData(): SidebarData {
             icon: ScrollText,
           },
           {
+            title: t('Audit Logs'),
+            url: '/usage-logs/audit',
+            icon: ClipboardList,
+          },
+          {
             title: t('Task Logs'),
             url: '/usage-logs/task',
             activeUrls: ['/usage-logs/drawing'],
@@ -131,6 +139,16 @@ export function useSidebarData(): SidebarData {
             title: t('Profile'),
             url: '/profile',
             icon: CircleUserRound,
+          },
+          {
+            title: t('Security & Access'),
+            url: '/security',
+            icon: ShieldCheck,
+          },
+          {
+            title: t('Routing'),
+            url: '/routing',
+            icon: Route,
           },
         ],
       },

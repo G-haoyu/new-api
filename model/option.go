@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -58,8 +60,6 @@ func InitOptionMap() {
 	common.OptionMap["TaskEnabled"] = strconv.FormatBool(common.TaskEnabled)
 	common.OptionMap["TaskPluginEnabled"] = strconv.FormatBool(constant.TaskPluginEnabled)
 	jsplugin.DefaultRegistry.SetEnabled(constant.TaskPluginEnabled)
-	common.OptionMap["TaskPluginOverrideEnabled"] = strconv.FormatBool(constant.TaskPluginOverrideEnabled)
-	jsplugin.DefaultRegistry.SetOverrideEnabled(constant.TaskPluginOverrideEnabled)
 	common.OptionMap[setting.TaskPluginMarketplaceSourcesKey] = setting.TaskPluginMarketplaceSources2JsonString()
 	common.OptionMap[setting.TaskPluginDisabledFactoryKeysKey] = "[]"
 	jsplugin.DefaultRegistry.SetDisabledFactoryKeys(nil)
@@ -189,12 +189,54 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
 	common.OptionMap["OtelCaptureMode"] = observability.ContentCaptureMode()
+	// Scheduler integration defaults. Values persisted in the options table
+	// override these environment-backed defaults during startup.
+	common.OptionMap["SchedulerEnabled"] = os.Getenv("SCHEDULER_ENABLED")
+	if common.OptionMap["SchedulerEnabled"] == "" {
+		common.OptionMap["SchedulerEnabled"] = "false"
+	}
+	common.OptionMap["SchedulerURL"] = os.Getenv("SCHEDULER_URL")
+	common.OptionMap["SchedulerBootstrapURLs"] = os.Getenv("SCHEDULER_BOOTSTRAP_URLS")
+	// SchedulerLocalURL 不再放入 OptionMap:本机地址只从 .env 实时读取
+	// (见 service.schedulerClientConfigFromOptions),不落 DB、不被 DB 覆盖。
+	common.OptionMap["SchedulerToken"] = os.Getenv("SCHEDULER_TOKEN")
+	common.OptionMap["SchedulerMode"] = os.Getenv("SCHEDULER_MODE")
+	if common.OptionMap["SchedulerMode"] == "" {
+		common.OptionMap["SchedulerMode"] = "shadow"
+	}
+	common.OptionMap["SchedulerCanaryPercent"] = os.Getenv("SCHEDULER_CANARY_PERCENT")
+	if common.OptionMap["SchedulerCanaryPercent"] == "" {
+		common.OptionMap["SchedulerCanaryPercent"] = "0"
+	}
+	common.OptionMap["SchedulerCanarySalt"] = os.Getenv("SCHEDULER_CANARY_SALT")
+	if common.OptionMap["SchedulerCanarySalt"] == "" {
+		common.OptionMap["SchedulerCanarySalt"] = "scheduler-v2"
+	}
+	common.OptionMap["SchedulerShadowTimeoutMS"] = os.Getenv("SCHEDULER_SHADOW_TIMEOUT_MS")
+	if common.OptionMap["SchedulerShadowTimeoutMS"] == "" {
+		common.OptionMap["SchedulerShadowTimeoutMS"] = "100"
+	}
+	common.OptionMap["SchedulerRuntimePrefix"] = os.Getenv("SCHEDULER_RUNTIME_PREFIX")
+	if common.OptionMap["SchedulerRuntimePrefix"] == "" {
+		common.OptionMap["SchedulerRuntimePrefix"] = "new-api:scheduler:runtime"
+	}
+	common.OptionMap["SchedulerRuntimeHighWatermark"] = os.Getenv("SCHEDULER_RUNTIME_HIGH_WATERMARK")
+	if common.OptionMap["SchedulerRuntimeHighWatermark"] == "" {
+		common.OptionMap["SchedulerRuntimeHighWatermark"] = "0.8"
+	}
+	common.OptionMap["SchedulerSigningSecret"] = os.Getenv("SCHEDULER_SIGNING_SECRET")
+	common.OptionMap["SchedulerEmergencyNativeRouting"] = "false"
+	common.OptionMap["SchedulerEmergencyMaxDurationSeconds"] = "600"
+	common.OptionMap["SchedulerEmergencyGroups"] = ""
+	common.OptionMap["SchedulerEmergencyModels"] = ""
+	common.OptionMap["SchedulerKillSwitch"] = os.Getenv("SCHEDULER_KILL_SWITCH")
+	if common.OptionMap["SchedulerKillSwitch"] == "" {
+		common.OptionMap["SchedulerKillSwitch"] = "false"
+	}
 
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
-	for k, v := range modelConfigs {
-		common.OptionMap[k] = v
-	}
+	maps.Copy(common.OptionMap, modelConfigs)
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
@@ -262,6 +304,9 @@ func normalizeOptionValue(key string, value string) string {
 
 func UpdateOption(key string, value string) error {
 	value = normalizeOptionValue(key, value)
+	if IsModelPricingOption(key) {
+		return UpdateModelPricingOptions(map[string]string{key: value})
+	}
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
@@ -405,9 +450,6 @@ func updateOptionMap(key string, value string) (err error) {
 		case "TaskPluginEnabled":
 			constant.TaskPluginEnabled = boolValue
 			jsplugin.DefaultRegistry.SetEnabled(boolValue)
-		case "TaskPluginOverrideEnabled":
-			constant.TaskPluginOverrideEnabled = boolValue
-			jsplugin.DefaultRegistry.SetOverrideEnabled(boolValue)
 		case "DataExportEnabled":
 			common.DataExportEnabled = boolValue
 		case "DefaultCollapseSidebar":

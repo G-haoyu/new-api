@@ -173,6 +173,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	relayInfo.SetEstimatePromptTokens(tokens)
+	// Make the canonical Relay tokenizer estimate available to Scheduler
+	// Attempt/retry reporting. Distributor may have scheduled earlier, before
+	// RelayInfo exists, so this context write intentionally happens here too.
+	common.SetContextKey(c, constant.ContextKeyEstimatedTokens, tokens)
+	canonicalReservationEstimate := tokens + service.SchedulerMaxOutputTokens(c)
+	if canonicalReservationEstimate < tokens { // integer overflow guard
+		canonicalReservationEstimate = tokens
+	}
+	// Channels without a finite TPM gate cannot benefit from a resize. Avoid a
+	// second synchronous Scheduler round trip for the common unlimited-capacity
+	// case; finite-TPM channels retain the safety correction below.
+	if service.SchedulerReservationResizeRequired(c) {
+		if err := service.ResizeSchedulerReservation(c, canonicalReservationEstimate); err != nil {
+			if service.SchedulerEnforcedForRequest(c) {
+				newAPIError = types.NewError(fmt.Errorf("scheduler reservation resize failed: %w", err), types.ErrorCodeGetChannelFailed, types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+				return
+			}
+			logger.LogDebug(c, "scheduler reservation resize skipped: %v", err)
+		}
+	}
 
 	priceData, err := helper.ModelPriceHelper(c, relayInfo, tokens, meta)
 	if err != nil {
@@ -229,6 +249,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
+		service.ResetSchedulerAttemptMetrics(c)
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
@@ -253,6 +274,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		attemptStart := time.Now()
+		runtimeWindow := service.BeginSchedulerRuntimeWithCapacity(channel.Id, keyIndex, channel.RPM, channel.TPM, channel.MaxConcurrency)
 		attempt := attemptScope.BeginAttempt(c, retryParam.GetRetry(), attemptlog.ChannelTarget{
 			ChannelId:         channel.Id,
 			ChannelType:       channel.Type,
@@ -300,6 +324,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				otelRuntime.FinishSpan(attemptSpan, newAPIError)
 			}
 		}
+		attemptStatus := http.StatusOK
+		if newAPIError != nil {
+			attemptStatus = newAPIError.StatusCode
+		}
+		streamStarted := common.GetContextKeyBool(c, constant.ContextKeySchedulerStreamStarted)
+		if !streamStarted {
+			streamStarted = relayInfo.IsStream && relayInfo.HasSendResponse()
+		}
+		if streamStarted && !relayInfo.FirstResponseTime.IsZero() && !relayInfo.StartTime.IsZero() {
+			common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, int(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
+		}
+		inputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerInputTokens)
+		if inputTokens == 0 {
+			inputTokens = common.GetContextKeyInt(c, constant.ContextKeyPromptTokens)
+		}
+		outputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerOutputTokens)
+		if err := service.ReportSchedulerAttemptAsync(c, service.SchedulerEndpointForChannel(c, channel.Id), retryParam.GetRetry()+1, attemptStatus, newAPIError == nil, streamStarted, inputTokens, outputTokens); err != nil {
+			logger.LogDebug(c, "scheduler attempt report skipped: %v", err)
+		}
+		service.FinishSchedulerRuntime(channel.Id, keyIndex, runtimeWindow, attemptStatus, inputTokens, outputTokens, time.Since(attemptStart))
 
 		attempt.Finish(c, finishInputFor(c, relayInfo, newAPIError))
 
@@ -311,7 +355,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 		retryParam.ExcludeChannel(channel.Id)
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
@@ -329,6 +373,38 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			perfmetrics.RecordRelaySample(relayInfo, false, 0)
 		})
 	}
+}
+
+// CountClaudeTokens implements Anthropic's token-counting utility endpoint.
+// It deliberately skips upstream generation and billing; callers use this
+// endpoint to size prompts before creating a Message.
+func CountClaudeTokens(c *gin.Context) {
+	request, err := helper.GetAndValidateClaudeRequest(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "invalid_request_error",
+				"message": common.MessageWithRequestId(err.Error(), c.GetString(common.RequestIdKey)),
+			},
+		})
+		return
+	}
+
+	info := relaycommon.GenRelayInfoClaude(c, request)
+	inputTokens, err := service.CountRequestToken(c, request.GetTokenCountMeta(), info)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "api_error",
+				"message": common.MessageWithRequestId(err.Error(), c.GetString(common.RequestIdKey)),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"input_tokens": inputTokens})
 }
 
 var upgrader = websocket.Upgrader{
@@ -379,7 +455,6 @@ func getProviderRouting(c *gin.Context) *model.ProviderRouting {
 	}
 	return routing
 }
-
 func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	if request == nil {
 		return &types.TokenCountMeta{}
@@ -416,12 +491,45 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		if !autoBan {
 			autoBanInt = 0
 		}
-		return &model.Channel{
-			Id:      c.GetInt("channel_id"),
+		channelID := c.GetInt("channel_id")
+		stub := &model.Channel{
+			Id:      channelID,
 			Type:    c.GetInt("channel_type"),
 			Name:    c.GetString("channel_name"),
 			AutoBan: &autoBanInt,
-		}, nil
+		}
+		// The stub is rebuilt from context, which only carries id/type/name. The
+		// operator-configured capacity (RPM/TPM/MaxConcurrency) must be recovered
+		// from the Channel record so BeginSchedulerRuntimeWithCapacity publishes a
+		// truthful runtime snapshot instead of reporting the channel as unlimited.
+		if channelID > 0 {
+			if full, err := model.CacheGetChannel(channelID); err == nil && full != nil {
+				stub.RPM = full.RPM
+				stub.TPM = full.TPM
+				stub.MaxConcurrency = full.MaxConcurrency
+			}
+		}
+		return stub, nil
+	}
+	if candidate, enforced := service.SchedulerCandidateForRetry(c, retryParam.GetRetry()); enforced {
+		if retryParam.GetRetry() > 0 {
+			if err := service.ReserveSchedulerCandidate(c, candidate, retryParam.GetRetry()+1); err != nil {
+				return nil, types.NewError(fmt.Errorf("scheduler candidate reservation failed: %w", err), types.ErrorCodeGetChannelFailed)
+			}
+		}
+		channel, err := model.GetChannelById(candidate.ChannelID, true)
+		if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled {
+			return nil, types.NewError(fmt.Errorf("scheduler candidate channel %d unavailable", candidate.ChannelID), types.ErrorCodeGetChannelFailed)
+		}
+		info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+		newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
+		if newAPIError != nil {
+			return nil, newAPIError
+		}
+		return channel, nil
+	}
+	if service.SchedulerEnforcedForRequest(c) && !service.SchedulerEmergencyNativeActive(c) {
+		return nil, types.NewError(fmt.Errorf("scheduler candidate chain exhausted at retry %d", retryParam.GetRetry()), types.ErrorCodeGetChannelFailed)
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
@@ -472,7 +580,7 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	return operation_setting.ShouldRetryByStatusCode(code)
 }
 
-func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
+func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
@@ -489,33 +597,21 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		modelName := c.GetString("original_model")
 		tokenId := c.GetInt("token_id")
 		userGroup := c.GetString("group")
-		channelId := c.GetInt("channel_id")
-		other := make(map[string]interface{})
+		other := model.NewLogOther()
 		if c.Request != nil && c.Request.URL != nil {
-			other["request_path"] = c.Request.URL.Path
+			other.SetPublic("request_path", c.Request.URL.Path)
 		}
-		other["error_type"] = err.GetErrorType()
-		other["error_code"] = err.GetErrorCode()
-		other["status_code"] = err.StatusCode
-		other["channel_id"] = channelId
-		other["channel_name"] = c.GetString("channel_name")
-		other["channel_type"] = c.GetInt("channel_type")
-		adminInfo := make(map[string]interface{})
-		adminInfo["use_channel"] = c.GetStringSlice("use_channel")
-		isMultiKey := common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey)
-		if isMultiKey {
-			adminInfo["is_multi_key"] = true
-			adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
-		}
-		service.AppendChannelAffinityAdminInfo(c, adminInfo)
-		other["admin_info"] = adminInfo
+		other.SetPublic("error_type", err.GetErrorType())
+		other.SetPublic("error_code", err.GetErrorCode())
+		other.SetPublic("status_code", err.StatusCode)
+		service.AppendRelayLogAdminInfo(c, relayInfo, other)
 		service.AppendTaskPluginContextAuditInfo(c, other)
 		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
 		if startTime.IsZero() {
 			startTime = time.Now()
 		}
 		useTimeSeconds := int(time.Since(startTime).Seconds())
-		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
 
 }
@@ -576,6 +672,11 @@ func RelayNotImplemented(c *gin.Context) {
 }
 
 func RelayNotFound(c *gin.Context) {
+	// The web fallback may already have applied static-asset cache headers.
+	// A missing API or asset can appear after an upgrade; never cache its 404.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private, max-age=0")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	err := types.OpenAIError{
 		Message: fmt.Sprintf("Invalid URL (%s %s)", c.Request.Method, c.Request.URL.Path),
 		Type:    "invalid_request_error",
@@ -780,7 +881,8 @@ func executeTaskSubmissionWith(
 			processChannelError(c,
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
-				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
+				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode),
+				relayInfo)
 		}
 		retryParam.ExcludeChannel(channel.Id)
 
@@ -849,6 +951,9 @@ func executeTaskSubmissionWith(
 	}
 	task.Quota = result.Quota
 	task.Data = result.TaskData
+	if len(result.PluginState) > 0 {
+		task.PrivateData.PluginState = result.PluginState
+	}
 	task.Action = relayInfo.Action
 	if immediate := result.Immediate; immediate != nil {
 		task.Status = model.TaskStatus(immediate.Status)

@@ -2,10 +2,18 @@ FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f
 
 WORKDIR /build/web
 COPY web/package.json web/bun.lock ./
+# Use the npmmirror.com registry inside the build: it is a byte-identical
+# mirror of registry.npmjs.org, so bun.lock integrity hashes still match and
+# --frozen-lockfile stays valid, while避免国内直连 npmjs 拉取 tarball 被截断
+# 导致的 "Integrity check failed / Fail extracting tarball" 批量报错。
+ENV BUN_CONFIG_REGISTRY=https://registry.npmmirror.com
 RUN bun install --frozen-lockfile
 COPY ./web ./
 COPY ./VERSION /build/VERSION
-RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+# Invoke the package entrypoint directly. Bun's .bin shim resolves the
+# entrypoint's ../dist import relative to /node_modules/.bin on some Linux
+# filesystems, so `bun run build` can fail even when the package is installed.
+RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun ./node_modules/@rsbuild/core/bin/rsbuild.js build
 
 FROM golang:1.26.1-alpine@sha256:2389ebfa5b7f43eeafbd6be0c3700cc46690ef842ad962f6c5bd6be49ed82039 AS builder2
 ENV GO111MODULE=on CGO_ENABLED=0 GOWORK=off
@@ -16,7 +24,8 @@ ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
 ENV GOEXPERIMENT=greenteagc
 
 WORKDIR /build
-
+RUN go env -w GOPROXY=https://goproxy.cn,direct \
+    && go env -w GOSUMDB=sum.golang.google.cn
 ADD go.mod go.sum ./
 # relaykit is a local submodule referenced via replace; its go.mod must be
 # present for go mod download to resolve the main module graph.
