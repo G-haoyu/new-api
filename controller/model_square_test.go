@@ -191,6 +191,8 @@ func seedModelSquarePrice(t *testing.T, db *gorm.DB, modelID int) {
 }
 
 func TestModelSquareUsesOnlyExplicitProviderPrices(t *testing.T) {
+	inputListPrice := 1.4
+	discount := 90.0
 	item := modelSquareItemFromModel(
 		&model.Model{Id: 1, ModelName: "gpt-test"},
 		map[string]model.Pricing{
@@ -204,10 +206,12 @@ func TestModelSquareUsesOnlyExplicitProviderPrices(t *testing.T) {
 		map[int]model.Vendor{},
 		map[string]model.ModelProviderPrice{
 			"siliconflow": {
-				ModelId:      1,
-				ProviderSlug: "siliconflow",
-				InputPrice:   1,
-				OutputPrice:  2,
+				ModelId:        1,
+				ProviderSlug:   "siliconflow",
+				InputPrice:     1,
+				OutputPrice:    2,
+				InputListPrice: &inputListPrice,
+				DiscountRate:   &discount,
 			},
 		},
 		map[string]model.Provider{
@@ -229,7 +233,9 @@ func TestModelSquareUsesOnlyExplicitProviderPrices(t *testing.T) {
 	assert.Equal(t, "SiliconFlow", item.Providers[0].Name)
 	assert.True(t, item.Providers[0].Available)
 	require.NotNil(t, item.Providers[0].Pricing)
-	assert.Equal(t, float64(1), item.Providers[0].Pricing.InputPrice)
+	assert.InDelta(t, 1.26, item.Providers[0].Pricing.InputPrice, 0.000001)
+	assert.Equal(t, inputListPrice, *item.Providers[0].Pricing.InputListPrice)
+	assert.Equal(t, discount, *item.Providers[0].Pricing.DiscountRate)
 }
 
 func TestModelSquareProviderNameFallsBackWhenMetadataNameIsEmpty(t *testing.T) {
