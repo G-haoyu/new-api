@@ -26,11 +26,16 @@ type modelSquareProvider struct {
 }
 
 type modelSquareProviderPricing struct {
-	InputPrice      float64  `json:"input_price"`
-	OutputPrice     float64  `json:"output_price"`
-	CacheReadPrice  *float64 `json:"cache_read_price,omitempty"`
-	CacheWritePrice *float64 `json:"cache_write_price,omitempty"`
-	Source          string   `json:"source"`
+	InputPrice          float64  `json:"input_price"`
+	OutputPrice         float64  `json:"output_price"`
+	CacheReadPrice      *float64 `json:"cache_read_price,omitempty"`
+	CacheWritePrice     *float64 `json:"cache_write_price,omitempty"`
+	InputListPrice      *float64 `json:"input_list_price,omitempty"`
+	OutputListPrice     *float64 `json:"output_list_price,omitempty"`
+	CacheReadListPrice  *float64 `json:"cache_read_list_price,omitempty"`
+	CacheWriteListPrice *float64 `json:"cache_write_list_price,omitempty"`
+	DiscountRate        *float64 `json:"discount_rate,omitempty"`
+	Source              string   `json:"source"`
 }
 
 type modelSquareProviderMetadata struct {
@@ -169,6 +174,7 @@ func modelSquareItemFromModel(
 	sort.Strings(providerSlugs)
 	for _, providerSlug := range providerSlugs {
 		providerPrice := providerPrices[providerSlug]
+		providerPrice.RecalculateEffectivePrices()
 		runtimeProvider, hasRuntimeProvider := availableProviders[providerSlug]
 		providerItem := modelSquareProvider{
 			Slug:      providerSlug,
@@ -187,11 +193,16 @@ func modelSquareItemFromModel(
 			providerItem.StatusPageURL = metadata.StatusPageURL
 		}
 		providerItem.Pricing = &modelSquareProviderPricing{
-			InputPrice:      providerPrice.InputPrice,
-			OutputPrice:     providerPrice.OutputPrice,
-			CacheReadPrice:  providerPrice.CacheReadPrice,
-			CacheWritePrice: providerPrice.CacheWritePrice,
-			Source:          "model-provider",
+			InputPrice:          providerPrice.InputPrice,
+			OutputPrice:         providerPrice.OutputPrice,
+			CacheReadPrice:      providerPrice.CacheReadPrice,
+			CacheWritePrice:     providerPrice.CacheWritePrice,
+			InputListPrice:      providerPrice.InputListPrice,
+			OutputListPrice:     providerPrice.OutputListPrice,
+			CacheReadListPrice:  providerPrice.CacheReadListPrice,
+			CacheWriteListPrice: providerPrice.CacheWriteListPrice,
+			DiscountRate:        providerPrice.DiscountRate,
+			Source:              "model-provider",
 		}
 		providerItem.Metadata = providerMetadataFromPrice(providerPrice)
 		item.Providers = append(item.Providers, providerItem)

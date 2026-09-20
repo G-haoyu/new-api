@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -28,6 +29,11 @@ type ModelProviderPrice struct {
 	OutputPrice         float64  `json:"output_price" gorm:"not null"`
 	CacheReadPrice      *float64 `json:"cache_read_price,omitempty"`
 	CacheWritePrice     *float64 `json:"cache_write_price,omitempty"`
+	InputListPrice      *float64 `json:"input_list_price,omitempty"`
+	OutputListPrice     *float64 `json:"output_list_price,omitempty"`
+	CacheReadListPrice  *float64 `json:"cache_read_list_price,omitempty"`
+	CacheWriteListPrice *float64 `json:"cache_write_list_price,omitempty"`
+	DiscountRate        *float64 `json:"discount_rate,omitempty" gorm:"column:discount_percent"`
 	SourceURL           string   `json:"source_url,omitempty" gorm:"size:512"`
 	EffectiveAt         int64    `json:"effective_at,omitempty" gorm:"bigint"`
 	CreatedTime         int64    `json:"created_time" gorm:"bigint"`
@@ -59,19 +65,69 @@ func (price *ModelProviderPrice) normalize() error {
 	if price.ModelId <= 0 || price.ProviderSlug == "" {
 		return errors.New("model id and provider slug are required")
 	}
-	if price.InputPrice < 0 || price.OutputPrice < 0 {
+	if !isFiniteNonNegative(price.InputPrice) || !isFiniteNonNegative(price.OutputPrice) {
 		return errors.New("provider prices must be non-negative")
 	}
 	if price.ContextLength < 0 || price.MaxOutputTokens < 0 {
 		return errors.New("context length and max output tokens must be non-negative")
 	}
-	if price.CacheReadPrice != nil && *price.CacheReadPrice < 0 {
+	if price.CacheReadPrice != nil && !isFiniteNonNegative(*price.CacheReadPrice) {
 		return errors.New("cache read price must be non-negative")
 	}
-	if price.CacheWritePrice != nil && *price.CacheWritePrice < 0 {
+	if price.CacheWritePrice != nil && !isFiniteNonNegative(*price.CacheWritePrice) {
 		return errors.New("cache write price must be non-negative")
 	}
+	listPrices := []*float64{
+		price.InputListPrice,
+		price.OutputListPrice,
+		price.CacheReadListPrice,
+		price.CacheWriteListPrice,
+	}
+	for _, listPrice := range listPrices {
+		if listPrice != nil && !isFiniteNonNegative(*listPrice) {
+			return errors.New("provider list prices must be non-negative")
+		}
+	}
+	if price.DiscountRate != nil &&
+		(!isFiniteNonNegative(*price.DiscountRate) || *price.DiscountRate > 100) {
+		return errors.New("discount rate must be between 0 and 100")
+	}
+	if price.DiscountRate != nil && *price.DiscountRate < 100 &&
+		price.InputListPrice == nil && price.OutputListPrice == nil &&
+		price.CacheReadListPrice == nil && price.CacheWriteListPrice == nil {
+		return errors.New("discount rate requires at least one provider list price")
+	}
+	price.RecalculateEffectivePrices()
 	return nil
+}
+
+func isFiniteNonNegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+// RecalculateEffectivePrices refreshes display prices from the configured
+// provider list prices and discount rate. Legacy rows without list prices
+// retain their stored effective prices.
+func (price *ModelProviderPrice) RecalculateEffectivePrices() {
+	rate := 100.0
+	if price.DiscountRate != nil {
+		rate = *price.DiscountRate
+	}
+	factor := rate / 100
+	if price.InputListPrice != nil {
+		price.InputPrice = *price.InputListPrice * factor
+	}
+	if price.OutputListPrice != nil {
+		price.OutputPrice = *price.OutputListPrice * factor
+	}
+	if price.CacheReadListPrice != nil {
+		value := *price.CacheReadListPrice * factor
+		price.CacheReadPrice = &value
+	}
+	if price.CacheWriteListPrice != nil {
+		value := *price.CacheWriteListPrice * factor
+		price.CacheWritePrice = &value
+	}
 }
 
 func (price *ModelProviderPrice) Create() error {
@@ -103,25 +159,30 @@ func (price *ModelProviderPrice) Update() error {
 	}
 	price.UpdatedTime = common.GetTimestamp()
 	return DB.Model(&ModelProviderPrice{}).Where("id = ?", price.Id).Updates(map[string]any{
-		"model_id":             price.ModelId,
-		"provider_slug":        price.ProviderSlug,
-		"input_price":          price.InputPrice,
-		"output_price":         price.OutputPrice,
-		"cache_read_price":     price.CacheReadPrice,
-		"cache_write_price":    price.CacheWritePrice,
-		"source_url":           price.SourceURL,
-		"effective_at":         price.EffectiveAt,
-		"model_name":           price.ModelName,
-		"context_length":       price.ContextLength,
-		"max_output_tokens":    price.MaxOutputTokens,
-		"region":               price.Region,
-		"precision":            price.Precision,
-		"quantization":         price.Quantization,
-		"supported_parameters": price.SupportedParameters,
-		"stream_cancellation":  price.StreamCancellation,
-		"free":                 price.Free,
-		"batch":                price.Batch,
-		"updated_time":         price.UpdatedTime,
+		"model_id":               price.ModelId,
+		"provider_slug":          price.ProviderSlug,
+		"input_price":            price.InputPrice,
+		"output_price":           price.OutputPrice,
+		"cache_read_price":       price.CacheReadPrice,
+		"cache_write_price":      price.CacheWritePrice,
+		"input_list_price":       price.InputListPrice,
+		"output_list_price":      price.OutputListPrice,
+		"cache_read_list_price":  price.CacheReadListPrice,
+		"cache_write_list_price": price.CacheWriteListPrice,
+		"discount_percent":       price.DiscountRate,
+		"source_url":             price.SourceURL,
+		"effective_at":           price.EffectiveAt,
+		"model_name":             price.ModelName,
+		"context_length":         price.ContextLength,
+		"max_output_tokens":      price.MaxOutputTokens,
+		"region":                 price.Region,
+		"precision":              price.Precision,
+		"quantization":           price.Quantization,
+		"supported_parameters":   price.SupportedParameters,
+		"stream_cancellation":    price.StreamCancellation,
+		"free":                   price.Free,
+		"batch":                  price.Batch,
+		"updated_time":           price.UpdatedTime,
 	}).Error
 }
 
@@ -154,6 +215,9 @@ func DeleteModelProviderPrice(id int) error {
 func ListModelProviderPrice(modelId int) ([]ModelProviderPrice, error) {
 	var prices []ModelProviderPrice
 	err := DB.Where("model_id = ?", modelId).Order("provider_slug ASC").Find(&prices).Error
+	for i := range prices {
+		prices[i].RecalculateEffectivePrices()
+	}
 	return prices, err
 }
 
@@ -167,6 +231,7 @@ func GetModelProviderPriceMap(modelIds []int) (map[int]map[string]ModelProviderP
 		return nil, err
 	}
 	for _, price := range prices {
+		price.RecalculateEffectivePrices()
 		if result[price.ModelId] == nil {
 			result[price.ModelId] = make(map[string]ModelProviderPrice)
 		}
@@ -203,6 +268,7 @@ func ListProviderModels(providerSlug string) ([]ProviderModelRelation, error) {
 	}
 	pricesByModel := make(map[int]ModelProviderPrice, len(prices))
 	for _, price := range prices {
+		price.RecalculateEffectivePrices()
 		pricesByModel[price.ModelId] = price
 	}
 
