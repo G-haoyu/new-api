@@ -138,11 +138,14 @@ func normalizeClickHouseDSN(dsn string) string {
 }
 
 func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error) {
-	dsn := os.Getenv(envName)
+	return chooseDBWithDSN(os.Getenv(envName), envName, isLog)
+}
+
+func chooseDBWithDSN(dsn, sourceName string, isLog bool) (*gorm.DB, common.DatabaseType, error) {
 	if dsn != "" {
 		if isClickHouseDSN(dsn) {
 			if !isLog {
-				return nil, "", fmt.Errorf("%s does not support ClickHouse; use SQLite, MySQL, or PostgreSQL for the primary database and LOG_SQL_DSN for ClickHouse logs", envName)
+				return nil, "", fmt.Errorf("%s does not support ClickHouse; use SQLite, MySQL, or PostgreSQL for the primary database and LOG_SQL_DSN for ClickHouse logs", sourceName)
 			}
 			common.SysLog("using ClickHouse as log database")
 			db, err := gorm.Open(clickhouse.Open(normalizeClickHouseDSN(dsn)), newGormConfig(false))
@@ -227,14 +230,18 @@ func InitDB() (err error) {
 	return err
 }
 
-func InitLogDB() (err error) {
-	if os.Getenv("LOG_SQL_DSN") == "" {
+func InitLogDB() error {
+	return InitLogDBWithDSN(os.Getenv("LOG_SQL_DSN"))
+}
+
+func InitLogDBWithDSN(logDSN string) (err error) {
+	if logDSN == "" {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
 		return
 	}
-	db, dbType, err := chooseDB("LOG_SQL_DSN", true)
+	db, dbType, err := chooseDBWithDSN(logDSN, "log database DSN", true)
 	if err == nil {
 		common.SetLogDatabaseType(dbType)
 		initCol()

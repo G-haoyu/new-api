@@ -28,6 +28,10 @@ services:
       - dev_data:/data
     environment:
       - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
+      # Set all three Consul settings or leave all empty to use LOG_SQL_DSN; partial configuration fails startup.
+      - CONSUL_KV_DB_PATH=${CONSUL_KV_DB_PATH:-}
+      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-}
+      - CONSUL_HTTP_TOKEN=${CONSUL_HTTP_TOKEN:-}
       - REDIS_CONN_STRING=redis://redis
       - TZ=Asia/Shanghai
       - BATCH_UPDATE_ENABLED=true
