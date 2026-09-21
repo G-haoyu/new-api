@@ -30,6 +30,10 @@ services:
 #      - SQL_DSN=root:123456@tcp(mysql:3306)/new-api  # Point to the mysql service, uncomment if using MySQL
 #      - LOG_SQL_DSN=postgresql://root:123456@postgres:5432/new-api-log # OPTIONAL: If you want a separate database for logging, uncomment and set this
 #      - LOG_SQL_DSN=clickhouse://default:123456@clickhouse:9000/new_api_logs # OPTIONAL: Use ClickHouse for logs only; also uncomment clickhouse in depends_on and the clickhouse service below
+      # Set all three Consul settings or leave all empty to use LOG_SQL_DSN; partial configuration fails startup.
+      - CONSUL_KV_DB_PATH=${CONSUL_KV_DB_PATH:-}
+      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-} # host:port defaults to http://
+      - CONSUL_HTTP_TOKEN=${CONSUL_HTTP_TOKEN:-}
 #      - LOG_SQL_CLICKHOUSE_TTL_DAYS=0 # OPTIONAL: ClickHouse log retention days. Unset or 0 disables automatic deletion; set to e.g. 30 to keep 30 days
       - REDIS_CONN_STRING=redis://:123456@redis:6379 # ⚠️ IMPORTANT: Change the password in production!
       - TZ=Asia/Shanghai
