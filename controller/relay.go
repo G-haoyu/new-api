@@ -253,6 +253,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		attemptStart := time.Now()
+		runtimeWindow := service.BeginSchedulerRuntimeWithCapacity(channel.Id, keyIndex, channel.RPM, channel.TPM, channel.MaxConcurrency)
 		attempt := attemptScope.BeginAttempt(c, retryParam.GetRetry(), attemptlog.ChannelTarget{
 			ChannelId:         channel.Id,
 			ChannelType:       channel.Type,
@@ -300,6 +303,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				otelRuntime.FinishSpan(attemptSpan, newAPIError)
 			}
 		}
+		attemptStatus := http.StatusOK
+		if newAPIError != nil {
+			attemptStatus = newAPIError.StatusCode
+		}
+		streamStarted := common.GetContextKeyBool(c, constant.ContextKeySchedulerStreamStarted)
+		if !streamStarted {
+			streamStarted = relayInfo.IsStream && relayInfo.HasSendResponse()
+		}
+		if streamStarted && !relayInfo.FirstResponseTime.IsZero() && !relayInfo.StartTime.IsZero() {
+			common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, int(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
+		}
+		inputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerInputTokens)
+		if inputTokens == 0 {
+			inputTokens = common.GetContextKeyInt(c, constant.ContextKeyPromptTokens)
+		}
+		outputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerOutputTokens)
+		if err := service.ReportSchedulerAttemptAsync(c, service.SchedulerEndpointForChannel(c, channel.Id), retryParam.GetRetry()+1, attemptStatus, newAPIError == nil, streamStarted, inputTokens, outputTokens); err != nil {
+			logger.LogDebug(c, "scheduler attempt report skipped: %v", err)
+		}
+		service.FinishSchedulerRuntime(channel.Id, keyIndex, runtimeWindow, attemptStatus, inputTokens, outputTokens, time.Since(attemptStart))
 
 		attempt.Finish(c, finishInputFor(c, relayInfo, newAPIError))
 
