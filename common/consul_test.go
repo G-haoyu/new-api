@@ -220,3 +220,66 @@ func TestLoadLogSQLDSNSettings(t *testing.T) {
 func consulResponse(payload string) string {
 	return fmt.Sprintf(`[{"Value":%q}]`, base64.StdEncoding.EncodeToString([]byte(payload)))
 }
+
+func TestFetchClickHouseLogDSNHostList(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"single", "10.2.8.75", "10.2.8.75:9000"},
+		{"multiple", "10.2.4.215,10.2.4.217,10.2.4.218", "10.2.4.215:9000"},
+		{"whitespace", " 10.2.4.215 , 10.2.4.217 ", "10.2.4.215:9000"},
+		{"ipv6", "2001:db8::1,2001:db8::2", "[2001:db8::1]:9000"},
+		{"empty first", ",10.2.4.217", ""},
+		{"blank first", "  ,10.2.4.217", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"clickhouse":{"cht_maas_log":{"database":"logs","host":%q,"password":"secret","port":9000,"user":"logger"}}}`, tt.host)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, consulResponse(payload))
+			}))
+			defer server.Close()
+			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			if tt.want == "" {
+				require.ErrorContains(t, err, "is incomplete")
+				return
+			}
+			require.NoError(t, err)
+			parsed, err := url.Parse(dsn)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, parsed.Host)
+		})
+	}
+}
+
+func TestFetchClickHouseLogDSNConfiguredKey(t *testing.T) {
+	for _, key := range []string{"ch_maas_log", " ch_maas_log ", "missing"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv("CONSUL_CLICKHOUSE_CONFIG_KEY", key)
+			payload := `{"clickhouse":{"ch_maas_log":{"database":"prod_logs","host":"10.2.4.215,10.2.4.217","password":"secret","port":9000,"user":"logger"},"cht_maas_log":{"database":"test_logs","host":"localhost","password":"secret","port":9000,"user":"logger"}}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, consulResponse(payload))
+			}))
+			defer server.Close()
+			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			if key == "missing" {
+				require.ErrorContains(t, err, "CONSUL_CLICKHOUSE_CONFIG_KEY")
+				return
+			}
+			require.NoError(t, err)
+			parsed, err := url.Parse(dsn)
+			require.NoError(t, err)
+			assert.Equal(t, "10.2.4.215:9000", parsed.Host)
+			assert.Equal(t, "/prod_logs", parsed.Path)
+		})
+	}
+}
+
+func TestSelectClickHouseConfigBlankKey(t *testing.T) {
+	t.Setenv("CONSUL_CLICKHOUSE_CONFIG_KEY", "  ")
+	name, _, err := selectClickHouseConfig(map[string]clickHouseConfig{"ch_maas_log": {}})
+	require.NoError(t, err)
+	assert.Equal(t, "ch_maas_log", name)
+}

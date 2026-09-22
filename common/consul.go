@@ -115,6 +115,9 @@ func fetchClickHouseLogDSN(ctx context.Context, client *http.Client, addr, token
 	if err != nil {
 		return "", err
 	}
+	// Consul may list several hosts; connect only to the first configured address.
+	firstHost, _, _ := strings.Cut(clickHouse.Host, ",")
+	clickHouse.Host = strings.TrimSpace(firstHost)
 	if clickHouse.Host == "" || clickHouse.User == "" || clickHouse.Password == "" || clickHouse.Database == "" || clickHouse.Port < 1 || clickHouse.Port > 65535 {
 		return "", fmt.Errorf("ClickHouse configuration %q is incomplete", name)
 	}
@@ -144,6 +147,13 @@ func consulKVURL(addr, kvPath string) (string, error) {
 func selectClickHouseConfig(configs map[string]clickHouseConfig) (string, clickHouseConfig, error) {
 	if len(configs) == 0 {
 		return "", clickHouseConfig{}, fmt.Errorf("Consul KV value contains no clickhouse configuration")
+	}
+	if name := strings.TrimSpace(os.Getenv("CONSUL_CLICKHOUSE_CONFIG_KEY")); name != "" {
+		config, ok := configs[name]
+		if !ok {
+			return "", clickHouseConfig{}, fmt.Errorf("Consul KV value contains no clickhouse configuration for CONSUL_CLICKHOUSE_CONFIG_KEY=%q", name)
+		}
+		return name, config, nil
 	}
 	if config, ok := configs[defaultConsulClickHouseConfigName]; ok {
 		return defaultConsulClickHouseConfigName, config, nil

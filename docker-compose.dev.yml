@@ -32,6 +32,14 @@ services:
       - CONSUL_KV_DB_PATH=${CONSUL_KV_DB_PATH:-}
       - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-}
       - CONSUL_HTTP_TOKEN=${CONSUL_HTTP_TOKEN:-}
+      # Optional exact key under clickhouse in the decoded KV JSON (e.g. ch_maas_log).
+      - CONSUL_CLICKHOUSE_CONFIG_KEY=${CONSUL_CLICKHOUSE_CONFIG_KEY:-}
+      - oRELAY_ATTEMPT_LOG_ENABLED=true
+      - RELAY_ATTEMPT_LOG_SAMPLE_RATE=1
+      - RELAY_ATTEMPT_LOG_BUFFER_SIZE=4096
+      - RELAY_ATTEMPT_LOG_BATCH_SIZE=200
+      - RELAY_ATTEMPT_LOG_FLUSH_MS=2000
+      - LOG_SQL_CLICKHOUSE_TTL_DAYS=7
       - REDIS_CONN_STRING=redis://redis
       - TZ=Asia/Shanghai
       - BATCH_UPDATE_ENABLED=true
