@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -282,6 +285,49 @@ func TestSelectClickHouseConfigBlankKey(t *testing.T) {
 	name, _, err := selectClickHouseConfig(map[string]clickHouseConfig{"ch_maas_log": {}})
 	require.NoError(t, err)
 	assert.Equal(t, "ch_maas_log", name)
+}
+
+// ckdriver.OpenDB rejects pool limits passed through Options and returns a
+// *sql.DB that fails without dialing, which made every startup probe fail
+// instantly regardless of host reachability.
+func TestPingConsulClickHouseDials(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	dialed := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case dialed <- struct{}{}:
+			default:
+			}
+			conn.Close()
+		}
+	}()
+
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	require.NoError(t, err)
+	portNumber, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	err = pingConsulClickHouse(context.Background(), clickHouseConfig{
+		Database: "logs", Host: host, Password: "secret", Port: portNumber, User: "logger",
+	})
+	// The listener hangs up during the handshake, so the ping must fail, but it
+	// must fail after reaching the address instead of on settings validation.
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "invalid settings")
+
+	select {
+	case <-dialed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe never connected to the configured address")
+	}
 }
 
 func TestSelectReachableClickHouseHost(t *testing.T) {

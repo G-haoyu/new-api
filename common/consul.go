@@ -191,15 +191,14 @@ func selectReachableClickHouseHost(ctx context.Context, hosts []string, config c
 			SysLog(fmt.Sprintf("ClickHouse startup probe selected address %d/%d", i+1, len(hosts)))
 			return host
 		}
-		// Do not log credentials, DSNs, addresses, or driver error messages.
-		SysLog(fmt.Sprintf("ClickHouse startup probe failed for address %d/%d", i+1, len(hosts)))
+		SysLog(fmt.Sprintf("ClickHouse startup probe failed for address %d/%d: %v", i+1, len(hosts), err))
 	}
 	SysLog("ClickHouse startup probes failed; using first address for normal initialization")
 	return hosts[0]
 }
 
 func pingConsulClickHouse(ctx context.Context, config clickHouseConfig) error {
-	db := ckdriver.OpenDB(&ckdriver.Options{
+	conn, err := ckdriver.Open(&ckdriver.Options{
 		Addr:         []string{net.JoinHostPort(config.Host, strconv.Itoa(config.Port))},
 		Auth:         ckdriver.Auth{Database: config.Database, Username: config.User, Password: config.Password},
 		DialTimeout:  3 * time.Second,
@@ -207,6 +206,9 @@ func pingConsulClickHouse(ctx context.Context, config clickHouseConfig) error {
 		MaxOpenConns: 1,
 		MaxIdleConns: 1,
 	})
-	defer db.Close()
-	return db.PingContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return conn.Ping(ctx)
 }
