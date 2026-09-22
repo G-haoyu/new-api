@@ -31,7 +31,7 @@ func TestFetchClickHouseLogDSN(t *testing.T) {
 			}))
 			defer server.Close()
 
-			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "test-token", "database/autom/maas/clickhouse/maas_logs")
+			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "test-token", "database/autom/maas/clickhouse/maas_logs", func(context.Context, clickHouseConfig) error { return nil })
 			require.NoError(t, err)
 			parsed, err := url.Parse(dsn)
 			require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestFetchClickHouseLogDSNErrors(t *testing.T) {
 			}))
 			defer server.Close()
 
-			_, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			_, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key", func(context.Context, clickHouseConfig) error { return nil })
 			require.ErrorContains(t, err, tt.want)
 		})
 	}
@@ -136,7 +136,7 @@ func TestFetchClickHouseLogDSNHTTPStatus(t *testing.T) {
 			}))
 			defer server.Close()
 
-			_, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			_, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key", func(context.Context, clickHouseConfig) error { return nil })
 			require.ErrorContains(t, err, tt.want)
 		})
 	}
@@ -153,7 +153,7 @@ func TestFetchClickHouseLogDSNWithoutToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), strings.TrimPrefix(server.URL, "http://"), "", "key")
+	dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), strings.TrimPrefix(server.URL, "http://"), "", "key", func(context.Context, clickHouseConfig) error { return nil })
 	require.NoError(t, err)
 	assert.Equal(t, "clickhouse://logger:secret@127.0.0.1:9000/logs", dsn)
 }
@@ -241,7 +241,7 @@ func TestFetchClickHouseLogDSNHostList(t *testing.T) {
 				fmt.Fprint(w, consulResponse(payload))
 			}))
 			defer server.Close()
-			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key", func(context.Context, clickHouseConfig) error { return nil })
 			if tt.want == "" {
 				require.ErrorContains(t, err, "is incomplete")
 				return
@@ -263,7 +263,7 @@ func TestFetchClickHouseLogDSNConfiguredKey(t *testing.T) {
 				fmt.Fprint(w, consulResponse(payload))
 			}))
 			defer server.Close()
-			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key")
+			dsn, err := fetchClickHouseLogDSN(context.Background(), server.Client(), server.URL, "token", "key", func(context.Context, clickHouseConfig) error { return nil })
 			if key == "missing" {
 				require.ErrorContains(t, err, "CONSUL_CLICKHOUSE_CONFIG_KEY")
 				return
@@ -282,4 +282,38 @@ func TestSelectClickHouseConfigBlankKey(t *testing.T) {
 	name, _, err := selectClickHouseConfig(map[string]clickHouseConfig{"ch_maas_log": {}})
 	require.NoError(t, err)
 	assert.Equal(t, "ch_maas_log", name)
+}
+
+func TestSelectReachableClickHouseHost(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		hosts     []string
+		reachable string
+		want      string
+		calls     int
+	}{
+		{"single skips probe", []string{"192.0.2.1"}, "", "192.0.2.1", 0},
+		{"first alive", []string{"192.0.2.1", "192.0.2.2"}, "192.0.2.1", "192.0.2.1", 1},
+		{"second alive", []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}, "192.0.2.2", "192.0.2.2", 2},
+		{"all fail", []string{"192.0.2.1", "192.0.2.2"}, "", "192.0.2.1", 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			config := clickHouseConfig{Database: "logs", User: "u", Password: "p", Port: 9000}
+			got := selectReachableClickHouseHost(context.Background(), tt.hosts, config, func(ctx context.Context, c clickHouseConfig) error {
+				require.Equal(t, tt.hosts[calls], c.Host)
+				calls++
+				_, ok := ctx.Deadline()
+				require.True(t, ok)
+				assert.Equal(t, config.Password, c.Password)
+				assert.Equal(t, config.Database, c.Database)
+				if c.Host == tt.reachable {
+					return nil
+				}
+				return fmt.Errorf("unavailable")
+			})
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.calls, calls)
+		})
+	}
 }

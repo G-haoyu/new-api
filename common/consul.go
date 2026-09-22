@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	ckdriver "github.com/ClickHouse/clickhouse-go/v2"
 )
 
 type consulKVEntry struct {
@@ -60,14 +62,13 @@ func LoadLogSQLDSN() (string, error) {
 		return "", fmt.Errorf("incomplete Consul configuration: missing %s", strings.Join(missing, ", "))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultConsulTimeoutSeconds*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	client := &http.Client{Timeout: defaultConsulTimeoutSeconds * time.Second}
-	return fetchClickHouseLogDSN(ctx, client, addr, token, kvPath)
+	return fetchClickHouseLogDSN(ctx, client, addr, token, kvPath, pingConsulClickHouse)
 }
 
-func fetchClickHouseLogDSN(ctx context.Context, client *http.Client, addr, token, kvPath string) (string, error) {
+func fetchClickHouseLogDSN(ctx context.Context, client *http.Client, addr, token, kvPath string, probe func(context.Context, clickHouseConfig) error) (string, error) {
 	endpoint, err := consulKVURL(addr, kvPath)
 	if err != nil {
 		return "", err
@@ -115,13 +116,19 @@ func fetchClickHouseLogDSN(ctx context.Context, client *http.Client, addr, token
 	if err != nil {
 		return "", err
 	}
-	// Consul may list several hosts; connect only to the first configured address.
-	firstHost, _, _ := strings.Cut(clickHouse.Host, ",")
-	clickHouse.Host = strings.TrimSpace(firstHost)
+	hosts := strings.Split(clickHouse.Host, ",")
+	for i := range hosts {
+		hosts[i] = strings.TrimSpace(hosts[i])
+		if hosts[i] == "" {
+			return "", fmt.Errorf("ClickHouse configuration %q is incomplete: empty host", name)
+		}
+	}
+	clickHouse.Host = hosts[0]
 	if clickHouse.Host == "" || clickHouse.User == "" || clickHouse.Password == "" || clickHouse.Database == "" || clickHouse.Port < 1 || clickHouse.Port > 65535 {
 		return "", fmt.Errorf("ClickHouse configuration %q is incomplete", name)
 	}
 
+	clickHouse.Host = selectReachableClickHouseHost(ctx, hosts, clickHouse, probe)
 	dsn := &url.URL{
 		Scheme: "clickhouse",
 		User:   url.UserPassword(clickHouse.User, clickHouse.Password),
@@ -164,4 +171,42 @@ func selectClickHouseConfig(configs map[string]clickHouseConfig) (string, clickH
 		}
 	}
 	return "", clickHouseConfig{}, fmt.Errorf("Consul KV value must contain %q when multiple clickhouse configurations exist", defaultConsulClickHouseConfigName)
+}
+
+// selectReachableClickHouseHost probes only multi-host configurations at startup.
+// If none respond, retain the first host so normal database initialization handles failure.
+func selectReachableClickHouseHost(ctx context.Context, hosts []string, config clickHouseConfig, probe func(context.Context, clickHouseConfig) error) string {
+	if len(hosts) == 1 {
+		return hosts[0]
+	}
+	for i, host := range hosts {
+		if ctx.Err() != nil {
+			break
+		}
+		config.Host = host
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := probe(probeCtx, config)
+		cancel()
+		if err == nil {
+			SysLog(fmt.Sprintf("ClickHouse startup probe selected address %d/%d", i+1, len(hosts)))
+			return host
+		}
+		// Do not log credentials, DSNs, addresses, or driver error messages.
+		SysLog(fmt.Sprintf("ClickHouse startup probe failed for address %d/%d", i+1, len(hosts)))
+	}
+	SysLog("ClickHouse startup probes failed; using first address for normal initialization")
+	return hosts[0]
+}
+
+func pingConsulClickHouse(ctx context.Context, config clickHouseConfig) error {
+	db := ckdriver.OpenDB(&ckdriver.Options{
+		Addr:         []string{net.JoinHostPort(config.Host, strconv.Itoa(config.Port))},
+		Auth:         ckdriver.Auth{Database: config.Database, Username: config.User, Password: config.Password},
+		DialTimeout:  3 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		MaxOpenConns: 1,
+		MaxIdleConns: 1,
+	})
+	defer db.Close()
+	return db.PingContext(ctx)
 }
