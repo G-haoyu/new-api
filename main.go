@@ -325,6 +325,11 @@ func InitResources() error {
 
 	service.InitTokenEncoders()
 
+	logDSN, err := common.LoadLogSQLDSN()
+	if err != nil {
+		return fmt.Errorf("load log database configuration: %w", err)
+	}
+
 	// Initialize SQL Database
 	err = model.InitDB()
 	if err != nil {
@@ -355,9 +360,8 @@ func InitResources() error {
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
 
-	// Initialize SQL Database
-	err = model.InitLogDB()
-	if err != nil {
+	// Initialize log database
+	if err = model.InitLogDBWithDSN(logDSN); err != nil {
 		return err
 	}
 

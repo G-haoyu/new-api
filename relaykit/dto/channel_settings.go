@@ -24,6 +24,8 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// SendMaasUserId forwards the end user's internal id upstream as the X-Maas-User-Id header
+	SendMaasUserId bool `json:"send_maas_user_id,omitempty"`
 }
 
 const (
@@ -31,6 +33,8 @@ const (
 	HTTPProtocolHTTP1        = "http1"
 	MaxHTTP2ConnectionShards = 8
 )
+
+const MaasUserIdHeader = "X-Maas-User-Id"
 
 // ValidateHTTPTransport validates save-time HTTP transport channel settings.
 func (s *ChannelSettings) ValidateHTTPTransport() error {

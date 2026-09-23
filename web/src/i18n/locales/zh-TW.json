@@ -3497,6 +3497,8 @@
     "Pass specified request headers to upstream": "把指定請求頭透傳到上游請求",
     "Pass Through Body": "透傳請求體",
     "Pass Through Headers": "請求頭透傳",
+    "Send MaaS User ID": "傳送 MaaS 使用者 ID",
+    "Forward the end user id upstream as X-Maas-User-Id": "以 X-Maas-User-Id 請求頭把最終使用者 ID 透傳給上游。",
     "Pass through the anthropic-beta header for beta features": "透傳 anthropic-beta 標頭以使用 beta 功能",
     "Pass through the include field for usage obfuscation": "透傳 include 欄位以用於用量混淆",
     "Pass through the inference_geo field for Claude data residency region control": "透傳 inference_geo 欄位用於控制 Claude 數據駐留推理區域",
