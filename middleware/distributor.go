@@ -154,7 +154,10 @@ func Distribute() func(c *gin.Context) {
 						common.SetContextKey(c, constant.ContextKeySchedulerAffinityChannelID, preferredChannelID)
 					}
 					if err := service.RunSchedulerShadow(c, modelRequest.Model, usingGroup); err != nil {
-						if service.IsSchedulerTransientUnavailable(err) && service.SchedulerEmergencyNativeAllowed(modelRequest.Model, usingGroup) {
+						if message, ok := service.SchedulerDecisionErrorMessage(err); ok {
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, message, types.ErrorCodeModelNotFound)
+							return
+						} else if service.IsSchedulerTransientUnavailable(err) && service.SchedulerEmergencyNativeAllowed(modelRequest.Model, usingGroup) {
 							service.MarkSchedulerEmergency(c, err)
 							common.SysLog(fmt.Sprintf("scheduler emergency native routing enabled: request_id=%s model=%s group=%s error=%v", c.GetString(common.RequestIdKey), modelRequest.Model, usingGroup, err))
 						} else {

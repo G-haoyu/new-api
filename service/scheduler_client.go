@@ -29,6 +29,26 @@ import (
 var ErrSchedulerPolicyUnavailable = errors.New("scheduler effective policy is unavailable")
 var ErrSchedulerTemporarilyUnavailable = errors.New("scheduler temporarily unavailable")
 
+// SchedulerDecisionError is a structured, user-actionable rejection returned
+// by Scheduler. Unlike transport failures and unstructured 5xx responses, a
+// decision error is scoped to the request and must not trip Scheduler's
+// infrastructure circuit breaker.
+type SchedulerDecisionError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *SchedulerDecisionError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+type schedulerErrorResponse struct {
+	Error string `json:"error"`
+}
+
 // schedulerDefaultMode is the platform default routing mode applied when a user
 // has no explicit routing preference for the requested model.
 const schedulerDefaultMode = "balanced"
@@ -554,6 +574,20 @@ type schedulerRequestOutcome struct {
 	err      error
 }
 
+func schedulerDecisionError(statusCode int, body []byte) *SchedulerDecisionError {
+	var response schedulerErrorResponse
+	if len(body) == 0 || common.Unmarshal(body, &response) != nil {
+		return nil
+	}
+	message := strings.TrimSpace(response.Error)
+	switch message {
+	case "no candidate endpoint", "policy snapshot hard expired", "policy snapshot catalog mismatch":
+		return &SchedulerDecisionError{StatusCode: statusCode, Message: message}
+	default:
+		return nil
+	}
+}
+
 func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientConfig, method, path string, payload []byte, includeAuth bool) (schedulerRequestOutcome, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -622,6 +656,11 @@ func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientC
 			return schedulerRequestOutcome{endpoint: endpoint, status: resp.StatusCode, body: body}, nil
 		}
 		if resp.StatusCode >= 500 {
+			if decisionErr := schedulerDecisionError(resp.StatusCode, body); decisionErr != nil {
+				lastErr = decisionErr
+				logger.LogWarn(ctx, "scheduler request rejected: path=%s endpoint=%s attempt=%d/%d phase=response_status status=%d error=%v fallback_available=%t", path, endpoint, attempt, len(endpoints), resp.StatusCode, decisionErr, hasFallback)
+				continue
+			}
 			schedulerEndpointCircuitFailure(endpoint, time.Now())
 			transientFailures++
 			lastErr = fmt.Errorf("%w: scheduler status %d", ErrSchedulerTemporarilyUnavailable, resp.StatusCode)
@@ -631,8 +670,10 @@ func schedulerDoRequestWithFallback(ctx context.Context, config SchedulerClientC
 		logger.LogWarn(ctx, "scheduler request rejected without fallback: path=%s endpoint=%s attempt=%d/%d status=%d", path, endpoint, attempt, len(endpoints), resp.StatusCode)
 		return schedulerRequestOutcome{endpoint: endpoint, status: resp.StatusCode, body: body, err: fmt.Errorf("scheduler status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}, nil
 	}
-	schedulerCircuitFailure(time.Now())
-	if transientFailures > 0 && lastErr != nil {
+	if transientFailures > 0 {
+		schedulerCircuitFailure(time.Now())
+	}
+	if lastErr != nil {
 		logger.LogWarn(ctx, "scheduler request all endpoints failed: path=%s endpoints=%d transient_failures=%d error=%v", path, len(endpoints), transientFailures, lastErr)
 		return schedulerRequestOutcome{}, lastErr
 	}
@@ -744,6 +785,17 @@ func SchedulerKillSwitchActive() bool {
 // may enter emergency-native routing.
 func IsSchedulerTransientUnavailable(err error) bool {
 	return isTransientSchedulerError(err)
+}
+
+// SchedulerDecisionErrorMessage returns a Scheduler rejection that is safe and
+// useful to expose to the caller. Transport failures and arbitrary upstream
+// response bodies deliberately remain internal.
+func SchedulerDecisionErrorMessage(err error) (string, bool) {
+	var decisionErr *SchedulerDecisionError
+	if !errors.As(err, &decisionErr) || strings.TrimSpace(decisionErr.Message) == "" {
+		return "", false
+	}
+	return decisionErr.Message, true
 }
 
 // SchedulerEmergencyNativeAllowed checks the central option, the local

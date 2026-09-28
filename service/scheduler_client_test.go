@@ -20,6 +20,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSignSchedulerRequestUsesCanonicalPayload(t *testing.T) {
@@ -340,6 +342,49 @@ func TestRunSchedulerShadowClassifiesTransientStatus(t *testing.T) {
 	if !IsSchedulerTransientUnavailable(err) || !errors.Is(err, ErrSchedulerTemporarilyUnavailable) {
 		t.Fatalf("expected transient scheduler error, got %v", err)
 	}
+	_, ok := SchedulerDecisionErrorMessage(err)
+	assert.False(t, ok)
+}
+
+func TestRunSchedulerShadowPreservesNoCandidateAfterFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var firstHits int32
+	var secondHits int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&firstHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"no candidate endpoint"}`))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&secondHits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"no candidate endpoint"}`))
+	}))
+	defer second.Close()
+
+	ConfigureSchedulerClientForTest(SchedulerClientConfig{
+		Enabled:       true,
+		LocalURL:      first.URL,
+		BootstrapURLs: []string{second.URL},
+		Token:         "scheduler-test",
+		Timeout:       time.Second,
+	})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set(common.RequestIdKey, "no-candidate-fallback")
+
+	err := RunSchedulerShadow(c, "m", "default")
+	require.Error(t, err)
+	message, ok := SchedulerDecisionErrorMessage(err)
+	require.True(t, ok)
+	assert.Equal(t, "no candidate endpoint", message)
+	assert.False(t, IsSchedulerTransientUnavailable(err))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&firstHits))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&secondHits))
+	assert.True(t, schedulerCircuitAllows(time.Now()), "request-scoped rejection must not open the infrastructure circuit")
 }
 
 func TestSchedulerCircuitRequiresTwoSuccessfulProbesToClose(t *testing.T) {
