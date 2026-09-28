@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -65,6 +67,21 @@ func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Hea
 			req.Set("Accept", "text/event-stream")
 		}
 	}
+	applyMaasUserIdHeader(info, req)
+}
+
+// applyMaasUserIdHeader forwards the end user's internal id upstream when the
+func applyMaasUserIdHeader(info *common.RelayInfo, req *http.Header) {
+	if info == nil || req == nil {
+		return
+	}
+	if !info.ChannelSetting.SendMaasUserId {
+		return
+	}
+	if info.UserId <= 0 {
+		return
+	}
+	req.Set(dto.MaasUserIdHeader, strconv.Itoa(info.UserId))
 }
 
 const clientHeaderPlaceholderPrefix = "{client_header:"
