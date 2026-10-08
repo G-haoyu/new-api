@@ -341,3 +341,63 @@ func TestInt32PtrRejectsOutOfRangeValues(t *testing.T) {
 	assert.Nil(t, int32Ptr(-1<<31-1))
 	assert.Equal(t, int32(1<<31-1), *int32Ptr(1<<31 - 1))
 }
+
+// TestBuildRecordCostActualAppliesCostMultiplier pins the channel-model cost
+// multiplier contract: the multiplier configured on the channel for the
+// attempted model scales the recorded cost_actual, never the billed one.
+func TestBuildRecordCostActualAppliesCostMultiplier(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Second)
+
+	tests := []struct {
+		name       string
+		multiplier float64
+		costActual int
+		want       int32
+	}{
+		{name: "multiplier 1.5 scales recorded cost", multiplier: 1.5, costActual: 100, want: 150},
+		{name: "multiplier below one scales down", multiplier: 0.5, costActual: 100, want: 50},
+		{name: "fractional product truncates toward zero", multiplier: 1.5, costActual: 101, want: 151},
+		{name: "zero multiplier is treated as unset", multiplier: 0, costActual: 100, want: 100},
+		{name: "oversized product saturates to int32 max", multiplier: 1e12, costActual: 1 << 30, want: 1<<31 - 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			attempt := &Attempt{
+				startTime:    start,
+				usageKnown:   true,
+				costActual:   tc.costActual,
+			}
+
+			record := attempt.buildRecord(nil, FinishInput{CostMultiplier: tc.multiplier}, ClassifyInput{}, OutcomeOK, 200, end, nil)
+
+			require.NotNil(t, record.CostActual)
+			assert.Equal(t, tc.want, *record.CostActual)
+		})
+	}
+}
+
+// TestBuildRecordCostActualWithoutMultiplier pins the default: no multiplier
+// configured means cost_actual is recorded exactly as billed.
+func TestBuildRecordCostActualWithoutMultiplier(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Second)
+
+	attempt := &Attempt{
+		startTime:  start,
+		usageKnown: true,
+		costActual: 100,
+	}
+
+	record := attempt.buildRecord(nil, FinishInput{}, ClassifyInput{}, OutcomeOK, 200, end, nil)
+
+	require.NotNil(t, record.CostActual)
+	assert.Equal(t, int32(100), *record.CostActual)
+}

@@ -98,3 +98,95 @@ func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(
 		})
 	}
 }
+
+func TestChannelValidateSettingsRejectsInvalidCostMultiplier(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting dto.ChannelSettings
+		wantErr string
+	}{
+		{
+			name:    "valid multipliers pass",
+			setting: dto.ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5}},
+		},
+		{
+			name:    "negative multiplier rejected",
+			setting: dto.ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": -0.5}},
+			wantErr: "cost_multiplier",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channel := &Channel{}
+			channel.SetSetting(tt.setting)
+			err := channel.ValidateSettings()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestChannelValidateSettingsCostMultiplierModelKey(t *testing.T) {
+	tests := []struct {
+		name          string
+		models        string
+		modelMapping  string
+		multiplierKey string
+		wantErr       string
+	}{
+		{
+			name:          "mapped upstream model name is valid",
+			models:        "gpt-4o",
+			modelMapping:  `{"gpt-4o":"gpt-4o-2024-08"}`,
+			multiplierKey: "gpt-4o-2024-08",
+		},
+		{
+			name:          "client model name without mapping is valid",
+			models:        "gpt-4o",
+			multiplierKey: "gpt-4o",
+		},
+		{
+			name:          "client model name that mapping redirects away is rejected",
+			models:        "gpt-4o",
+			modelMapping:  `{"gpt-4o":"gpt-4o-2024-08"}`,
+			multiplierKey: "gpt-4o",
+			wantErr:       "cost_multiplier",
+		},
+		{
+			name:          "unknown model name is rejected",
+			models:        "gpt-4o",
+			multiplierKey: "claude-3",
+			wantErr:       "cost_multiplier",
+		},
+		{
+			name:          "no models configured skips cross-check",
+			models:        "",
+			multiplierKey: "anything",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channel := &Channel{Models: tt.models}
+			if tt.modelMapping != "" {
+				channel.ModelMapping = &tt.modelMapping
+			}
+			channel.SetSetting(dto.ChannelSettings{
+				CostMultiplierMap: map[string]float64{tt.multiplierKey: 1.5},
+			})
+
+			err := channel.ValidateSettings()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
