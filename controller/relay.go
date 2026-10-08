@@ -138,6 +138,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if otelRuntime != nil {
 		traceCtx, llmSpan = otelRuntime.StartLLMRequest(traceCtx, relayInfo, request)
 		c.Request = c.Request.WithContext(traceCtx)
+		// The raw client body keeps unknown fields that DTO round-trips would
+		// drop; the client-format strip in RecordClientRequest removes the
+		// conversation context so only request parameters remain.
+		if storage, storageErr := common.GetBodyStorage(c); storageErr == nil {
+			if body, bodyErr := storage.Bytes(); bodyErr == nil {
+				otelRuntime.RecordClientRequest(traceCtx, body, relayFormat)
+			}
+		}
 		defer func() {
 			if newAPIError == nil {
 				otelRuntime.FinishLLM(traceCtx, llmSpan, nil, relayInfo)

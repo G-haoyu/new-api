@@ -328,6 +328,147 @@ func TestProviderErrorEnvelopeIsNotExportedAsOutput(t *testing.T) {
 	require.Equal(t, "", attributeValue(spans[0].Attributes, "gen_ai.output.messages").AsString())
 }
 
+func TestStripContextFieldsKeepsRequestParamsOnly(t *testing.T) {
+	tests := []struct {
+		name   string
+		format types.RelayFormat
+		body   string
+		want   string
+	}{
+		{
+			name:   "chat",
+			format: types.RelayFormatOpenAI,
+			body:   `{"model":"gpt","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"stream":true,"reasoning_effort":"high","metadata":{"x":1}}`,
+			want:   `{"model":"gpt","stream":true,"reasoning_effort":"high","metadata":{"x":1}}`,
+		},
+		{
+			name:   "responses",
+			format: types.RelayFormatOpenAIResponses,
+			body:   `{"model":"gpt","instructions":"be concise","input":[{"role":"user","content":"hi"}],"tools":[],"include":["reasoning.encrypted_content"],"reasoning":{"effort":"xhigh"}}`,
+			want:   `{"model":"gpt","include":["reasoning.encrypted_content"],"reasoning":{"effort":"xhigh"}}`,
+		},
+		{
+			name:   "claude",
+			format: types.RelayFormatClaude,
+			body:   `{"model":"claude","system":"be helpful","messages":[{"role":"user","content":"hi"}],"tools":[],"thinking":{"type":"adaptive"},"metadata":{"session":"secret"}}`,
+			want:   `{"model":"claude","thinking":{"type":"adaptive"},"metadata":{"session":"secret"}}`,
+		},
+		{
+			name:   "context only leaves nothing",
+			format: types.RelayFormatOpenAI,
+			body:   `{"messages":[{"role":"user","content":"hi"}]}`,
+			want:   "",
+		},
+		{
+			name:   "unknown format",
+			format: types.RelayFormatGemini,
+			body:   `{"contents":[{"role":"user"}],"temperature":0.7}`,
+			want:   "",
+		},
+		{
+			name:   "invalid json",
+			format: types.RelayFormatOpenAI,
+			body:   `not json`,
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := stripContextFields([]byte(tt.body), tt.format)
+			if tt.want == "" {
+				require.False(t, ok)
+				require.Nil(t, got)
+				return
+			}
+			require.True(t, ok)
+			require.JSONEq(t, tt.want, string(got))
+		})
+	}
+}
+
+func TestRecordClientAndUpstreamParamsFollowCaptureMode(t *testing.T) {
+	newRuntime := func(t *testing.T, mode contentCaptureMode) (*Runtime, *tracetest.InMemoryExporter) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+		runtime := &Runtime{
+			enabled:         true,
+			captureMode:     mode,
+			captureMaxBytes: 4096,
+			tracerProvider:  provider,
+			tracer:          provider.Tracer("test"),
+			propagator:      propagationTraceContextForTest(),
+		}
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		return runtime, exporter
+	}
+	info := &common.RelayInfo{RequestId: "req-params", OriginModelName: "gpt-test", RelayFormat: types.RelayFormatOpenAI}
+	clientBody := `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"low","temperature":0.5}`
+	upstreamBody := `{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","temperature":0.2}`
+
+	runRequest := func(t *testing.T, runtime *Runtime, finishErr error) {
+		ctx, span := runtime.StartLLMRequest(context.Background(), info, nil)
+		runtime.RecordClientRequest(ctx, []byte(clientBody), types.RelayFormatOpenAI)
+		runtime.RecordInput(ctx, []byte(upstreamBody), types.RelayFormatOpenAI)
+		runtime.FinishLLM(ctx, span, finishErr, info)
+	}
+
+	assertParams := func(t *testing.T, span tracetest.SpanStub, clientWant, upstreamWant string) {
+		if clientWant == "" {
+			require.Equal(t, "", attributeValue(span.Attributes, "gen_ai.input.value").AsString())
+		} else {
+			require.JSONEq(t, clientWant, attributeValue(span.Attributes, "gen_ai.input.value").AsString())
+		}
+		if upstreamWant == "" {
+			require.Equal(t, "", attributeValue(span.Attributes, "new_api.request.upstream").AsString())
+		} else {
+			require.JSONEq(t, upstreamWant, attributeValue(span.Attributes, "new_api.request.upstream").AsString())
+		}
+	}
+
+	t.Run("full exports client and upstream params", func(t *testing.T) {
+		runtime, exporter := newRuntime(t, captureModeFull)
+		runRequest(t, runtime, nil)
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assertParams(t, spans[0],
+			`{"model":"gpt-test","reasoning_effort":"low","temperature":0.5}`,
+			`{"model":"gpt-test","reasoning_effort":"high","temperature":0.2}`)
+	})
+
+	t.Run("error mode defers params until final error", func(t *testing.T) {
+		runtime, exporter := newRuntime(t, captureModeError)
+		runRequest(t, runtime, nil)
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assertParams(t, spans[0], "", "")
+
+		runRequest(t, runtime, errors.New("upstream failed"))
+		spans = exporter.GetSpans()
+		require.Len(t, spans, 2)
+		assertParams(t, spans[1],
+			`{"model":"gpt-test","reasoning_effort":"low","temperature":0.5}`,
+			`{"model":"gpt-test","reasoning_effort":"high","temperature":0.2}`)
+	})
+
+	t.Run("off exports neither", func(t *testing.T) {
+		runtime, exporter := newRuntime(t, captureModeOff)
+		runRequest(t, runtime, errors.New("failed"))
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assertParams(t, spans[0], "", "")
+	})
+
+	t.Run("oversize params are dropped with marker", func(t *testing.T) {
+		runtime, exporter := newRuntime(t, captureModeFull)
+		runtime.captureMaxBytes = 8
+		runRequest(t, runtime, nil)
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		require.True(t, attributeValue(spans[0].Attributes, "new_api.capture.params_truncated").AsBool())
+		assertParams(t, spans[0], "", "")
+	})
+}
+
 func TestBuildLangfuseInputKeepsProtocolContextOnly(t *testing.T) {
 	tests := []struct {
 		name   string

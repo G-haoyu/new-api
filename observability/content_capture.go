@@ -46,6 +46,50 @@ func buildLangfuseInput(body []byte, format types.RelayFormat) ([]byte, bool) {
 	return encoded, true
 }
 
+// contextFieldKeys lists the conversation-context fields each relay format
+// carries. They are the complement of buildLangfuseInput's whitelist: the
+// observability value for request parameters is everything else.
+func contextFieldKeys(format types.RelayFormat) ([]string, bool) {
+	switch format {
+	case types.RelayFormatOpenAI:
+		return []string{"messages", "tools"}, true
+	case types.RelayFormatClaude:
+		return []string{"system", "messages", "tools"}, true
+	case types.RelayFormatOpenAIResponses, types.RelayFormatOpenAIResponsesCompaction:
+		return []string{"instructions", "input", "tools"}, true
+	default:
+		// Do not project non-target protocols into an OpenAI-shaped record.
+		// Their observability format is intentionally deferred to a later change.
+		return nil, false
+	}
+}
+
+// stripContextFields removes the conversation-context fields from a request
+// body and returns the remaining request parameters. It is the projection
+// behind gen_ai.input.value / new_api.request.upstream: sampling, reasoning
+// effort, and other knobs the gateway and the client negotiated.
+func stripContextFields(body []byte, format types.RelayFormat) ([]byte, bool) {
+	var payload map[string]any
+	if err := common.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+	keys, ok := contextFieldKeys(format)
+	if !ok {
+		return nil, false
+	}
+	for _, key := range keys {
+		delete(payload, key)
+	}
+	if len(payload) == 0 {
+		return nil, false
+	}
+	encoded, err := common.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
 // normalizeLangfuseOutput converts supported upstream response envelopes into
 // a compact array of semantic assistant output items. Response metadata such as
 // ids, model, status, usage, and event type is deliberately discarded.
