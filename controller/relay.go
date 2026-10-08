@@ -375,6 +375,16 @@ func finishInputFor(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.N
 		RelayFirstResponseTime: attemptlog.FirstTokenTimeOf(info, info.FirstResponseTime),
 		StreamChunks:           info.ReceivedResponseCount,
 		UpstreamModelName:      info.GetUpstreamModelName(),
+		CostMultiplier:         1,
+	}
+
+	// The cost multiplier is a <channel, model> attribute read from the channel
+	// setting the distributor refreshed for this attempt, keyed by the upstream
+	// (model-mapped) model name — that name is only final here, after the relay
+	// handler has applied the channel's model mapping. It never touches
+	// billing; the attempt log scales cost_actual with it.
+	if channelSetting, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok {
+		in.CostMultiplier = channelSetting.CostMultiplierForModel(in.UpstreamModelName)
 	}
 
 	if info.StreamStatus != nil {

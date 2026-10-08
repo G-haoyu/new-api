@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"math"
 	"regexp"
 	"testing"
 
@@ -641,4 +642,92 @@ func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	err = (&ChannelSettings{HTTPProtocol: "http1", HTTP2ConnectionShards: 2}).ValidateHTTPTransport()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http2_connection_shards")
+}
+
+func TestChannelSettingsCostMultiplierForModel(t *testing.T) {
+	tests := []struct {
+		name   string
+		setting ChannelSettings
+		model  string
+		want   float64
+	}{
+		{
+			name:   "exact model match returns its multiplier",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5}},
+			model:  "gpt-4o",
+			want:   1.5,
+		},
+		{
+			name:   "unlisted model defaults to one",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5}},
+			model:  "claude-3",
+			want:   1.0,
+		},
+		{
+			name:   "empty map defaults to one",
+			setting: ChannelSettings{},
+			model:  "gpt-4o",
+			want:   1.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.InDelta(t, tt.want, tt.setting.CostMultiplierForModel(tt.model), 0.000001)
+		})
+	}
+}
+
+func TestChannelSettingsValidateCostMultiplier(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting ChannelSettings
+		wantErr string
+	}{
+		{
+			name:    "positive multipliers are valid",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5, "claude-3": 0.8}},
+		},
+		{
+			name:    "zero multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 0}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "negative multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": -1}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "NaN multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": math.NaN()}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "infinite multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": math.Inf(1)}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "blank model name rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"  ": 1.5}},
+			wantErr: "cost_multiplier",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.setting.ValidateCostMultiplier()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

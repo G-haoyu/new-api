@@ -2,6 +2,7 @@ package dto
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"strings"
@@ -26,6 +27,14 @@ type ChannelSettings struct {
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
 	// SendMaasUserId forwards the end user's internal id upstream as the X-Maas-User-Id header
 	SendMaasUserId bool `json:"send_maas_user_id,omitempty"`
+	// CostMultiplierMap maps model name to a per <channel, model> cost multiplier.
+	// Keys are the names the channel actually serves upstream: the target of a
+	// model mapping entry, or a channel model that no mapping entry redirects
+	// away — not the client-facing name when model mapping renames it. It is an
+	// attribute only: it never participates in billing. It is read when
+	// relay_attempts rows are written and scales the recorded cost_actual, so a
+	// channel's recorded cost can reflect its real upstream cost factor.
+	CostMultiplierMap map[string]float64 `json:"cost_multiplier,omitempty"`
 }
 
 const (
@@ -52,6 +61,40 @@ func (s *ChannelSettings) ValidateHTTPTransport() error {
 	}
 	if protocol == HTTPProtocolHTTP1 && s.HTTP2ConnectionShards > 1 {
 		return fmt.Errorf("http2_connection_shards must be 1 when http_protocol is http1")
+	}
+	return nil
+}
+
+// CostMultiplierForModel returns the cost multiplier configured for the model
+// on this channel, or 1 when the model is not listed. It never affects
+// billing; callers use it to scale the cost recorded in relay_attempts.
+func (s *ChannelSettings) CostMultiplierForModel(model string) float64 {
+	if s == nil || len(s.CostMultiplierMap) == 0 {
+		return 1
+	}
+	if multiplier, ok := s.CostMultiplierMap[model]; ok && multiplier > 0 && !math.IsInf(multiplier, 0) && !math.IsNaN(multiplier) {
+		return multiplier
+	}
+	return 1
+}
+
+// ValidateCostMultiplier rejects cost multipliers that are non-positive,
+// NaN, infinite, or keyed by a blank model name, so an invalid value cannot
+// reach the relay_attempts writer.
+func (s *ChannelSettings) ValidateCostMultiplier() error {
+	if s == nil {
+		return nil
+	}
+	for model, multiplier := range s.CostMultiplierMap {
+		if strings.TrimSpace(model) == "" {
+			return fmt.Errorf("cost_multiplier has a blank model name")
+		}
+		if math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
+			return fmt.Errorf("cost_multiplier for model %s is not a finite number", model)
+		}
+		if multiplier <= 0 {
+			return fmt.Errorf("cost_multiplier for model %s must be positive, got %g", model, multiplier)
+		}
 	}
 	return nil
 }

@@ -268,6 +268,10 @@ export const channelFormSchema = z
     send_maas_user_id: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
+    cost_multiplier: z
+      .string()
+      .optional()
+      .refine(isOptionalCostMultiplier, ERROR_MESSAGES.INVALID_COST_MULTIPLIER),
     // Type-specific settings (stored in settings JSON)
     is_enterprise_account: z.boolean().optional(), // OpenRouter specific
     vertex_key_type: z.enum(['json', 'api_key']).optional(), // Vertex AI specific
@@ -451,6 +455,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   send_maas_user_id: false,
   system_prompt: '',
   system_prompt_override: false,
+  cost_multiplier: '',
   // Type-specific settings
   is_enterprise_account: false,
   vertex_key_type: 'json',
@@ -493,6 +498,7 @@ export function transformChannelToFormDefaults(
     send_maas_user_id: false,
     system_prompt: '',
     system_prompt_override: false,
+    cost_multiplier: '',
   }
 
   if (channel.setting) {
@@ -513,6 +519,7 @@ export function transformChannelToFormDefaults(
         send_maas_user_id: parsed.send_maas_user_id || false,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
+        cost_multiplier: costMultiplierMapToJSON(parsed.cost_multiplier),
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -651,7 +658,63 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http2_connection_shards = shards
   }
 
+  const costMultiplier = parseCostMultiplierJSON(formData.cost_multiplier)
+  if (costMultiplier && Object.keys(costMultiplier).length > 0) {
+    settingObj.cost_multiplier = costMultiplier
+  }
+
   return JSON.stringify(settingObj)
+}
+
+/**
+ * Parse the cost multiplier editor value (a JSON object of model -> positive
+ * multiplier) into the map stored in the channel setting JSON. Returns null
+ * when the value is absent or not a valid multiplier object.
+ */
+export function parseCostMultiplierJSON(
+  value: string | undefined
+): Record<string, number> | null {
+  if (!value?.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null
+    }
+    const result: Record<string, number> = {}
+    for (const [model, multiplier] of Object.entries(parsed)) {
+      if (
+        !model.trim() ||
+        typeof multiplier !== 'number' ||
+        !Number.isFinite(multiplier) ||
+        multiplier <= 0
+      ) {
+        return null
+      }
+      result[model.trim()] = multiplier
+    }
+    return result
+  } catch {
+    return null
+  }
+}
+
+function isOptionalCostMultiplier(value: string | undefined): boolean {
+  return parseCostMultiplierJSON(value) !== null
+}
+
+function costMultiplierMapToJSON(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+
+  const entries = Object.entries(value as Record<string, unknown>).filter(
+    ([model, multiplier]) =>
+      model.trim() !== '' &&
+      typeof multiplier === 'number' &&
+      Number.isFinite(multiplier) &&
+      multiplier > 0
+  )
+  if (entries.length === 0) return ''
+
+  return JSON.stringify(Object.fromEntries(entries), null, 2)
 }
 
 /**
