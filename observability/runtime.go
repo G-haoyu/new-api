@@ -124,6 +124,14 @@ type traceState struct {
 	outputTrunc bool
 	maxBytes    int64
 
+	// clientParams / upstreamParams hold the request bodies minus their
+	// conversation-context fields: the client request and the final upstream
+	// request respectively. They are exported alongside input/output under the
+	// same capture mode gating. An oversize value is dropped and only the
+	// new_api.capture.params_truncated marker is kept.
+	clientParams   string
+	upstreamParams string
+
 	// apiType is the upstream API type of the relayed request, or
 	// apiTypeUnknown. It decides which stream aggregators are offered the
 	// first frame first.
@@ -286,6 +294,24 @@ func (r *Runtime) StartLLMRequest(ctx context.Context, info *relaycommon.RelayIn
 	return ctx, span
 }
 
+// RecordClientRequest stores the client's request body minus its
+// conversation-context fields, for gen_ai.input.value. It must be called with
+// the raw client body before any relay conversion is applied.
+func (r *Runtime) RecordClientRequest(ctx context.Context, body []byte, format types.RelayFormat) {
+	if !r.Enabled() || !r.contentCaptureEnabled() || len(body) == 0 {
+		return
+	}
+	state := stateFromContext(ctx)
+	if state == nil {
+		return
+	}
+	params, ok := stripContextFields(body, format)
+	if !ok {
+		return
+	}
+	state.setClientParams(generationSpanFromContext(ctx), params)
+}
+
 // RecordInput stores a filtered copy of the final upstream request body for
 // Langfuse. It must be called after relay conversion and all request policies
 // have been applied, immediately before the upstream request is sent.
@@ -297,11 +323,12 @@ func (r *Runtime) RecordInput(ctx context.Context, body []byte, format types.Rel
 	if state == nil {
 		return
 	}
-	filtered, ok := buildLangfuseInput(body, format)
-	if !ok {
-		return
+	if filtered, ok := buildLangfuseInput(body, format); ok {
+		state.setInput(generationSpanFromContext(ctx), filtered)
 	}
-	state.setInput(generationSpanFromContext(ctx), filtered)
+	if params, ok := stripContextFields(body, format); ok {
+		state.setUpstreamParams(generationSpanFromContext(ctx), params)
+	}
 }
 
 func (r *Runtime) StartAttempt(ctx context.Context, info *relaycommon.RelayInfo, channelID int, channelType int, channelName string) (context.Context, trace.Span) {
@@ -504,6 +531,12 @@ func (r *Runtime) FinishLLM(ctx context.Context, span trace.Span, err error, inf
 					attribute.String("gen_ai.output.messages", state.output.String()),
 				)
 			}
+			if state.clientParams != "" {
+				span.SetAttributes(attribute.String("gen_ai.input.value", state.clientParams))
+			}
+			if state.upstreamParams != "" {
+				span.SetAttributes(attribute.String("new_api.request.upstream", state.upstreamParams))
+			}
 		}
 		state.mu.Unlock()
 	}
@@ -667,6 +700,28 @@ func (s *traceState) setInput(span trace.Span, data []byte) {
 	s.input.Reset()
 	s.inputTrunc = false
 	s.setJSONLocked(&s.input, span, data, &s.inputTrunc, true)
+}
+
+func (s *traceState) setClientParams(span trace.Span, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clientParams = truncateParamsLocked(span, s.maxBytes, data)
+}
+
+func (s *traceState) setUpstreamParams(span trace.Span, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upstreamParams = truncateParamsLocked(span, s.maxBytes, data)
+}
+
+func truncateParamsLocked(span trace.Span, maxBytes int64, data []byte) string {
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		if span != nil {
+			span.SetAttributes(attribute.Bool("new_api.capture.params_truncated", true))
+		}
+		return ""
+	}
+	return string(data)
 }
 
 func (s *traceState) setJSONLocked(builder *strings.Builder, span trace.Span, data []byte, truncated *bool, input bool) {
