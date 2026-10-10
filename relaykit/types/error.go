@@ -88,14 +88,35 @@ const (
 )
 
 type NewAPIError struct {
-	Err            error
-	RelayError     any
-	skipRetry      bool
-	recordErrorLog *bool
-	errorType      ErrorType
-	errorCode      ErrorCode
-	StatusCode     int
-	Metadata       json.RawMessage
+	Err                error
+	RelayError         any
+	skipRetry          bool
+	recordErrorLog     *bool
+	errorType          ErrorType
+	errorCode          ErrorCode
+	StatusCode         int
+	upstreamStatusCode int
+	Metadata           json.RawMessage
+}
+
+func (e *NewAPIError) UpstreamStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	if e.upstreamStatusCode != 0 {
+		return e.upstreamStatusCode
+	}
+	return e.StatusCode
+}
+
+func (e *NewAPIError) SetMappedStatusCode(code int) {
+	if e == nil {
+		return
+	}
+	if e.upstreamStatusCode == 0 {
+		e.upstreamStatusCode = e.StatusCode
+	}
+	e.StatusCode = code
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.
@@ -327,11 +348,12 @@ func WithOpenAIError(openAIError OpenAIError, statusCode int, ops ...NewAPIError
 		openAIError.Type = "upstream_error"
 	}
 	e := &NewAPIError{
-		RelayError: openAIError,
-		errorType:  ErrorTypeOpenAIError,
-		StatusCode: statusCode,
-		Err:        errors.New(openAIError.Message),
-		errorCode:  ErrorCode(code),
+		RelayError:         openAIError,
+		errorType:          ErrorTypeOpenAIError,
+		StatusCode:         statusCode,
+		upstreamStatusCode: statusCode,
+		Err:                errors.New(openAIError.Message),
+		errorCode:          ErrorCode(code),
 	}
 	// OpenRouter
 	if len(openAIError.Metadata) > 0 {

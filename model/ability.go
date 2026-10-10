@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -32,7 +33,7 @@ type AbilityWithChannel struct {
 
 func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	var abilities []AbilityWithChannel
-	err := DB.Table("abilities").
+	err := excludeDisabledChannelModels(DB.Table("abilities")).
 		Select("abilities.*, channels.type as channel_type").
 		Joins("left join channels on abilities.channel_id = channels.id").
 		Where("abilities.enabled = ?", true).
@@ -40,23 +41,40 @@ func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	return abilities, err
 }
 
+func excludeDisabledChannelModels(query *gorm.DB, requestedModels ...string) *gorm.DB {
+	if !operation_setting.IsChannelModelCircuitBreakerEnabled() {
+		return query
+	}
+	disabled := DB.Model(&ChannelModelStatus{}).Select("1").Where("channel_model_statuses.channel_id = abilities.channel_id")
+	if len(requestedModels) > 0 {
+		disabled = disabled.Where("channel_model_statuses.model = ?", requestedModels[0])
+	} else {
+		disabled = disabled.Where("channel_model_statuses.model = abilities.model")
+	}
+	excluded, _, err := operation_setting.ParseChannelModelExcludedChannelIDs(operation_setting.GetMonitorSetting().ChannelModelExcludedChannelIDs)
+	if err == nil && len(excluded) > 0 {
+		return query.Where("abilities.channel_id IN ? OR NOT EXISTS (?)", excluded, disabled)
+	}
+	return query.Where("NOT EXISTS (?)", disabled)
+}
+
 func GetGroupEnabledModels(group string) []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
+	excludeDisabledChannelModels(DB.Table("abilities")).Where(commonGroupCol+" = ? and enabled = ?", group, true).Distinct("model").Pluck("model", &models)
 	return models
 }
 
 func GetEnabledModels() []string {
 	var models []string
 	// Find distinct models
-	DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Pluck("model", &models)
+	excludeDisabledChannelModels(DB.Table("abilities")).Where("enabled = ?", true).Distinct("model").Pluck("model", &models)
 	return models
 }
 
 func GetAllEnableAbilities() []Ability {
 	var abilities []Ability
-	DB.Find(&abilities, "enabled = ?", true)
+	excludeDisabledChannelModels(DB.Model(&Ability{})).Find(&abilities, "enabled = ?", true)
 	return abilities
 }
 
@@ -112,7 +130,7 @@ func GetChannel(
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
 	var abilities []Ability
-	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
+	err := excludeDisabledChannelModels(DB.Model(&Ability{}), model).Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
 		return nil, err
 	}

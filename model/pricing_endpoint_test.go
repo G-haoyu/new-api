@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,20 +15,23 @@ import (
 func resetPricingEndpointTestTables(t *testing.T) {
 	t.Helper()
 	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	originalCircuitBreakerEnabled := operation_setting.GetMonitorSetting().ChannelModelCircuitBreakerEnabled
 	common.MemoryCacheEnabled = true
-	require.NoError(t, DB.AutoMigrate(&Channel{}, &Ability{}, &Model{}, &Vendor{}))
-	for _, table := range []string{"abilities", "channels", "models", "vendors"} {
+	operation_setting.GetMonitorSetting().ChannelModelCircuitBreakerEnabled = false
+	require.NoError(t, DB.AutoMigrate(&Channel{}, &Ability{}, &ChannelModelStatus{}, &Model{}, &Vendor{}))
+	for _, table := range []string{"abilities", "channel_model_statuses", "channels", "models", "vendors"} {
 		require.NoError(t, DB.Exec("DELETE FROM "+table).Error)
 	}
 	InitChannelCache()
 	InvalidatePricingCache()
 	t.Cleanup(func() {
-		for _, table := range []string{"abilities", "channels", "models", "vendors"} {
+		for _, table := range []string{"abilities", "channel_model_statuses", "channels", "models", "vendors"} {
 			require.NoError(t, DB.Exec("DELETE FROM "+table).Error)
 		}
 		InitChannelCache()
 		InvalidatePricingCache()
 		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+		operation_setting.GetMonitorSetting().ChannelModelCircuitBreakerEnabled = originalCircuitBreakerEnabled
 	})
 }
 
