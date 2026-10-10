@@ -4448,6 +4448,7 @@
     "Scheduler configuration saved": "Scheduler configuration saved",
     "Scheduler connection is healthy": "Scheduler connection is healthy",
     "Scheduler kill switch": "Scheduler kill switch",
+    "Scheduler routing preferences for model requests.": "模型請求的調度器路由偏好設定。",
     "Scheduler status": "Scheduler status",
     "Scheduling Configuration": "Scheduling Configuration",
     "scheduling controls": "調度控制能力",

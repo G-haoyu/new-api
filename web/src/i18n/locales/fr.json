@@ -4448,6 +4448,7 @@
     "Scheduler configuration saved": "Scheduler configuration saved",
     "Scheduler connection is healthy": "Scheduler connection is healthy",
     "Scheduler kill switch": "Scheduler kill switch",
+    "Scheduler routing preferences for model requests.": "Préférences de routage du planificateur pour les requêtes de modèles.",
     "Scheduler status": "Scheduler status",
     "Scheduling Configuration": "Scheduling Configuration",
     "scheduling controls": "contrôles d'ordonnancement",

@@ -132,6 +132,12 @@ export function SidebarModulesSection({
         title: t('Profile'),
         description: t('Personal settings and profile management.'),
       },
+      routing: {
+        title: t('Routing'),
+        description: t(
+          'Scheduler routing preferences for model requests.'
+        ),
+      },
     },
     admin: {
       channel: {
