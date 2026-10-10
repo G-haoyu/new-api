@@ -44,6 +44,9 @@ export const channelSchema = z.object({
   name: z.string(),
   provider_slug: z.string().nullish(),
   weight: z.number().nullish(),
+  rpm: z.number().nullish(),
+  tpm: z.number().nullish(),
+  max_concurrency: z.number().nullish(),
   created_time: z.number(),
   test_time: z.number(),
   response_time: z.number(), // in milliseconds
@@ -380,6 +383,9 @@ export interface ChannelFormData {
   model_mapping?: string
   priority?: number
   weight?: number
+  rpm?: number
+  tpm?: number
+  max_concurrency?: number
   test_model?: string
   auto_ban?: number
   status: number
