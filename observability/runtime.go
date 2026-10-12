@@ -224,6 +224,11 @@ func (r *Runtime) Middleware() gin.HandlerFunc {
 			attribute.String("url.path", c.Request.URL.Path),
 			attribute.String("new_api.request_id", c.GetString(common.RequestIdKey)),
 		)
+		// The upstream gateway forwards the real end user's id in this header;
+		// the local user.id is only the gateway account in a layered deployment.
+		if maasUserID := strings.TrimSpace(c.Request.Header.Get("X-Maas-User-Id")); maasUserID != "" {
+			span.SetAttributes(attribute.String("new_api.request.maas_user_id", maasUserID))
+		}
 		c.Request = c.Request.WithContext(ctx)
 		ctx = context.WithValue(ctx, runtimeContextKey{}, r)
 		c.Request = c.Request.WithContext(ctx)
