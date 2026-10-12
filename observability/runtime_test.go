@@ -1039,6 +1039,50 @@ func TestIsValidContentCaptureMode(t *testing.T) {
 	}
 }
 
+func TestMiddlewareRecordsMaasUserIDHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  string
+		present bool
+	}{
+		{name: "header present", header: "user-42", present: true},
+		{name: "header absent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exporter := tracetest.NewInMemoryExporter()
+			provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+			runtime := &Runtime{
+				enabled:         true,
+				captureMaxBytes: 1024,
+				tracerProvider:  provider,
+				tracer:          provider.Tracer("test"),
+				propagator:      propagationTraceContextForTest(),
+			}
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+
+			gin.SetMode(gin.TestMode)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tt.present {
+				req.Header.Set("X-Maas-User-Id", tt.header)
+			}
+			c.Request = req
+
+			runtime.Middleware()(c)
+
+			spans := exporter.GetSpans()
+			require.Len(t, spans, 1)
+			value := attributeValue(spans[0].Attributes, "new_api.request.maas_user_id")
+			if tt.present {
+				require.Equal(t, tt.header, value.AsString())
+			} else {
+				require.Equal(t, attribute.INVALID, value.Type())
+			}
+		})
+	}
+}
+
 func attributeValue(attrs []attribute.KeyValue, key string) attribute.Value {
 	for _, attr := range attrs {
 		if string(attr.Key) == key {
