@@ -49,8 +49,8 @@ type schedulerErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// schedulerDefaultMode is the platform default routing mode applied when a user
-// has no explicit routing preference for the requested model.
+// schedulerDefaultMode is the platform default routing mode applied when the
+// requesting token has no explicit routing preference.
 const schedulerDefaultMode = "balanced"
 
 const schedulerDefaultRuntimeHighWatermark = 0.8
@@ -1066,65 +1066,31 @@ func SchedulerReservationResizeRequired(c *gin.Context) bool {
 	return channel.TPM > 0
 }
 
-// RunSchedulerShadow is best-effort by design: errors never alter native
-// channel selection. A successful response is stored only as request metadata;
-// Enforced candidate consumption is a separate, explicitly gated phase.
-func schedulerEffectivePolicy(c *gin.Context, modelName string) (map[string]any, error) {
+// schedulerEffectivePolicy builds the Scheduler policy for the current request
+// from the platform defaults and the authenticated token's routing preference.
+func schedulerEffectivePolicy(c *gin.Context) (map[string]any, error) {
 	// Default to the balanced routing policy so a request always carries a valid
-	// mode even when the user has no routing preference configured. User-level
-	// preferences, when present, override these platform defaults field by field.
+	// mode even when the token has no routing preference configured. The
+	// token-level preference (one per API key, model-agnostic) may only choose
+	// the sort mode; all other constraints remain platform defaults.
 	policy := map[string]any{
 		"mode":            schedulerDefaultMode,
 		"allow_fallbacks": true,
 		"max_attempts":    3,
 	}
-	setting, ok := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
-	if !ok || len(setting.RoutingPreferences) == 0 {
-		return policy, nil
-	}
-	pref, ok := setting.RoutingPreferences[modelName]
-	if !ok {
-		pref, ok = setting.RoutingPreferences["*"]
-	}
-	if !ok {
+	pref, ok := common.GetContextKeyType[*dto.RoutingPreference](c, constant.ContextKeyTokenRoutingPreference)
+	if !ok || pref == nil {
 		return policy, nil
 	}
 	if mode := strings.ToLower(strings.TrimSpace(pref.Mode)); mode != "" {
 		policy["mode"] = mode
 	}
-	if pref.AllowFallbacks != nil {
-		policy["allow_fallbacks"] = *pref.AllowFallbacks
-	}
-	if pref.MaxAttempts > 0 {
-		policy["max_attempts"] = pref.MaxAttempts
-	}
-	if pref.MaxPrice > 0 {
-		policy["max_price"] = pref.MaxPrice
-	}
-	if pref.MinQualityScore > 0 {
-		policy["min_quality_score"] = pref.MinQualityScore
-	}
-	if len(pref.ProviderOrder) > 0 {
-		policy["provider_order"] = pref.ProviderOrder
-	}
-	if len(pref.ProviderOnly) > 0 {
-		policy["provider_only"] = pref.ProviderOnly
-	}
-	if len(pref.ProviderIgnore) > 0 {
-		policy["provider_ignore"] = pref.ProviderIgnore
-	}
-	if len(pref.PreferredRegions) > 0 {
-		policy["preferred_regions"] = pref.PreferredRegions
-	}
-	if pref.DataPolicy != "" {
-		policy["data_policy"] = pref.DataPolicy
-	}
-	if pref.PreferenceVersion != "" {
-		policy["preference_version"] = pref.PreferenceVersion
-	}
 	return policy, nil
 }
 
+// RunSchedulerShadow is best-effort by design: errors never alter native
+// channel selection. A successful response is stored only as request metadata;
+// Enforced candidate consumption is a separate, explicitly gated phase.
 func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if SchedulerKillSwitchActive() {
 		return nil
@@ -1139,7 +1105,7 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if config.Timeout <= 0 {
 		config.Timeout = 100 * time.Millisecond
 	}
-	policy, err := schedulerEffectivePolicy(c, modelName)
+	policy, err := schedulerEffectivePolicy(c)
 	if err != nil {
 		return err
 	}
@@ -1192,14 +1158,7 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	common.SetContextKey(c, constant.ContextKeySchedulerCandidates, scheduled.Candidates)
 	common.SetContextKey(c, constant.ContextKeySchedulerDecisionID, scheduled.DecisionID)
 	common.SetContextKey(c, constant.ContextKeySchedulerScoreVersion, scheduled.ScoreVersion)
-	preferenceVersion := scheduled.PreferenceVersion
-	if preferenceVersion == "" {
-		preferenceVersion, _ = policy["preference_version"].(string)
-	}
-	common.SetContextKey(c, constant.ContextKeySchedulerPreferenceVersion, preferenceVersion)
-	if preferenceVersion, ok := policy["preference_version"].(string); ok {
-		common.SetContextKey(c, constant.ContextKeySchedulerPreferenceVersion, preferenceVersion)
-	}
+	common.SetContextKey(c, constant.ContextKeySchedulerPreferenceVersion, scheduled.PreferenceVersion)
 	if scheduled.Reservation != nil {
 		common.SetContextKey(c, constant.ContextKeySchedulerReservationID, scheduled.Reservation.ReservationID)
 		if scheduled.Reservation.EstimatedTokens > 0 {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
@@ -29,6 +30,7 @@ type Token struct {
 	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	AutoGroups         string         `json:"-" gorm:"type:text"`
+	RoutingPreference  string         `json:"-" gorm:"type:text"` // Scheduler 路由倾向(JSON)，仅通过专用接口读写
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
 
@@ -54,6 +56,40 @@ func (token *Token) SetAutoGroups(groups []string) error {
 	}
 	token.AutoGroups = string(data)
 	return nil
+}
+
+// GetRoutingPreference 解析 token 级 Scheduler 路由倾向；未配置时返回 nil。
+func (token *Token) GetRoutingPreference() (*dto.RoutingPreference, error) {
+	if token.RoutingPreference == "" {
+		return nil, nil
+	}
+	var preference dto.RoutingPreference
+	if err := common.UnmarshalJsonStr(token.RoutingPreference, &preference); err != nil {
+		return nil, err
+	}
+	return &preference, nil
+}
+
+func (token *Token) SetRoutingPreference(preference *dto.RoutingPreference) error {
+	if preference == nil {
+		token.RoutingPreference = ""
+		return nil
+	}
+	data, err := common.Marshal(preference)
+	if err != nil {
+		return err
+	}
+	token.RoutingPreference = string(data)
+	return nil
+}
+
+// UpdateRoutingPreference 只写 routing_preference 列（允许写空值以清除），
+// 与 Update() 的字段白名单分离，普通令牌编辑不会覆盖路由倾向。
+func (token *Token) UpdateRoutingPreference() error {
+	if cacheErr := invalidateTokenCacheForMutation(token.Key); cacheErr != nil {
+		common.SysLog("failed to invalidate token cache before routing preference update: " + cacheErr.Error())
+	}
+	return DB.Model(token).Select("routing_preference").Updates(token).Error
 }
 
 func (token *Token) Clean() {

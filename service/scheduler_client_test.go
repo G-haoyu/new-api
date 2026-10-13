@@ -55,7 +55,7 @@ func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode schedule request: %v", err)
 		}
-		if request.Policy["mode"] != "price" || request.Policy["max_price"] != float64(1.5) || request.Policy["preference_version"] != "pref-test" || request.Policy["runtime_high_watermark"] != 0.75 {
+		if request.Policy["mode"] != "price" || request.Policy["allow_fallbacks"] != true || request.Policy["max_attempts"] != float64(3) || request.Policy["runtime_high_watermark"] != 0.75 {
 			t.Fatalf("effective policy=%v", request.Policy)
 		}
 		if request.MaxOutputTokens != 123 {
@@ -74,9 +74,7 @@ func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 	c.Set(common.RequestIdKey, "req1")
 	common.SetContextKey(c, constant.ContextKeyChannelId, 7)
 	common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, []int{4, 7})
-	common.SetContextKey(c, constant.ContextKeyUserSetting, dto.UserSetting{RoutingPreferences: map[string]dto.RoutingPreference{
-		"m": {Mode: "price", MaxPrice: 1.5, PreferenceVersion: "pref-test"},
-	}})
+	common.SetContextKey(c, constant.ContextKeyTokenRoutingPreference, &dto.RoutingPreference{Mode: "price"})
 	if err := RunSchedulerShadow(c, "m", "default"); err != nil {
 		t.Fatal(err)
 	}

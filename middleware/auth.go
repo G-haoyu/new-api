@@ -515,6 +515,15 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, autoGroups)
 		}
 	}
+	if token.RoutingPreference != "" {
+		preference, err := token.GetRoutingPreference()
+		if err != nil {
+			// 解析失败按未配置处理，回退平台默认策略，不阻断请求。
+			common.SysError(fmt.Sprintf("failed to parse routing preference for token %d: %v", token.Id, err))
+		} else if preference != nil {
+			common.SetContextKey(c, constant.ContextKeyTokenRoutingPreference, preference)
+		}
+	}
 	if len(parts) > 1 {
 		if model.IsAdmin(token.UserId) {
 			id, err := strconv.Atoi(parts[1])

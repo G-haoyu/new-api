@@ -72,7 +72,6 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
     enabled: true,
     topup: true,
     personal: true,
-    routing: true,
   },
   admin: {
     enabled: true,

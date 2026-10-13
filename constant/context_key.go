@@ -22,6 +22,8 @@ const (
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
+	// ContextKeyTokenRoutingPreference holds the token's parsed *dto.RoutingPreference for Scheduler.
+	ContextKeyTokenRoutingPreference ContextKey = "token_routing_preference"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
