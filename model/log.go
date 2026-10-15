@@ -362,20 +362,21 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ChannelId        int                    `json:"channel_id"`
-	ProviderSlug     string                 `json:"provider_slug,omitempty"`
-	PromptTokens     int                    `json:"prompt_tokens"`
-	CompletionTokens int                    `json:"completion_tokens"`
-	ModelName        string                 `json:"model_name"`
-	TokenName        string                 `json:"token_name"`
-	Quota            int                    `json:"quota"`
-	Content          string                 `json:"content"`
-	TokenId          int                    `json:"token_id"`
-	UseTimeSeconds   int                    `json:"use_time_seconds"`
-	IsStream         bool                   `json:"is_stream"`
-	FastMode         bool                   `json:"fast_mode"`
-	Group            string                 `json:"group"`
-	Other            map[string]interface{} `json:"other"`
+	ChannelId          int                    `json:"channel_id"`
+	ProviderSlug       string                 `json:"provider_slug,omitempty"`
+	PromptTokens       int                    `json:"prompt_tokens"`
+	CompletionTokens   int                    `json:"completion_tokens"`
+	DashboardTokenUsed *int                   `json:"-"`
+	ModelName          string                 `json:"model_name"`
+	TokenName          string                 `json:"token_name"`
+	Quota              int                    `json:"quota"`
+	Content            string                 `json:"content"`
+	TokenId            int                    `json:"token_id"`
+	UseTimeSeconds     int                    `json:"use_time_seconds"`
+	IsStream           bool                   `json:"is_stream"`
+	FastMode           bool                   `json:"fast_mode"`
+	Group              string                 `json:"group"`
+	Other              map[string]interface{} `json:"other"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -434,13 +435,17 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		logger.LogError(c, "failed to record log: "+err.Error())
 	}
 	if common.DataExportEnabled {
+		tokenUsed := params.PromptTokens + params.CompletionTokens
+		if params.DashboardTokenUsed != nil {
+			tokenUsed = *params.DashboardTokenUsed
+		}
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
 			ModelName: params.ModelName,
 			Quota:     params.Quota,
 			CreatedAt: createdAt,
-			TokenUsed: params.PromptTokens + params.CompletionTokens,
+			TokenUsed: tokenUsed,
 			UseGroup:  params.Group,
 			TokenID:   params.TokenId,
 			ChannelID: params.ChannelId,
