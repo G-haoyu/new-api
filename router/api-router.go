@@ -25,6 +25,7 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/status", controller.GetStatus)
 		apiRouter.GET("/uptime/status", controller.GetUptimeKumaStatus)
 		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
+		apiRouter.GET("/scheduler/catalog", middleware.SchedulerCatalogAuth(), controller.GetSchedulerCatalog)
 		apiRouter.GET("/status/test", middleware.AdminAuth(), controller.TestStatus)
 		apiRouter.GET("/notice", controller.GetNotice)
 		apiRouter.GET("/user-agreement", controller.GetUserAgreement)
@@ -213,6 +214,14 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.POST("/waffo-pancake/subscription-product", controller.CreateWaffoPancakeSubscriptionProduct)
 			optionRoute.GET("/waffo-pancake/subscription-product-options", controller.ListWaffoPancakeSubscriptionProductOptions)
 		}
+		schedulerRoute := apiRouter.Group("/scheduler")
+		schedulerRoute.Use(middleware.RootAuth())
+		{
+			schedulerRoute.GET("/config", controller.GetSchedulerConfig)
+			schedulerRoute.PUT("/config", controller.UpdateSchedulerConfig)
+			schedulerRoute.GET("/monitor", controller.GetSchedulerMonitor)
+			schedulerRoute.POST("/test-connection", controller.TestSchedulerConnection)
+		}
 
 		// Custom OAuth provider management (root only)
 		customOAuthRoute := apiRouter.Group("/custom-oauth-provider")
@@ -267,6 +276,8 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
 			tokenRoute.GET("/auto-groups", controller.GetTokenAutoGroups)
 			tokenRoute.GET("/:id", controller.GetToken)
+			tokenRoute.GET("/:id/routing-preference", controller.GetTokenRoutingPreference)
+			tokenRoute.PUT("/:id/routing-preference", controller.UpdateTokenRoutingPreference)
 			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
 			tokenRoute.POST("/", controller.AddToken)
 			tokenRoute.PUT("/", controller.UpdateToken)

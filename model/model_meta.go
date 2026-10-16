@@ -123,7 +123,7 @@ func GetBoundChannelsByModelsMap(modelNames []string) (map[string][]BoundChannel
 		Type  int
 	}
 	var rows []row
-	err := DB.Table("channels").
+	err := excludeDisabledChannelModels(DB.Table("channels")).
 		Select("abilities.model as model, channels.name as name, channels.type as type").
 		Joins("JOIN abilities ON abilities.channel_id = channels.id").
 		Where("abilities.model IN ? AND abilities.enabled = ?", modelNames, true).
@@ -168,7 +168,7 @@ func GetPreferredModelOwnerChannelTypes(modelNames []string, groups []string) (m
 	}
 	var rows []row
 
-	query := DB.Table("abilities").
+	query := excludeDisabledChannelModels(DB.Table("abilities")).
 		Select("abilities.model as model, channels.type as channel_type").
 		Joins("JOIN channels ON abilities.channel_id = channels.id").
 		Where("abilities.model IN ? AND abilities.enabled = ? AND channels.status = ?", modelNames, true, common.ChannelStatusEnabled).

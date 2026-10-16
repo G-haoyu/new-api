@@ -44,6 +44,9 @@ export const channelSchema = z.object({
   name: z.string(),
   provider_slug: z.string().nullish(),
   weight: z.number().nullish(),
+  rpm: z.number().nullish(),
+  tpm: z.number().nullish(),
+  max_concurrency: z.number().nullish(),
   created_time: z.number(),
   test_time: z.number(),
   response_time: z.number(), // in milliseconds
@@ -52,6 +55,7 @@ export const channelSchema = z.object({
   balance: z.number().default(0), // in USD
   balance_updated_time: z.number(),
   models: z.string().default(''),
+  disabled_models: z.array(z.string()).default([]),
   group: z.string().default('default'),
   used_quota: z.number().default(0),
   model_mapping: z.string().nullish(),
@@ -90,6 +94,7 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
+  cost_multiplier?: Record<string, number>
 }
 
 export interface ChannelOtherSettings {
@@ -378,6 +383,9 @@ export interface ChannelFormData {
   model_mapping?: string
   priority?: number
   weight?: number
+  rpm?: number
+  tpm?: number
+  max_concurrency?: number
   test_model?: string
   auto_ban?: number
   status: number

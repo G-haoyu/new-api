@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,12 +84,17 @@ func buildCompletionRatioMetaValue(optionValues map[string]string) string {
 func GetOptions(c *gin.Context) {
 	var options []*model.Option
 	optionValues := make(map[string]string)
+	channelModelWeComBotWebhookKeyConfigured := false
 	common.OptionMapRWMutex.Lock()
 	for k, v := range common.OptionMap {
 		if k == "theme.frontend" {
 			continue
 		}
 		value := common.Interface2String(v)
+		if k == "monitor_setting.channel_model_wecom_bot_webhook_key" {
+			channelModelWeComBotWebhookKeyConfigured = strings.TrimSpace(value) != ""
+			continue
+		}
 		isSensitiveKey := strings.HasSuffix(k, "Token") ||
 			strings.HasSuffix(k, "Secret") ||
 			strings.HasSuffix(k, "Key") ||
@@ -109,6 +115,7 @@ func GetOptions(c *gin.Context) {
 		}
 	}
 	common.OptionMapRWMutex.Unlock()
+	options = append(options, &model.Option{Key: "monitor_setting.channel_model_wecom_bot_webhook_key_configured", Value: strconv.FormatBool(channelModelWeComBotWebhookKeyConfigured)})
 	options = append(options, &model.Option{
 		Key:   "CompletionRatioMeta",
 		Value: buildCompletionRatioMetaValue(optionValues),
@@ -146,6 +153,68 @@ func UpdateOption(c *gin.Context) {
 		option.Value = fmt.Sprintf("%v", option.Value)
 	}
 	switch option.Key {
+	case "monitor_setting.channel_model_circuit_breaker_enabled", "monitor_setting.channel_model_recovery_enabled":
+		if _, parseErr := strconv.ParseBool(option.Value.(string)); parseErr != nil {
+			common.ApiErrorMsg(c, "渠道模型熔断开关必须是布尔值")
+			return
+		}
+	case "monitor_setting.channel_model_excluded_channel_ids":
+		_, normalized, parseErr := operation_setting.ParseChannelModelExcludedChannelIDs(option.Value.(string))
+		if parseErr != nil {
+			common.ApiErrorMsg(c, parseErr.Error())
+			return
+		}
+		option.Value = normalized
+	case "monitor_setting.channel_error_status_codes":
+		if _, parseErr := operation_setting.ParseHTTPStatusCodeRanges(option.Value.(string)); parseErr != nil {
+			common.ApiErrorMsg(c, parseErr.Error())
+			return
+		}
+	case "monitor_setting.channel_model_wecom_bot_enabled":
+		enabled, parseErr := strconv.ParseBool(option.Value.(string))
+		if parseErr != nil {
+			common.ApiErrorMsg(c, "企业微信机器人通知开关必须是布尔值")
+			return
+		}
+		monitor := operation_setting.GetMonitorSetting()
+		if enabled && (strings.TrimSpace(monitor.ChannelModelWeComBotURL) == "" || strings.TrimSpace(monitor.ChannelModelWeComBotWebhookKey) == "") {
+			common.ApiErrorMsg(c, "启用企业微信机器人通知前必须配置 URL 和 Webhook Key")
+			return
+		}
+	case "monitor_setting.channel_model_wecom_bot_url":
+		value := strings.TrimSpace(option.Value.(string))
+		parsed, parseErr := url.ParseRequestURI(value)
+		if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || len(value) > 2048 {
+			common.ApiErrorMsg(c, "企业微信机器人 URL 必须是有效的 HTTP 或 HTTPS 地址")
+			return
+		}
+		option.Value = value
+	case "monitor_setting.channel_model_wecom_bot_webhook_key":
+		value := strings.TrimSpace(option.Value.(string))
+		if value == "" || len(value) > 1024 {
+			common.ApiErrorMsg(c, "Webhook Key 不能为空且长度不能超过 1024")
+			return
+		}
+		option.Value = value
+	case "monitor_setting.channel_model_wecom_bot_contact":
+		value := strings.TrimSpace(option.Value.(string))
+		if len(value) > 2048 {
+			common.ApiErrorMsg(c, "提醒成员长度不能超过 2048")
+			return
+		}
+		option.Value = value
+	case "monitor_setting.channel_error_window_minutes", "monitor_setting.channel_model_recovery_success_threshold", "monitor_setting.channel_model_recovery_interval_minutes", "monitor_setting.channel_model_recovery_concurrency", "monitor_setting.channel_model_event_retention_days":
+		value, parseErr := strconv.Atoi(option.Value.(string))
+		if parseErr != nil || value < 1 {
+			common.ApiErrorMsg(c, "该配置必须是正整数")
+			return
+		}
+	case "monitor_setting.channel_error_threshold", "monitor_setting.channel_error_consecutive_threshold", "monitor_setting.channel_model_recovery_delay_minutes":
+		value, parseErr := strconv.Atoi(option.Value.(string))
+		if parseErr != nil || value < 0 {
+			common.ApiErrorMsg(c, "该配置必须是非负整数")
+			return
+		}
 	case "QuotaForInviter", "QuotaForInvitee":
 		if isPositiveOptionValue(option.Value.(string)) && !operation_setting.IsPaymentComplianceConfirmed() {
 			common.ApiErrorI18n(c, i18n.MsgPaymentComplianceRequired)
@@ -403,10 +472,31 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	}
+	isCircuitBreakerUpdate := option.Key == "monitor_setting.channel_model_circuit_breaker_enabled"
+	enableCircuitBreaker := isCircuitBreakerUpdate && option.Value == "true"
+	if enableCircuitBreaker && !operation_setting.IsChannelModelCircuitBreakerEnabled() {
+		if err := service.ResetChannelModelCircuitBreakerState("circuit breaker enabled from clean state"); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	err = model.UpdateOption(option.Key, option.Value.(string))
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if isCircuitBreakerUpdate && !enableCircuitBreaker {
+		if err := service.ResetChannelModelCircuitBreakerState("circuit breaker disabled"); err != nil {
+			common.SysError("failed to reset channel-model circuit breaker state: " + err.Error())
+		}
+	}
+	if option.Key == "monitor_setting.channel_model_excluded_channel_ids" {
+		channelIDs, _, parseErr := operation_setting.ParseChannelModelExcludedChannelIDs(option.Value.(string))
+		if parseErr == nil {
+			if err := service.ResetExcludedChannelModelCircuitBreakerState(channelIDs, "channel excluded from circuit breaker"); err != nil {
+				common.SysError("failed to reset excluded channel-model state: " + err.Error())
+			}
+		}
 	}
 	// 出于安全考虑只记录被修改的配置项名称，不记录配置值（可能含密钥等敏感信息）。
 	recordManageAudit(c, "option.update", map[string]interface{}{

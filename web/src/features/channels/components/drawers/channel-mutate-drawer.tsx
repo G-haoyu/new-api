@@ -188,6 +188,7 @@ import {
 import { ParamOverrideEditorDialog } from '../dialogs/param-override-editor-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
 import { ModelMappingEditor } from '../model-mapping-editor'
+import { CostMultiplierEditor } from '../cost-multiplier-editor'
 import {
   ChannelAdvancedSection,
   ChannelApiAccessSection,
@@ -296,6 +297,7 @@ const SENSITIVE_FORM_FIELDS = [
   'send_maas_user_id',
   'system_prompt',
   'system_prompt_override',
+  'cost_multiplier',
   'allow_service_tier',
   'disable_store',
   'allow_safety_identifier',
@@ -349,6 +351,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.pass_through_body_enabled ||
     values.send_maas_user_id ||
     values.system_prompt_override ||
+    values.cost_multiplier?.trim() ||
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
@@ -1240,6 +1243,18 @@ export function ChannelMutateDrawer({
     modelMappingGuardrail.entries.length > 3
       ? modelMappingGuardrail.entries.length - 3
       : 0
+
+  // Cost multiplier keys must be names this channel actually serves upstream:
+  // model mapping targets, or channel models that no mapping entry redirects
+  // away. Mirrors the backend ValidateSettings cross-check.
+  const costMultiplierModelOptions = useMemo(() => {
+    const allowed = new Set(currentModelsArray)
+    for (const entry of modelMappingGuardrail.entries) {
+      allowed.delete(entry.source)
+      allowed.add(entry.target)
+    }
+    return [...allowed]
+  }, [currentModelsArray, modelMappingGuardrail])
 
   const upstreamUpdateMeta = useMemo(() => {
     const settings = parseSettingsRecord(currentSettings)
@@ -3810,6 +3825,89 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              <FormField
+                                control={form.control}
+                                name='rpm'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('RPM Limit')}</FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Requests per minute; 0 means unlimited'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='tpm'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('TPM Limit')}</FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Tokens per minute; 0 means unlimited'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='max_concurrency'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>
+                                      {t('Max Concurrency')}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(
+                                        'Concurrent requests; 0 means unlimited'
+                                      )}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
                             </div>
 
                             <FormField
@@ -4510,6 +4608,34 @@ export function ChannelMutateDrawer({
                                       onCheckedChange={field.onChange}
                                     />
                                   </FormControl>
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='cost_multiplier'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Model Cost Multiplier')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <CostMultiplierEditor
+                                      value={field.value || ''}
+                                      onChange={field.onChange}
+                                      disabled={isSubmitting}
+                                      modelOptions={
+                                        costMultiplierModelOptions
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'One "model:multiplier" pair per line, keyed by the upstream model name after model mapping. Attribute only: it never affects billing, it scales the recorded cost in relay attempt logs.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
                                 </FormItem>
                               )}
                             />

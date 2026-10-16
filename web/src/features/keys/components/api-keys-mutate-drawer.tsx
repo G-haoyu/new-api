@@ -71,7 +71,9 @@ import {
   createApiKey,
   updateApiKey,
   getApiKey,
+  getApiKeyRoutingPreference,
   getTokenAutoGroups,
+  updateApiKeyRoutingPreference,
 } from '../api'
 import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
@@ -80,12 +82,19 @@ import {
   getApiKeyFormDefaultValues,
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
+  ROUTING_PREFERENCE_FORM_DEFAULTS,
+  routingPreferenceFormSchema,
+  type RoutingPreferenceFormValues,
+  routingPreferenceToFormValues,
+  formValuesToRoutingPreference,
+  isRoutingPreferenceChanged,
 } from '../lib'
 import type { ApiKey } from '../types'
 import {
   ApiKeyGroupCombobox,
   type ApiKeyGroupOption,
 } from './api-key-group-combobox'
+import { ApiKeyRoutingSection } from './api-key-routing-section'
 import { useApiKeys } from './api-keys-provider'
 import { AutoGroupOrderEditor } from './auto-group-order-editor'
 
@@ -144,6 +153,17 @@ export function ApiKeysMutateDrawer({
   })
 
   const {
+    data: routingPreferenceData,
+    isFetched: routingPreferenceFetched,
+    isFetching: routingPreferenceFetching,
+  } = useQuery({
+    queryKey: ['api-key-routing-preference', currentRowId],
+    queryFn: () => getApiKeyRoutingPreference(currentRowId ?? 0),
+    enabled: open && isUpdate && currentRowId !== undefined,
+    staleTime: 0,
+  })
+
+  const {
     data: autoGroupsData,
     isFetched: autoGroupsFetched,
     isFetching: autoGroupsFetching,
@@ -197,6 +217,12 @@ export function ApiKeysMutateDrawer({
     resolver: zodResolver(schema),
     defaultValues: getApiKeyFormDefaultValues(defaultUseAutoGroup),
   })
+  const routingForm = useForm<RoutingPreferenceFormValues>({
+    resolver: zodResolver(routingPreferenceFormSchema),
+    defaultValues: ROUTING_PREFERENCE_FORM_DEFAULTS,
+  })
+  const storedRoutingPreference =
+    routingPreferenceData?.data?.routing_preference ?? null
 
   // Load existing data when updating
   useEffect(() => {
@@ -213,17 +239,29 @@ export function ApiKeysMutateDrawer({
       return
     }
     if (isUpdate && (!apiKeyFetched || apiKeyFetching)) return
+    if (isUpdate && (!routingPreferenceFetched || routingPreferenceFetching)) {
+      return
+    }
     if (!isUpdate && statusLoading) return
 
     const target = isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
     if (initializedTarget === target) return
     if (isUpdate && currentRow) {
-      if (apiKeyData?.success && apiKeyData.data) {
+      if (
+        apiKeyData?.success &&
+        apiKeyData.data &&
+        routingPreferenceData?.success
+      ) {
         form.reset(
           transformApiKeyToFormDefaults(
             apiKeyData.data,
             availableAutoGroupNames,
             maxAutoGroups
+          )
+        )
+        routingForm.reset(
+          routingPreferenceToFormValues(
+            routingPreferenceData.data?.routing_preference
           )
         )
         setInitializedTarget(target)
@@ -232,6 +270,7 @@ export function ApiKeysMutateDrawer({
       form.reset(
         getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
       )
+      routingForm.reset(ROUTING_PREFERENCE_FORM_DEFAULTS)
       setInitializedTarget(target)
     }
   }, [
@@ -249,6 +288,10 @@ export function ApiKeysMutateDrawer({
     apiKeyData,
     apiKeyFetched,
     apiKeyFetching,
+    routingForm,
+    routingPreferenceData,
+    routingPreferenceFetched,
+    routingPreferenceFetching,
     availableAutoGroupNames,
     maxAutoGroups,
     initializedTarget,
@@ -277,10 +320,29 @@ export function ApiKeysMutateDrawer({
     }
   }, [groups, form, selectedGroup])
 
+  // Routing preference has its own endpoint. Returns false (after a toast) on
+  // failure so the caller can keep the drawer open.
+  const saveRoutingPreference = async (tokenId: number): Promise<boolean> => {
+    const preference = formValuesToRoutingPreference(routingForm.getValues())
+    try {
+      const result = await updateApiKeyRoutingPreference(tokenId, preference)
+      if (result.success) return true
+      toast.error(result.message || t('Failed to save routing preferences'))
+    } catch {
+      toast.error(t('Failed to save routing preferences'))
+    }
+    return false
+  }
+
   const onSubmit = async (data: ApiKeyFormValues) => {
+    if (!(await routingForm.trigger())) {
+      toast.error(t('Please fix the highlighted fields before saving'))
+      return
+    }
     setIsSubmitting(true)
     try {
       const basePayload = transformFormDataToPayload(data)
+      const routingEnabled = routingForm.getValues('enabled')
 
       if (isUpdate && currentRow) {
         const result = await updateApiKey({
@@ -288,6 +350,16 @@ export function ApiKeysMutateDrawer({
           id: currentRow.id,
         })
         if (result.success) {
+          if (
+            isRoutingPreferenceChanged(
+              routingForm.getValues(),
+              storedRoutingPreference
+            ) &&
+            !(await saveRoutingPreference(currentRow.id))
+          ) {
+            triggerRefresh()
+            return
+          }
           toast.success(t(SUCCESS_MESSAGES.API_KEY_UPDATED))
           onOpenChange(false)
           triggerRefresh()
@@ -309,6 +381,10 @@ export function ApiKeysMutateDrawer({
           })
           if (result.success) {
             successCount++
+            const createdId = result.data?.id
+            if (routingEnabled && createdId) {
+              if (!(await saveRoutingPreference(createdId))) break
+            }
           } else {
             toast.error(result.message || t(ERROR_MESSAGES.CREATE_FAILED))
             break
@@ -367,6 +443,7 @@ export function ApiKeysMutateDrawer({
         onOpenChange(v)
         if (!v) {
           form.reset()
+          routingForm.reset(ROUTING_PREFERENCE_FORM_DEFAULTS)
         }
       }}
     >
@@ -664,6 +741,8 @@ export function ApiKeysMutateDrawer({
                 )}
               />
             </SideDrawerSection>
+
+            <ApiKeyRoutingSection form={routingForm} />
 
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
               <SideDrawerSection>

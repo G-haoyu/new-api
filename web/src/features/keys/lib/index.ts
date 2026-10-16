@@ -27,3 +27,13 @@ export {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from './api-key-form'
+export {
+  ROUTING_MODES,
+  ROUTING_MODE_LABELS,
+  ROUTING_PREFERENCE_FORM_DEFAULTS,
+  routingPreferenceFormSchema,
+  type RoutingPreferenceFormValues,
+  routingPreferenceToFormValues,
+  formValuesToRoutingPreference,
+  isRoutingPreferenceChanged,
+} from './routing-preference'

@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
 var filterEvalOrder = []dto.ChannelFilterKind{
@@ -41,6 +42,15 @@ func filterCandidateIDs(ids []int, modelName string, filters []dto.ChannelFilter
 		return ids, ""
 	}
 	kept = ids
+	if operation_setting.IsChannelModelCircuitBreakerEnabled() {
+		available := make([]int, 0, len(kept))
+		for _, id := range kept {
+			if !isChannelModelDisabledLocked(id, modelName) {
+				available = append(available, id)
+			}
+		}
+		kept = available
+	}
 	for _, kind := range filterEvalOrder {
 		kindFilters := filtersByKind(filters, kind)
 		if len(kindFilters) == 0 {

@@ -468,6 +468,7 @@ func textBillingCostDetails(summary textQuotaSummary, hasActualUsage bool) *obse
 }
 
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
+	RecordSchedulerUsage(ctx, usage, relayInfo != nil && relayInfo.IsStream && relayInfo.HasSendResponse())
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {

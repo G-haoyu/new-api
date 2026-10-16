@@ -138,6 +138,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if otelRuntime != nil {
 		traceCtx, llmSpan = otelRuntime.StartLLMRequest(traceCtx, relayInfo, request)
 		c.Request = c.Request.WithContext(traceCtx)
+		// The raw client body keeps unknown fields that DTO round-trips would
+		// drop; the client-format strip in RecordClientRequest removes the
+		// conversation context so only request parameters remain.
+		if storage, storageErr := common.GetBodyStorage(c); storageErr == nil {
+			if body, bodyErr := storage.Bytes(); bodyErr == nil {
+				otelRuntime.RecordClientRequest(traceCtx, body, relayFormat)
+			}
+		}
 		defer func() {
 			if newAPIError == nil {
 				otelRuntime.FinishLLM(traceCtx, llmSpan, nil, relayInfo)
@@ -253,6 +261,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		attemptStart := time.Now()
+		runtimeWindow := service.BeginSchedulerRuntimeWithCapacity(channel.Id, keyIndex, channel.RPM, channel.TPM, channel.MaxConcurrency)
 		attempt := attemptScope.BeginAttempt(c, retryParam.GetRetry(), attemptlog.ChannelTarget{
 			ChannelId:         channel.Id,
 			ChannelType:       channel.Type,
@@ -300,10 +311,31 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				otelRuntime.FinishSpan(attemptSpan, newAPIError)
 			}
 		}
+		attemptStatus := http.StatusOK
+		if newAPIError != nil {
+			attemptStatus = newAPIError.StatusCode
+		}
+		streamStarted := common.GetContextKeyBool(c, constant.ContextKeySchedulerStreamStarted)
+		if !streamStarted {
+			streamStarted = relayInfo.IsStream && relayInfo.HasSendResponse()
+		}
+		if streamStarted && !relayInfo.FirstResponseTime.IsZero() && !relayInfo.StartTime.IsZero() {
+			common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, int(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
+		}
+		inputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerInputTokens)
+		if inputTokens == 0 {
+			inputTokens = common.GetContextKeyInt(c, constant.ContextKeyPromptTokens)
+		}
+		outputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerOutputTokens)
+		if err := service.ReportSchedulerAttemptAsync(c, service.SchedulerEndpointForChannel(c, channel.Id), retryParam.GetRetry()+1, attemptStatus, newAPIError == nil, streamStarted, inputTokens, outputTokens); err != nil {
+			logger.LogDebug(c, "scheduler attempt report skipped: %v", err)
+		}
+		service.FinishSchedulerRuntime(channel.Id, keyIndex, runtimeWindow, attemptStatus, inputTokens, outputTokens, time.Since(attemptStart))
 
 		attempt.Finish(c, finishInputFor(c, relayInfo, newAPIError))
 
 		if newAPIError == nil {
+			service.ResetChannelModelFailureConsecutive(channel.Id, relayInfo.OriginModelName)
 			relayInfo.LastError = nil
 			return
 		}
@@ -352,6 +384,16 @@ func finishInputFor(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.N
 		RelayFirstResponseTime: attemptlog.FirstTokenTimeOf(info, info.FirstResponseTime),
 		StreamChunks:           info.ReceivedResponseCount,
 		UpstreamModelName:      info.GetUpstreamModelName(),
+		CostMultiplier:         1,
+	}
+
+	// The cost multiplier is a <channel, model> attribute read from the channel
+	// setting the distributor refreshed for this attempt, keyed by the upstream
+	// (model-mapped) model name — that name is only final here, after the relay
+	// handler has applied the channel's model mapping. It never touches
+	// billing; the attempt log scales cost_actual with it.
+	if channelSetting, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok {
+		in.CostMultiplier = channelSetting.CostMultiplierForModel(in.UpstreamModelName)
 	}
 
 	if info.StreamStatus != nil {
@@ -476,10 +518,25 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
-	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+	modelName := c.GetString("original_model")
+	if modelName == "" {
+		modelName = c.GetString("model")
+	}
+	modelCircuitMatched := operation_setting.IsChannelModelCircuitBreakerEnabled() &&
+		channelError.AutoBan && modelName != "" && service.IsChannelModelFailureMatch(err)
+	if modelCircuitMatched {
+		if service.RecordChannelModelFailure(channelError.ChannelId, modelName) {
+			gopool.Go(func() {
+				service.DisableChannelModel(channelError.ChannelId, modelName, channelError.ChannelName, err.ErrorWithStatusCode(), err.UpstreamStatusCode(), channelError.AutoBan)
+			})
+		}
+	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
+	}
+	if modelName != "" && !modelCircuitMatched {
+		service.ResetChannelModelFailureConsecutive(channelError.ChannelId, modelName)
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {

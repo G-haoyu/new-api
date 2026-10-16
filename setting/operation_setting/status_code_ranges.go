@@ -54,6 +54,10 @@ func ShouldDisableByStatusCode(code int) bool {
 	return shouldMatchStatusCodeRanges(AutomaticDisableStatusCodeRanges, code)
 }
 
+func MatchStatusCodeRanges(ranges []StatusCodeRange, code int) bool {
+	return shouldMatchStatusCodeRanges(ranges, code)
+}
+
 func AutomaticRetryStatusCodesToString() string {
 	return statusCodeRangesToString(AutomaticRetryStatusCodeRanges)
 }

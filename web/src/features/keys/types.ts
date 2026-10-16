@@ -102,6 +102,26 @@ export interface TokenAutoGroupsConfig {
 }
 
 // ============================================================================
+// Scheduler Routing Preference (token-level)
+// ============================================================================
+
+export type RoutingMode =
+  | 'balanced'
+  | 'price'
+  | 'latency'
+  | 'throughput'
+  | 'quality'
+
+// Mirrors relaykit/dto.RoutingPreference: only the sort mode is configurable.
+export interface RoutingPreference {
+  mode?: RoutingMode
+}
+
+export interface TokenRoutingPreferenceData {
+  routing_preference: RoutingPreference | null
+}
+
+// ============================================================================
 // Dialog Types
 // ============================================================================
 

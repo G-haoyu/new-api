@@ -44,6 +44,9 @@ type Channel struct {
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
+	RPM               int     `json:"rpm" gorm:"default:0"`
+	TPM               int     `json:"tpm" gorm:"default:0"`
+	MaxConcurrency    int     `json:"max_concurrency" gorm:"default:0"`
 	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
 	OtherInfo         string  `json:"other_info"`
 	Tag               *string `json:"tag" gorm:"index"`
@@ -57,7 +60,8 @@ type Channel struct {
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
 	// cache info
-	Keys []string `json:"-" gorm:"-"`
+	Keys           []string `json:"-" gorm:"-"`
+	DisabledModels []string `json:"disabled_models,omitempty" gorm:"-"`
 }
 
 type ChannelInfo struct {
@@ -288,6 +292,36 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	}
 }
 
+// GetEnabledKeyAt returns the exact enabled key requested by an upstream
+// scheduler. It intentionally does not mutate polling state. This makes the
+// Scheduler's immutable Candidate Chain reproducible while preserving the
+// existing random/polling behaviour for requests without a scheduler hint.
+func (channel *Channel) GetEnabledKeyAt(index int) (string, int, *types.NewAPIError) {
+	if !channel.ChannelInfo.IsMultiKey {
+		if index != 0 {
+			return "", 0, types.NewError(fmt.Errorf("key index %d is invalid for single-key channel", index), types.ErrorCodeChannelNoAvailableKey)
+		}
+		if channel.Key == "" {
+			return "", 0, types.NewError(errors.New("no key available"), types.ErrorCodeChannelNoAvailableKey)
+		}
+		return channel.Key, 0, nil
+	}
+
+	keys := channel.GetKeys()
+	if index < 0 || index >= len(keys) {
+		return "", 0, types.NewError(fmt.Errorf("key index %d is out of range", index), types.ErrorCodeChannelNoAvailableKey)
+	}
+	if statusList := channel.ChannelInfo.MultiKeyStatusList; statusList != nil {
+		if status, ok := statusList[index]; ok && status != common.ChannelStatusEnabled {
+			return "", 0, types.NewError(fmt.Errorf("key index %d is disabled", index), types.ErrorCodeChannelNoAvailableKey)
+		}
+	}
+	if keys[index] == "" {
+		return "", 0, types.NewError(fmt.Errorf("key index %d is empty", index), types.ErrorCodeChannelNoAvailableKey)
+	}
+	return keys[index], index, nil
+}
+
 func (channel *Channel) SaveChannelInfo() error {
 	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
 }
@@ -469,6 +503,28 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	return channel, nil
 }
 
+func AttachDisabledModels(channels []*Channel) error {
+	if len(channels) == 0 {
+		return nil
+	}
+	channelIDs := make([]int, 0, len(channels))
+	byID := make(map[int]*Channel, len(channels))
+	for _, channel := range channels {
+		channelIDs = append(channelIDs, channel.Id)
+		byID[channel.Id] = channel
+	}
+	var statuses []ChannelModelStatus
+	if err := DB.Where("channel_id IN ?", channelIDs).Order("model").Find(&statuses).Error; err != nil {
+		return err
+	}
+	for _, status := range statuses {
+		if channel := byID[status.ChannelId]; channel != nil {
+			channel.DisabledModels = append(channel.DisabledModels, status.Model)
+		}
+	}
+	return nil
+}
+
 func BatchInsertChannels(channels []Channel) error {
 	if len(channels) == 0 {
 		return nil
@@ -518,6 +574,10 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	}
 	var deletedCount int64
 	for _, chunk := range lo.Chunk(ids, 200) {
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelModelStatus{}).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 		result := tx.Where("id in (?)", chunk).Delete(&Channel{})
 		if result.Error != nil {
 			tx.Rollback()
@@ -531,6 +591,9 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	}
 	if err := tx.Commit().Error; err != nil {
 		return 0, err
+	}
+	for _, channelID := range ids {
+		cacheClearChannelModelStatuses(channelID)
 	}
 	return deletedCount, nil
 }
@@ -672,13 +735,27 @@ func (channel *Channel) UpdateBalance(balance float64) {
 }
 
 func (channel *Channel) Delete() error {
-	var err error
-	err = DB.Delete(channel).Error
-	if err != nil {
+	tx := DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&ChannelModelStatus{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
-	err = channel.DeleteAbilities()
-	return err
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Delete(channel).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+	cacheClearChannelModelStatuses(channel.Id)
+	return nil
 }
 
 var channelStatusLock sync.Mutex
@@ -948,11 +1025,25 @@ func updateChannelUsedQuota(id int, quota int) {
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
+	var channelIDs []int
+	if err := DB.Model(&Channel{}).Where("status = ?", status).Pluck("id", &channelIDs).Error; err != nil {
+		return 0, err
+	}
+	if err := ClearChannelModelStatusesByChannelIDs(channelIDs); err != nil {
+		return 0, err
+	}
 	result := DB.Where("status = ?", status).Delete(&Channel{})
 	return result.RowsAffected, result.Error
 }
 
 func DeleteDisabledChannel() (int64, error) {
+	var channelIDs []int
+	if err := DB.Model(&Channel{}).Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Pluck("id", &channelIDs).Error; err != nil {
+		return 0, err
+	}
+	if err := ClearChannelModelStatusesByChannelIDs(channelIDs); err != nil {
+		return 0, err
+	}
 	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
 	return result.RowsAffected, result.Error
 }
@@ -1031,6 +1122,12 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
 		return err
 	}
+	if err := channelParams.ValidateCostMultiplier(); err != nil {
+		return err
+	}
+	if err := channel.validateCostMultiplierModels(channelParams.CostMultiplierMap); err != nil {
+		return err
+	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, channelOtherSettings)
@@ -1056,8 +1153,55 @@ func (channel *Channel) ValidateSettings() error {
 	return nil
 }
 
-func (channel *Channel) GetSetting() dto.ChannelSettings {
-	setting := dto.ChannelSettings{}
+// validateCostMultiplierModels cross-checks cost multiplier keys against the
+// channel's model list and model mapping. Keys are the names the channel
+// actually serves upstream: the mapped target of a model mapping entry, or a
+// channel model that no mapping entry redirects away. A client-facing name
+// that model mapping redirects away is rejected, because the relay never
+// dispatches under that name.
+func (channel *Channel) validateCostMultiplierModels(costMultiplier map[string]float64) error {
+	if len(costMultiplier) == 0 {
+		return nil
+	}
+
+	allowed := make(map[string]struct{})
+	for _, model := range strings.Split(channel.Models, ",") {
+		if model = strings.TrimSpace(model); model != "" {
+			allowed[model] = struct{}{}
+		}
+	}
+	if channel.ModelMapping != nil && *channel.ModelMapping != "" {
+		modelMapping := make(map[string]string)
+		if err := common.Unmarshal([]byte(*channel.ModelMapping), &modelMapping); err != nil {
+			return fmt.Errorf("invalid model_mapping while validating cost_multiplier: %w", err)
+		}
+		sources := make(map[string]struct{}, len(modelMapping))
+		for clientModel, upstreamModel := range modelMapping {
+			if upstreamModel = strings.TrimSpace(upstreamModel); upstreamModel != "" {
+				allowed[upstreamModel] = struct{}{}
+			}
+			// The source name is remapped upstream, so the relay never
+			// dispatches under it; a multiplier keyed by it never matches.
+			sources[strings.TrimSpace(clientModel)] = struct{}{}
+		}
+		for source := range sources {
+			delete(allowed, source)
+		}
+	}
+
+	if len(allowed) == 0 {
+		return nil
+	}
+
+	for model := range costMultiplier {
+		if _, ok := allowed[model]; !ok {
+			return fmt.Errorf("cost_multiplier model %s must be a model mapping target or a channel model that is not remapped", model)
+		}
+	}
+	return nil
+}
+
+func (channel *Channel) GetSetting() dto.ChannelSettings {	setting := dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {
