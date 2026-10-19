@@ -87,11 +87,16 @@ func GetEnabledChannelIDsForGroupModel(group, modelName string) []int {
 	if common.MemoryCacheEnabled {
 		channelSyncLock.RLock()
 		if group2model2channels != nil {
-			ids = append(ids, group2model2channels[group][modelName]...)
-			if len(ids) == 0 {
+			raw := group2model2channels[group][modelName]
+			if len(raw) == 0 {
 				normalized := ratio_setting.FormatMatchingModelName(modelName)
 				if normalized != "" && normalized != modelName {
-					ids = append(ids, group2model2channels[group][normalized]...)
+					raw = group2model2channels[group][normalized]
+				}
+			}
+			for _, id := range raw {
+				if !isChannelModelDisabledLocked(id, modelName) {
+					ids = append(ids, id)
 				}
 			}
 		}
@@ -108,6 +113,13 @@ func GetEnabledChannelIDsForGroupModel(group, modelName string) []int {
 					Pluck("channel_id", &ids)
 			}
 		}
+		filtered := ids[:0]
+		for _, id := range ids {
+			if !IsChannelModelDisabled(id, modelName) {
+				filtered = append(filtered, id)
+			}
+		}
+		ids = filtered
 	}
 	if ids == nil {
 		return []int{}
