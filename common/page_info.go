@@ -38,7 +38,21 @@ func (p *PageInfo) SetItems(items any) {
 	p.Items = items
 }
 
+// MaxPageSize caps page_size for ordinary list endpoints.
+const MaxPageSize = 100
+
+// MaxAdminLogPageSize caps page_size for the admin log list (GET /api/log/),
+// which batch sync jobs page through; bigger pages cost fewer rate-limited requests.
+const MaxAdminLogPageSize = 1000
+
 func GetPageQuery(c *gin.Context) *PageInfo {
+	return GetPageQueryWithMax(c, MaxPageSize)
+}
+
+// GetPageQueryWithMax is GetPageQuery with a caller-chosen page_size cap.
+// The returned PageSize is the effective (capped) value, so responses echo
+// what was actually used.
+func GetPageQueryWithMax(c *gin.Context, maxPageSize int) *PageInfo {
 	pageInfo := &PageInfo{}
 	// 手动获取并处理每个参数
 	if page, err := strconv.Atoi(c.Query("p")); err == nil {
@@ -74,8 +88,8 @@ func GetPageQuery(c *gin.Context) *PageInfo {
 		}
 	}
 
-	if pageInfo.PageSize > 100 {
-		pageInfo.PageSize = 100
+	if pageInfo.PageSize > maxPageSize {
+		pageInfo.PageSize = maxPageSize
 	}
 
 	return pageInfo

@@ -58,7 +58,7 @@ func validateLogSpecialFilterTimeRange(c *gin.Context, streamError bool, retry b
 }
 
 func GetAllLogs(c *gin.Context) {
-	pageInfo := common.GetPageQuery(c)
+	pageInfo := common.GetPageQueryWithMax(c, common.MaxAdminLogPageSize)
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)

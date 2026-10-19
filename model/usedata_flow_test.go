@@ -1,9 +1,11 @@
 package model
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -130,6 +132,56 @@ func TestGetFlowQuotaDataUsesQuotaDataRoleSpecificDimensions(t *testing.T) {
 	require.Empty(t, selfRows[0].TokenName)
 	require.Equal(t, "vip", selfRows[0].UseGroup)
 	require.Equal(t, 175, selfRows[0].Quota)
+}
+
+func TestRecordConsumeLogDashboardTokenTotalIncludesCacheWithoutChangingUsageLog(t *testing.T) {
+	truncateTables(t)
+	previousExportEnabled := common.DataExportEnabled
+	previousLogEnabled := common.LogConsumeEnabled
+	common.DataExportEnabled = true
+	common.LogConsumeEnabled = true
+	CacheQuotaDataLock.Lock()
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+	t.Cleanup(func() {
+		common.DataExportEnabled = previousExportEnabled
+		common.LogConsumeEnabled = previousLogEnabled
+		CacheQuotaDataLock.Lock()
+		CacheQuotaData = make(map[string]*QuotaData)
+		CacheQuotaDataLock.Unlock()
+	})
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Set("username", "alice")
+	totalIncludingCache := 120
+	RecordConsumeLog(ctx, 1, RecordConsumeLogParams{
+		ModelName:          "claude-test",
+		PromptTokens:       10,
+		CompletionTokens:   5,
+		DashboardTokenUsed: &totalIncludingCache,
+	})
+	RecordConsumeLog(ctx, 1, RecordConsumeLogParams{
+		ModelName:        "gpt-test",
+		PromptTokens:     20,
+		CompletionTokens: 5,
+	})
+
+	var logs []Log
+	require.NoError(t, DB.Order("model_name").Find(&logs).Error)
+	require.Len(t, logs, 2)
+	require.Equal(t, 10, logs[0].PromptTokens)
+	require.Equal(t, 5, logs[0].CompletionTokens)
+
+	SaveQuotaDataCache()
+	rows, err := GetAllQuotaDates(0, common.GetTimestamp()+3600, "")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	tokenUsedByModel := make(map[string]int, len(rows))
+	for _, row := range rows {
+		tokenUsedByModel[row.ModelName] = row.TokenUsed
+	}
+	require.Equal(t, 120, tokenUsedByModel["claude-test"])
+	require.Equal(t, 25, tokenUsedByModel["gpt-test"])
 }
 
 func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
