@@ -524,16 +524,13 @@ export function useCommonLogsColumns(
           const adminInfo = other?.admin_info
           const affinity = adminInfo?.channel_affinity
 
-          // 外部平台终端用户标识：仅当亲和 key 来自请求头
-          // key_source === 'request_header'
           const isExternalPlatform = affinity?.key_source === 'request_header'
-          // 新日志优先显示独立列 iself_email，历史数据无该列时用脱敏的 hint
-          const externalUser = isExternalPlatform
-            ? log.iself_email ||
-              affinity?.key_hint ||
-              affinity?.key_fp ||
-              ''
-            : ''
+          // 邮箱展示独立于亲和命中，历史日志仍使用请求头亲和信息回退。
+          const externalUser =
+            log.iself_email ||
+            (isExternalPlatform
+              ? affinity?.key_hint || affinity?.key_fp || ''
+              : '')
 
           const externalUserTooltip = affinity?.key_fp
             ? `${externalUser}\n${t('Key Fingerprint')}: ${affinity.key_fp}`
