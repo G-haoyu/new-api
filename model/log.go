@@ -354,6 +354,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
+		IselfEmail:        common.GetContextKeyString(c, constant.ContextKeyIselfEmail),
 	}
 	err := createLog(log)
 	if err != nil {
