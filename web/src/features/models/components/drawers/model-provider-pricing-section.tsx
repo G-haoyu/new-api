@@ -55,6 +55,11 @@ type DraftPrice = {
   outputPrice: string
   cacheReadPrice: string
   cacheWritePrice: string
+  inputListPrice: string
+  outputListPrice: string
+  cacheReadListPrice: string
+  cacheWriteListPrice: string
+  discountRate: string
   sourceUrl: string
   providerModelName: string
   contextLength: string
@@ -107,6 +112,20 @@ function priceToDraft(price?: ModelProviderPrice): DraftPrice {
       price?.cache_read_price == null ? '' : String(price.cache_read_price),
     cacheWritePrice:
       price?.cache_write_price == null ? '' : String(price.cache_write_price),
+    inputListPrice:
+      price?.input_list_price == null ? '' : String(price.input_list_price),
+    outputListPrice:
+      price?.output_list_price == null ? '' : String(price.output_list_price),
+    cacheReadListPrice:
+      price?.cache_read_list_price == null
+        ? ''
+        : String(price.cache_read_list_price),
+    cacheWriteListPrice:
+      price?.cache_write_list_price == null
+        ? ''
+        : String(price.cache_write_list_price),
+    discountRate:
+      price?.discount_rate == null ? '' : String(price.discount_rate),
     sourceUrl: price?.source_url || '',
     providerModelName: price?.model_name || '',
     contextLength:
@@ -124,6 +143,26 @@ function priceToDraft(price?: ModelProviderPrice): DraftPrice {
     batch: capabilityToDraft(price?.batch),
     effectiveAt: timestampToLocalInput(price?.effective_at),
   }
+}
+
+function getEffectivePriceValue(
+  currentPrice: string,
+  listPrice: string,
+  discountRate: string
+): string {
+  if (!listPrice.trim()) return currentPrice
+  const parsedListPrice = Number.parseFloat(listPrice)
+  const parsedRate = discountRate.trim() ? Number.parseFloat(discountRate) : 100
+  if (
+    !Number.isFinite(parsedListPrice) ||
+    parsedListPrice < 0 ||
+    !Number.isFinite(parsedRate) ||
+    parsedRate < 0 ||
+    parsedRate > 100
+  ) {
+    return currentPrice
+  }
+  return (parsedListPrice * (parsedRate / 100)).toFixed(12).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
 }
 
 export function ModelProviderPricingSection(props: {
@@ -232,7 +271,48 @@ export function ModelProviderPricingSection(props: {
     const draft = drafts[provider.slug] ?? priceToDraft()
     const inputPrice = Number.parseFloat(draft.inputPrice)
     const outputPrice = Number.parseFloat(draft.outputPrice)
-    if (!Number.isFinite(inputPrice) || inputPrice < 0 || !Number.isFinite(outputPrice) || outputPrice < 0) {
+
+    const parseListPrice = (value: string) => {
+      if (!value.trim()) return undefined
+      const parsed = Number.parseFloat(value)
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+    }
+    const inputListPrice = parseListPrice(draft.inputListPrice)
+    const outputListPrice = parseListPrice(draft.outputListPrice)
+    const cacheReadListPrice = parseListPrice(draft.cacheReadListPrice)
+    const cacheWriteListPrice = parseListPrice(draft.cacheWriteListPrice)
+    if (
+      inputListPrice === null ||
+      outputListPrice === null ||
+      cacheReadListPrice === null ||
+      cacheWriteListPrice === null
+    ) {
+      toast.error(t('List prices must be non-negative numbers'))
+      return
+    }
+    const discountRate = parseListPrice(draft.discountRate)
+    if (discountRate === null || (discountRate ?? 100) > 100) {
+      toast.error(t('Discount rate must be between 0 and 100'))
+      return
+    }
+    if (
+      (discountRate ?? 100) < 100 &&
+      inputListPrice == null &&
+      outputListPrice == null &&
+      cacheReadListPrice == null &&
+      cacheWriteListPrice == null
+    ) {
+      toast.error(t('Discount rate requires at least one list price'))
+      return
+    }
+    const hasInputListPrice = inputListPrice != null
+    const hasOutputListPrice = outputListPrice != null
+    if (
+      (!hasInputListPrice &&
+        (!Number.isFinite(inputPrice) || inputPrice < 0)) ||
+      (!hasOutputListPrice &&
+        (!Number.isFinite(outputPrice) || outputPrice < 0))
+    ) {
       toast.error(t('Input and output prices must be non-negative numbers'))
       return
     }
@@ -276,10 +356,15 @@ export function ModelProviderPricingSection(props: {
       const payload = {
         model_id: modelId,
         provider_slug: provider.slug,
-        input_price: inputPrice,
-        output_price: outputPrice,
+        input_price: Number.isFinite(inputPrice) ? inputPrice : 0,
+        output_price: Number.isFinite(outputPrice) ? outputPrice : 0,
         cache_read_price: cacheReadPrice,
         cache_write_price: cacheWritePrice,
+        input_list_price: inputListPrice,
+        output_list_price: outputListPrice,
+        cache_read_list_price: cacheReadListPrice,
+        cache_write_list_price: cacheWriteListPrice,
+        discount_rate: discountRate,
         source_url: draft.sourceUrl.trim(),
         model_name: draft.providerModelName.trim(),
         context_length: contextLength,
@@ -379,18 +464,82 @@ export function ModelProviderPricingSection(props: {
                 {draft.id && <Button type='button' variant='ghost' size='icon' aria-label={t('Delete')} onClick={() => void handleDelete(provider)} disabled={savingSlug === provider.slug}><Trash2 className='size-4' /></Button>}
               </div>
             </div>
-            <div className='grid gap-3 sm:grid-cols-2'>
-              {([
-                ['inputPrice', t('Input price ($/1M)')],
-                ['outputPrice', t('Output price ($/1M)')],
-                ['cacheReadPrice', t('Cache read price ($/1M)')],
-                ['cacheWritePrice', t('Cache write price ($/1M)')],
-              ] as const).map(([field, label]) => (
-                <label key={field} className='space-y-1'>
-                  <span className='text-muted-foreground text-xs'>{label}</span>
-                  <Input type='number' min='0' step='any' value={draft[field]} onChange={(event) => updateDraft(provider, field, event.target.value)} placeholder={t('To be added')} />
+            <div className='border-border/70 space-y-3 border-t pt-3'>
+              <div>
+                <h4 className='text-sm font-semibold'>{t('Standard price and discount')}</h4>
+                <p className='text-muted-foreground mt-1 text-xs'>
+                  {t('Configure standard Provider prices and a discount rate for model square display. 90 means 90% of the standard price (9-fold).')}
+                </p>
+              </div>
+              <div className='grid gap-3 sm:grid-cols-2'>
+                {([
+                  ['inputListPrice', t('Input list price ($/1M)')],
+                  ['outputListPrice', t('Output list price ($/1M)')],
+                  ['cacheReadListPrice', t('Cache read list price ($/1M)')],
+                  ['cacheWriteListPrice', t('Cache write list price ($/1M)')],
+                ] as const).map(([field, label]) => (
+                  <label key={field} className='space-y-1'>
+                    <span className='text-muted-foreground text-xs'>{label}</span>
+                    <Input
+                      type='number'
+                      min='0'
+                      step='any'
+                      value={draft[field]}
+                      onChange={(event) => updateDraft(provider, field, event.target.value)}
+                      placeholder={t('Optional')}
+                    />
+                  </label>
+                ))}
+                <label className='space-y-1'>
+                  <span className='text-muted-foreground text-xs'>{t('Discount rate (%)')}</span>
+                  <Input
+                    type='number'
+                    min='0'
+                    max='100'
+                    step='any'
+                    value={draft.discountRate}
+                    onChange={(event) => updateDraft(provider, 'discountRate', event.target.value)}
+                    placeholder='100'
+                  />
                 </label>
-              ))}
+              </div>
+            </div>
+            <div className='border-border/70 space-y-3 border-t pt-3'>
+              <div>
+                <h4 className='text-sm font-semibold'>{t('Current effective price')}</h4>
+                <p className='text-muted-foreground mt-1 text-xs'>
+                  {t('Calculated automatically from the standard price and discount rate. Leave the standard price empty to keep the legacy price.')}
+                </p>
+              </div>
+              <div className='grid gap-3 sm:grid-cols-2'>
+                {([
+                  ['inputPrice', 'inputListPrice', t('Current input price ($/1M)')],
+                  ['outputPrice', 'outputListPrice', t('Current output price ($/1M)')],
+                  ['cacheReadPrice', 'cacheReadListPrice', t('Current cache read price ($/1M)')],
+                  ['cacheWritePrice', 'cacheWriteListPrice', t('Current cache write price ($/1M)')],
+                ] as const).map(([field, listField, label]) => {
+                  const value = getEffectivePriceValue(
+                    draft[field],
+                    draft[listField],
+                    draft.discountRate
+                  )
+                  const isCalculated = draft[listField].trim().length > 0
+                  return (
+                    <label key={field} className='space-y-1'>
+                      <span className='text-muted-foreground text-xs'>{label}</span>
+                      <Input
+                        type='number'
+                        min='0'
+                        step='any'
+                        value={value}
+                        readOnly={isCalculated}
+                        onChange={(event) => updateDraft(provider, field, event.target.value)}
+                        placeholder={t('To be added')}
+                      />
+                    </label>
+                  )
+                })}
+              </div>
             </div>
             <div className='border-border/70 space-y-3 border-t pt-3'>
               <div>

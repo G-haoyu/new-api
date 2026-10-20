@@ -54,12 +54,60 @@ const EMPTY_PRICES: ModelProviderPrice[] = []
 
 function ProviderPriceCell(props: {
   price?: ModelProviderPrice
-  field: 'input_price' | 'output_price'
+  field: 'input_price' | 'output_price' | 'cache_read_price'
+  listField?:
+    | 'input_list_price'
+    | 'output_list_price'
+    | 'cache_read_list_price'
 }) {
-  if (!props.price) return <span className='text-muted-foreground'>—</span>
+  const value = props.price?.[props.field]
+  const listPrice = props.listField ? props.price?.[props.listField] : null
+  const hasListPrice =
+    listPrice != null &&
+    Number.isFinite(listPrice) &&
+    value != null &&
+    Number.isFinite(value) &&
+    listPrice > value
+  if (value == null) return <span className='text-muted-foreground'>—</span>
+  if (!hasListPrice) {
+    return <span className='font-mono'>{formatBillingCurrencyFromUSD(value)}</span>
+  }
   return (
-    <span className='font-mono'>
-      {formatBillingCurrencyFromUSD(props.price[props.field])}
+    <span className='inline-flex flex-wrap items-baseline justify-end gap-1 font-mono tabular-nums'>
+      <span className='text-muted-foreground/70 text-[11px] line-through'>
+        {formatBillingCurrencyFromUSD(listPrice)}
+      </span>
+      <span className='text-emerald-600 dark:text-emerald-400'>
+        {formatBillingCurrencyFromUSD(value)}
+      </span>
+    </span>
+  )
+}
+
+function ProviderDiscountCell(props: { price?: ModelProviderPrice }) {
+  const { t } = useTranslation()
+  const price = props.price
+  const rate = price?.discount_rate
+  if (
+    rate == null ||
+    !Number.isFinite(rate) ||
+    rate < 0 ||
+    rate >= 100
+  ) {
+    return <span className='text-muted-foreground'>—</span>
+  }
+  const hasListPrice = [
+    [price?.input_list_price, price?.input_price],
+    [price?.output_list_price, price?.output_price],
+    [price?.cache_read_list_price, price?.cache_read_price],
+    [price?.cache_write_list_price, price?.cache_write_price],
+  ].some(([listPrice, price]) => listPrice != null && price != null && listPrice > price)
+  if (!hasListPrice) return <span className='text-muted-foreground'>—</span>
+  return (
+    <span className='bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded px-1.5 py-0.5 text-xs font-medium'>
+      {t('{{rate}} fold', {
+        rate: (rate / 10).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      })}
     </span>
   )
 }
@@ -214,13 +262,13 @@ export function ModelProvidersSubtable(props: { model: Model }) {
   )
 
   return (
-    <div className='space-y-2 p-2 sm:p-3'>
+    <div className='bg-muted/20 space-y-2 p-2 sm:p-3'>
       <div className='flex flex-wrap items-center justify-between gap-2'>
-        <div className='flex min-w-0 items-center gap-2'>
+        <div className='min-w-0'>
           <div className='text-sm font-semibold'>{t('Providers')}</div>
-          <span className='text-muted-foreground text-xs'>
+          <div className='text-muted-foreground text-xs'>
             {t('Configured')}: {configuredCount}
-          </span>
+          </div>
         </div>
         <Button
           type='button'
@@ -240,26 +288,42 @@ export function ModelProvidersSubtable(props: { model: Model }) {
           {t('Not configured')}
         </div>
       ) : (
-        <div className='overflow-x-auto rounded-md border'>
-          <table className='w-full min-w-[720px] text-sm'>
+        <div className='min-w-0 overflow-x-auto rounded-md border [&_td]:text-xs! [&_th]:text-xs! [&_td_*]:text-xs! [&_th_*]:text-xs!'>
+          <table className='w-max min-w-[920px] table-fixed text-xs'>
+            <colgroup>
+              <col className='w-[180px]' />
+              <col className='w-[96px]' />
+              <col className='w-[180px]' />
+              <col className='w-[120px]' />
+              <col className='w-[120px]' />
+              <col className='w-[100px]' />
+              <col className='w-[70px]' />
+              <col className='w-[96px]' />
+            </colgroup>
             <thead className='bg-background text-muted-foreground text-xs'>
               <tr>
-                <th className='px-2.5 py-1.5 text-left font-medium'>
+                <th className='w-[180px] px-2 py-1.5 text-left font-medium'>
                   {t('Provider')}
                 </th>
-                <th className='px-2.5 py-1.5 text-left font-medium'>
+                <th className='w-[96px] px-2 py-1.5 text-left font-medium'>
                   {t('Status')}
                 </th>
-                <th className='px-2.5 py-1.5 text-left font-medium'>
+                <th className='w-[180px] px-2 py-1.5 text-left font-medium'>
                   {t('Provider model name')}
                 </th>
-                <th className='px-2.5 py-1.5 text-right font-medium'>
+                <th className='w-[120px] px-2 py-1.5 text-right font-medium'>
                   {t('Input')}
                 </th>
-                <th className='px-2.5 py-1.5 text-right font-medium'>
+                <th className='w-[120px] px-2 py-1.5 text-right font-medium'>
                   {t('Output')}
                 </th>
-                <th className='px-2.5 py-1.5 text-right font-medium'>
+                <th className='w-[100px] px-2 py-1.5 text-right font-medium'>
+                  {t('Cache')}
+                </th>
+                <th className='w-[70px] px-2 py-1.5 text-right font-medium'>
+                  {t('Discount')}
+                </th>
+                <th className='w-[96px] px-2 py-1.5 text-right font-medium'>
                   {t('Actions')}
                 </th>
               </tr>
@@ -269,8 +333,8 @@ export function ModelProvidersSubtable(props: { model: Model }) {
                 const icon = provider.icon ? getLobeIcon(provider.icon, 18) : null
                 return (
                   <tr key={price.id || provider.slug}>
-                    <td className='px-2.5 py-1.5'>
-                      <div className='flex items-center gap-2'>
+                    <td className='min-w-0 px-2 py-1.5'>
+                      <div className='flex min-w-0 items-center gap-2'>
                         <div className='bg-muted flex size-6 shrink-0 items-center justify-center rounded-md'>
                           {icon || (
                             <span className='text-muted-foreground text-xs font-semibold'>
@@ -288,30 +352,48 @@ export function ModelProvidersSubtable(props: { model: Model }) {
                         </div>
                       </div>
                     </td>
-                    <td className='px-2.5 py-1.5'>
+                    <td className='px-2 py-1.5'>
                       <div className='flex flex-wrap gap-1'>
-                        <span className='bg-muted rounded px-1.5 py-0.5 text-xs'>
+                        <span className='bg-muted rounded px-1 py-0.5 text-[11px]'>
                           {provider.status === 1
                             ? t('Enabled')
                             : t('Disabled')}
                         </span>
                       </div>
                     </td>
-                    <td className='text-muted-foreground px-2.5 py-1.5 font-mono'>
+                    <td className='max-w-44 min-w-0 px-2 py-1.5 font-mono text-[11px] leading-snug break-all whitespace-normal'>
                       {price?.model_name || '—'}
                     </td>
-                    <td className='px-2.5 py-1.5 text-right'>
-                      <ProviderPriceCell price={price} field='input_price' />
+                    <td className='px-2 py-1.5 text-right'>
+                      <ProviderPriceCell
+                        price={price}
+                        field='input_price'
+                        listField='input_list_price'
+                      />
                     </td>
-                    <td className='px-2.5 py-1.5 text-right'>
-                      <ProviderPriceCell price={price} field='output_price' />
+                    <td className='px-2 py-1.5 text-right'>
+                      <ProviderPriceCell
+                        price={price}
+                        field='output_price'
+                        listField='output_list_price'
+                      />
                     </td>
-                    <td className='px-2.5 py-1.5 text-right'>
+                    <td className='px-2 py-1.5 text-right'>
+                      <ProviderPriceCell
+                        price={price}
+                        field='cache_read_price'
+                        listField='cache_read_list_price'
+                      />
+                    </td>
+                    <td className='px-2 py-1.5 text-right'>
+                      <ProviderDiscountCell price={price} />
+                    </td>
+                    <td className='px-2 py-1.5 text-right'>
                       <Button
                         type='button'
                         variant='ghost'
                         size='sm'
-                        className='gap-1'
+                        className='h-7 gap-1 px-1.5 text-[11px]'
                         onClick={() => openProvider(provider)}
                       >
                         <Pencil className='size-3.5' />

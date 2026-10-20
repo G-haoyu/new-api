@@ -365,6 +365,72 @@ function formatProviderPrice(value: number | null | undefined): string {
       })
 }
 
+type ProviderPricing = NonNullable<PricingProvider['pricing']>
+
+function hasProviderDiscount(pricing: ProviderPricing): boolean {
+  if (
+    typeof pricing.discount_rate !== 'number' ||
+    !Number.isFinite(pricing.discount_rate) ||
+    pricing.discount_rate >= 100 ||
+    pricing.discount_rate < 0
+  ) {
+    return false
+  }
+  return [
+    [pricing.input_list_price, pricing.input_price],
+    [pricing.output_list_price, pricing.output_price],
+    [pricing.cache_read_list_price, pricing.cache_read_price],
+    [pricing.cache_write_list_price, pricing.cache_write_price],
+  ].some(([listPrice, price]) =>
+    listPrice != null &&
+    price != null &&
+    Number.isFinite(listPrice) &&
+    Number.isFinite(price) &&
+    listPrice > price
+  )
+}
+
+function ProviderPricePair(props: {
+  price: number | null | undefined
+  listPrice?: number | null
+}) {
+  const hasListPrice =
+    props.listPrice != null &&
+    Number.isFinite(props.listPrice) &&
+    props.listPrice >= 0 &&
+    props.listPrice > (props.price ?? Number.POSITIVE_INFINITY)
+
+  if (!hasListPrice) {
+    return <>{formatProviderPrice(props.price)}</>
+  }
+
+  return (
+    <span className='inline-flex flex-wrap items-baseline justify-end gap-1.5'>
+      <span className='text-muted-foreground/70 text-xs line-through'>
+        {formatProviderPrice(props.listPrice)}
+      </span>
+      <span className='text-emerald-600 dark:text-emerald-400'>
+        {formatProviderPrice(props.price)}
+      </span>
+    </span>
+  )
+}
+
+function ProviderDiscountBadge(props: { pricing?: ProviderPricing }) {
+  const { t } = useTranslation()
+  const pricing = props.pricing
+  if (!pricing || !hasProviderDiscount(pricing)) return null
+  return (
+    <span className='bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded px-1.5 py-0.5 text-xs font-medium'>
+      {t('{{rate}} fold', {
+        rate: (Number(pricing.discount_rate) / 10).toLocaleString(undefined, {
+          maximumFractionDigits: 2,
+        }),
+      })}
+    </span>
+  )
+}
+
 function formatProviderCachePrice(
   provider: PricingProvider,
   t: (key: string) => string
@@ -824,37 +890,48 @@ function ModelProviderDetailsDrawer(props: ModelProviderDetailsDrawerProps) {
               <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
                 <div className='flex items-center justify-between gap-3'>
                   <SectionTitle>{t('Pricing')}</SectionTitle>
-                  <span className='text-muted-foreground text-[11px]'>
-                    {t('Platform billing price')}
-                  </span>
+                  <div className='flex items-center gap-2'>
+                    <ProviderDiscountBadge pricing={providerPricing} />
+                    <span className='text-muted-foreground text-[11px]'>
+                      {t('Platform billing price')}
+                    </span>
+                  </div>
                 </div>
                 {providerPricing ? (
                   <div className='grid gap-2 sm:grid-cols-2'>
                     <CatalogInfoCell label={`${t('Input')} / 1M`}>
                       <CatalogTextValue>
-                        {formatProviderPrice(providerPricing.input_price)}
+                        <ProviderPricePair
+                          price={providerPricing.input_price}
+                          listPrice={providerPricing.input_list_price}
+                        />
                       </CatalogTextValue>
                     </CatalogInfoCell>
                     <CatalogInfoCell label={`${t('Output')} / 1M`}>
                       <CatalogTextValue>
-                        {formatProviderPrice(providerPricing.output_price)}
+                        <ProviderPricePair
+                          price={providerPricing.output_price}
+                          listPrice={providerPricing.output_list_price}
+                        />
                       </CatalogTextValue>
                     </CatalogInfoCell>
                     {providerPricing.cache_read_price != null && (
                       <CatalogInfoCell label={`${t('Cache')} / 1M`}>
                         <CatalogTextValue>
-                          {formatProviderPrice(
-                            providerPricing.cache_read_price
-                          )}
+                          <ProviderPricePair
+                            price={providerPricing.cache_read_price}
+                            listPrice={providerPricing.cache_read_list_price}
+                          />
                         </CatalogTextValue>
                       </CatalogInfoCell>
                     )}
                     {providerPricing.cache_write_price != null && (
                       <CatalogInfoCell label={`${t('Cache Write')} / 1M`}>
                         <CatalogTextValue>
-                          {formatProviderPrice(
-                            providerPricing.cache_write_price
-                          )}
+                          <ProviderPricePair
+                            price={providerPricing.cache_write_price}
+                            listPrice={providerPricing.cache_write_list_price}
+                          />
                         </CatalogTextValue>
                       </CatalogInfoCell>
                     )}
@@ -1199,7 +1276,10 @@ function ModelSquareProviderTable(props: {
                       )}
                     </div>
                     <div className='min-w-0'>
-                      <div className='font-medium'>{provider.name}</div>
+                      <div className='flex flex-wrap items-center gap-2 font-medium'>
+                        <span>{provider.name}</span>
+                        <ProviderDiscountBadge pricing={provider.pricing} />
+                      </div>
                       <div className='text-muted-foreground font-mono text-xs'>
                         {provider.slug}
                       </div>
@@ -1219,19 +1299,34 @@ function ModelSquareProviderTable(props: {
                   </span>
                 </td>
                 <td className='px-4 py-3 text-right font-mono tabular-nums'>
-                  {provider.pricing
-                    ? formatBillingCurrencyFromUSD(provider.pricing.input_price)
-                    : t('To be added')}
+                  {provider.pricing ? (
+                    <ProviderPricePair
+                      price={provider.pricing.input_price}
+                      listPrice={provider.pricing.input_list_price}
+                    />
+                  ) : (
+                    t('To be added')
+                  )}
                 </td>
                 <td className='px-4 py-3 text-right font-mono tabular-nums'>
-                  {provider.pricing
-                    ? formatBillingCurrencyFromUSD(
-                        provider.pricing.output_price
-                      )
-                    : t('To be added')}
+                  {provider.pricing ? (
+                    <ProviderPricePair
+                      price={provider.pricing.output_price}
+                      listPrice={provider.pricing.output_list_price}
+                    />
+                  ) : (
+                    t('To be added')
+                  )}
                 </td>
                 <td className='text-muted-foreground px-4 py-3 text-right font-mono tabular-nums'>
-                  {formatProviderCachePrice(provider, t)}
+                  {provider.pricing?.cache_read_price != null ? (
+                    <ProviderPricePair
+                      price={provider.pricing.cache_read_price}
+                      listPrice={provider.pricing.cache_read_list_price}
+                    />
+                  ) : (
+                    formatProviderCachePrice(provider, t)
+                  )}
                 </td>
                 <td className='px-4 py-3 text-right'>
                   <div className='flex items-center justify-end gap-2'>

@@ -109,6 +109,11 @@ export interface ModelProviderPrice {
   output_price: number
   cache_read_price?: number | null
   cache_write_price?: number | null
+  input_list_price?: number | null
+  output_list_price?: number | null
+  cache_read_list_price?: number | null
+  cache_write_list_price?: number | null
+  discount_rate?: number | null
   source_url?: string
   effective_at?: number
   created_time: number

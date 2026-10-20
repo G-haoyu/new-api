@@ -101,7 +101,7 @@ export function useModelsColumns(
       },
       enableSorting: false,
       enableHiding: false,
-      size: 40,
+      size: 32,
     },
     // Checkbox column
     {
@@ -123,7 +123,7 @@ export function useModelsColumns(
       ),
       enableSorting: false,
       enableHiding: false,
-      size: 40,
+      size: 32,
     },
 
     // ID column
@@ -135,7 +135,7 @@ export function useModelsColumns(
         const id = row.getValue('id') as number
         return <TableId value={id} />
       },
-      size: 64,
+      size: 48,
     },
 
     // Model Name column (with model icon)
