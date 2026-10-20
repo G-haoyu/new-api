@@ -570,6 +570,15 @@ export const STATIC_I18N_KEYS = [
   'The model that was requested',
   'The upstream channel that served the requests',
 
+  // Dashboard labels from constants.ts
+  '60 Days',
+  '90 Days',
+  'Insufficient samples',
+  'Stable',
+  'Fair',
+  'Degraded',
+  'Unstable',
+
   // Misc
   'Cancel',
   'Status',
