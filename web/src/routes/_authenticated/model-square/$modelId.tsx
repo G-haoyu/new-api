@@ -19,11 +19,11 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
 import { ModelSquareDetails } from '@/features/pricing/components/model-details'
-import { getFreshModuleAccess } from '@/lib/nav-modules'
+import { getModuleAccessForGuard } from '@/lib/nav-modules'
 
 export const Route = createFileRoute('/_authenticated/model-square/$modelId')({
-  beforeLoad: async () => {
-    const access = await getFreshModuleAccess('pricing')
+  beforeLoad: async ({ context }) => {
+    const access = await getModuleAccessForGuard(context.queryClient, 'pricing')
     if (!access.enabled) {
       throw redirect({
         to: '/dashboard/$section',

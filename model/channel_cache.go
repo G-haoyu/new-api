@@ -66,9 +66,9 @@ func InitChannelCache() {
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels
 		}
-		groups := strings.Split(channel.Group, ",")
-		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
+		groups := strings.SplitSeq(channel.Group, ",")
+		for group := range groups {
+			models := channel.GetModels()
 			for _, model := range models {
 				if _, ok := newGroup2model2channels[group][model]; !ok {
 					newGroup2model2channels[group][model] = make([]int, 0)
@@ -114,13 +114,14 @@ func InitChannelCache() {
 	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
 	// invalidating the pricing cache, otherwise the reversed order deadlocks.
 	InvalidatePricingCache()
-	common.SysLog("channels synced from database")
+	rebuildTaskAliasView()
+	common.SysLog(common.LogText("channels synced from database"))
 }
 
 func SyncChannelCache(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
-		common.SysLog("syncing channels from database")
+		common.SysLog(common.LogText("syncing channels from database"))
 		InitChannelCache()
 	}
 }
@@ -139,7 +140,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, filters []
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
-		normalizedModel := ratio_setting.FormatMatchingModelName(model)
+		normalizedModel := ratio_setting.RoutingMatchModelName(model)
 		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
 	}
 
@@ -151,7 +152,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, filters []
 		if channel, ok := channelsIDM[channels[0]]; ok {
 			return channel, nil
 		}
-		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
+		return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channels[0])
 	}
 
 	uniquePriorities := make(map[int]bool)
@@ -159,7 +160,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, filters []
 		if channel, ok := channelsIDM[channelId]; ok {
 			uniquePriorities[int(channel.GetPriority())] = true
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channelId)
 		}
 	}
 	var sortedUniquePriorities []int
@@ -183,7 +184,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, filters []
 				targetChannels = append(targetChannels, channel)
 			}
 		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channelId)
 		}
 	}
 
@@ -326,7 +327,7 @@ func CacheGetChannel(id int) (*Channel, error) {
 
 	c, ok := channelsIDM[id]
 	if !ok {
-		return nil, fmt.Errorf("渠道# %d，已不存在", id)
+		return nil, fmt.Errorf("channel #%d no longer exists", id)
 	}
 	return c, nil
 }
@@ -344,7 +345,7 @@ func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 
 	c, ok := channelsIDM[id]
 	if !ok {
-		return nil, fmt.Errorf("渠道# %d，已不存在", id)
+		return nil, fmt.Errorf("channel #%d no longer exists", id)
 	}
 	return &c.ChannelInfo, nil
 }
