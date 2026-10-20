@@ -360,6 +360,28 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		gopool.Go(func() {
 			perfmetrics.RecordRelaySample(relayInfo, false, 0)
 		})
+		// Count final failures under the same logging switch as successes.
+		// Realtime requests do not participate in outcome tracking.
+		if common.DataExportEnabled && common.LogConsumeEnabled && relayFormat != types.RelayFormatOpenAIRealtime {
+			// Match consume-log model names.
+			failedModel := relayInfo.OriginModelName
+			if strings.HasPrefix(failedModel, "gpt-4-gizmo") {
+				failedModel = "gpt-4-gizmo-*"
+			} else if strings.HasPrefix(failedModel, "gpt-4o-gizmo") {
+				failedModel = "gpt-4o-gizmo-*"
+			}
+			model.LogQuotaData(model.QuotaDataLogParams{
+				UserID:         relayInfo.UserId,
+				Username:       c.GetString("username"),
+				ModelName:      failedModel,
+				CreatedAt:      common.GetTimestamp(),
+				UseGroup:       relayInfo.UsingGroup,
+				TokenID:        relayInfo.TokenId,
+				ChannelID:      common.GetContextKeyInt(c, constant.ContextKeyChannelId),
+				NodeName:       common.NodeName,
+				IsFinalFailure: true,
+			})
+		}
 	}
 }
 

@@ -377,6 +377,7 @@ type RecordConsumeLogParams struct {
 	FastMode           bool                   `json:"fast_mode"`
 	Group              string                 `json:"group"`
 	Other              map[string]interface{} `json:"other"`
+	OutcomeTracked     bool                   `json:"-"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -439,18 +440,72 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		if params.DashboardTokenUsed != nil {
 			tokenUsed = *params.DashboardTokenUsed
 		}
+		inputTokens := params.PromptTokens
+		if params.DashboardTokenUsed != nil {
+			inputTokens = *params.DashboardTokenUsed - params.CompletionTokens
+		}
+		cacheRead, cacheWrite := extractCacheTokens(params.Other)
+		isStreamError := isOtherStreamError(params.Other)
 		LogQuotaData(QuotaDataLogParams{
-			UserID:    userId,
-			Username:  username,
-			ModelName: params.ModelName,
-			Quota:     params.Quota,
-			CreatedAt: createdAt,
-			TokenUsed: tokenUsed,
-			UseGroup:  params.Group,
-			TokenID:   params.TokenId,
-			ChannelID: params.ChannelId,
-			NodeName:  common.NodeName,
+			UserID:           userId,
+			Username:         username,
+			ModelName:        params.ModelName,
+			Quota:            params.Quota,
+			CreatedAt:        createdAt,
+			TokenUsed:        tokenUsed,
+			UseGroup:         params.Group,
+			TokenID:          params.TokenId,
+			ChannelID:        params.ChannelId,
+			NodeName:         common.NodeName,
+			InputTokens:      inputTokens,
+			CompletionTokens: params.CompletionTokens,
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
+			UseTimeSeconds:   params.UseTimeSeconds,
+			IsStreamError:    isStreamError,
+			OutcomeTracked:   params.OutcomeTracked,
 		})
+	}
+}
+
+func otherIntValue(other map[string]interface{}, key string) int {
+	switch v := other[key].(type) {
+	case int:
+		return max(v, 0)
+	case int64:
+		return max(int(v), 0)
+	case float64:
+		return max(int(v), 0)
+	default:
+		return 0
+	}
+}
+
+// Prefer normalized cache writes, falling back to legacy cache_creation_tokens.
+func extractCacheTokens(other map[string]interface{}) (cacheRead, cacheWrite int) {
+	if other == nil {
+		return 0, 0
+	}
+	cacheRead = otherIntValue(other, "cache_tokens")
+	cacheWrite = otherIntValue(other, "cache_write_tokens")
+	if cacheWrite == 0 {
+		cacheWrite = otherIntValue(other, "cache_creation_tokens")
+	}
+	return cacheRead, cacheWrite
+}
+
+func isOtherStreamError(other map[string]interface{}) bool {
+	if other == nil {
+		return false
+	}
+	switch status := other["stream_status"].(type) {
+	case map[string]interface{}:
+		value, _ := status["status"].(string)
+		return value == "error"
+	case map[string]string:
+		return status["status"] == "error"
+	default:
+		return false
 	}
 }
 
