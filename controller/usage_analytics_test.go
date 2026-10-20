@@ -84,6 +84,10 @@ func TestUsageAnalyticsEndpointsValidateParams(t *testing.T) {
 			target: fmt.Sprintf("/api/data/analytics/self?start_timestamp=1&end_timestamp=%d&group_by=summary", 2+30*day), message: "time range cannot exceed 30 days"},
 		{name: "self rejects admin-only group_by", handler: GetSelfUsageAnalytics,
 			target: "/api/data/analytics/self?start_timestamp=1&end_timestamp=7200&group_by=user", message: "invalid group_by"},
+		{name: "peak tpm accepts 92 days", handler: GetPeakTPM,
+			target: fmt.Sprintf("/api/data/peak-tpm?start_timestamp=1&end_timestamp=%d", 1+92*day), success: true},
+		{name: "peak tpm rejects more than 92 days", handler: GetPeakTPM,
+			target: fmt.Sprintf("/api/data/peak-tpm?start_timestamp=1&end_timestamp=%d", 2+92*day), message: "time range cannot exceed 92 days"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,4 +138,16 @@ func TestGetAdminUsageAnalyticsOmitsDimensionsOutsideGrouping(t *testing.T) {
 	assert.NotContains(t, row, "channel_id")
 	assert.NotContains(t, row, "channel_name")
 	assert.NotContains(t, row, "user_count")
+}
+
+func TestGetPeakTPMReturnsEmptyListWithoutTraffic(t *testing.T) {
+	setupUsageAnalyticsControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/peak-tpm?start_timestamp=1&end_timestamp=7200", nil)
+	GetPeakTPM(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `{"success":true,"message":"","data":[]}`, recorder.Body.String())
 }

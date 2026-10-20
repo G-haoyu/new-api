@@ -89,3 +89,21 @@ func GetSelfUsageAnalytics(c *gin.Context) {
 	}
 	common.ApiSuccess(c, data)
 }
+
+func GetPeakTPM(c *gin.Context) {
+	start, end, ok := parseUsageAnalyticsRange(c, adminUsageAnalyticsMaxDays)
+	if !ok {
+		return
+	}
+	points, err := model.GetPeakTPM(model.PeakTPMParams{
+		Start:     start,
+		End:       end,
+		Username:  c.Query("username"),
+		ModelName: c.Query("model"),
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, points)
+}

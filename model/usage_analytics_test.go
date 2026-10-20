@@ -254,3 +254,43 @@ func TestGetUsageAnalyticsGroupByModelChannelJoinsChannelName(t *testing.T) {
 		{modelName: "gpt-c", channelID: 9, channelName: "", failedCount: 2},
 	}, got)
 }
+
+func TestGetPeakTPMTakesHourlyMaxOfMinuteTotals(t *testing.T) {
+	resetUsageAnalyticsState(t)
+	hour := int64(72000)
+	logs := []Log{
+		// Sum different users in the same minute before taking the hourly peak.
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour + 10, PromptTokens: 100, CompletionTokens: 50},
+		{Username: "bob", ModelName: "gpt-b", Type: LogTypeConsume, CreatedAt: hour + 59, PromptTokens: 900, CompletionTokens: 100},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour + 300, PromptTokens: 200, CompletionTokens: 100},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour + 330, PromptTokens: 150, CompletionTokens: 50},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeError, CreatedAt: hour + 300, PromptTokens: 99999},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour + 3720, PromptTokens: 80, CompletionTokens: 20},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour - 1, PromptTokens: 99999},
+		{Username: "alice", ModelName: "gpt-a", Type: LogTypeConsume, CreatedAt: hour + 3721, PromptTokens: 99999},
+	}
+	for i := range logs {
+		require.NoError(t, LOG_DB.Create(&logs[i]).Error)
+	}
+
+	tests := []struct {
+		name     string
+		params   PeakTPMParams
+		expected []PeakTPMPoint
+	}{
+		{name: "all traffic", expected: []PeakTPMPoint{{Hour: hour, PeakTPM: 1150}, {Hour: hour + 3600, PeakTPM: 100}}},
+		{name: "username", params: PeakTPMParams{Username: "alice"}, expected: []PeakTPMPoint{{Hour: hour, PeakTPM: 500}, {Hour: hour + 3600, PeakTPM: 100}}},
+		{name: "model", params: PeakTPMParams{ModelName: "gpt-b"}, expected: []PeakTPMPoint{{Hour: hour, PeakTPM: 1000}}},
+		{name: "no traffic", params: PeakTPMParams{Username: "alice", ModelName: "gpt-b"}, expected: []PeakTPMPoint{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := tt.params
+			params.Start, params.End = hour, hour+3720
+			points, err := GetPeakTPM(params)
+			require.NoError(t, err)
+			require.NotNil(t, points)
+			assert.Equal(t, tt.expected, points)
+		})
+	}
+}

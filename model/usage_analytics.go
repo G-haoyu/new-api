@@ -3,6 +3,8 @@ package model
 import (
 	"fmt"
 	"strings"
+
+	"github.com/QuantumNous/new-api/common"
 )
 
 const (
@@ -140,4 +142,57 @@ func GetUsageAnalytics(params UsageAnalyticsParams) (*UsageAnalyticsResult, erro
 		return nil, err
 	}
 	return result, nil
+}
+
+type PeakTPMPoint struct {
+	Hour    int64 `json:"hour" gorm:"column:hour"`
+	PeakTPM int64 `json:"peak_tpm" gorm:"column:peak_tpm"`
+}
+
+type PeakTPMParams struct {
+	Start     int64
+	End       int64
+	Username  string
+	ModelName string
+}
+
+// GetPeakTPM returns hourly maxima of minute-level prompt + completion totals.
+func GetPeakTPM(params PeakTPMParams) ([]PeakTPMPoint, error) {
+	var minuteExpr, hourExpr string
+	switch common.LogDatabaseType() {
+	case common.DatabaseTypeMySQL:
+		minuteExpr = "created_at DIV 60"
+		hourExpr = "(m.minute_bucket DIV 60) * 3600"
+	case common.DatabaseTypeClickHouse:
+		minuteExpr = "intDiv(created_at, 60)"
+		hourExpr = "intDiv(m.minute_bucket, 60) * 3600"
+	case common.DatabaseTypePostgreSQL, common.DatabaseTypeSQLite:
+		minuteExpr = "created_at / 60"
+		hourExpr = "(m.minute_bucket / 60) * 3600"
+	default:
+		return nil, fmt.Errorf("unsupported log database type: %s", common.LogDatabaseType())
+	}
+
+	perMinute := LOG_DB.Table("logs").
+		Select(minuteExpr+" AS minute_bucket, SUM(prompt_tokens + completion_tokens) AS tokens").
+		Where("type = ?", LogTypeConsume).
+		Where("created_at >= ? AND created_at <= ?", params.Start, params.End)
+	if username := strings.TrimSpace(params.Username); username != "" {
+		perMinute = perMinute.Where("username = ?", username)
+	}
+	if modelName := strings.TrimSpace(params.ModelName); modelName != "" {
+		perMinute = perMinute.Where("model_name = ?", modelName)
+	}
+	perMinute = perMinute.Group(minuteExpr)
+
+	points := make([]PeakTPMPoint, 0)
+	err := LOG_DB.Table("(?) AS m", perMinute).
+		Select(hourExpr + " AS hour, MAX(m.tokens) AS peak_tpm").
+		Group(hourExpr).
+		Order("hour ASC").
+		Scan(&points).Error
+	if err != nil {
+		return nil, err
+	}
+	return points, nil
 }

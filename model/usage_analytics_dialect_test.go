@@ -70,6 +70,7 @@ func runUsageAnalyticsDialectSuite(t *testing.T, dbType common.DatabaseType, mai
 		"group by user":              TestGetUsageAnalyticsGroupByUserJoinsDisplayName,
 		"group by user model":        TestGetUsageAnalyticsGroupByUserModel,
 		"group by model channel":     TestGetUsageAnalyticsGroupByModelChannelJoinsChannelName,
+		"peak tpm":                   TestGetPeakTPMTakesHourlyMaxOfMinuteTotals,
 		"consume log columns":        TestRecordConsumeLogWritesExtendedQuotaDataColumns,
 		"failure flush increments":   TestLogQuotaDataFinalFailureAccumulatesAcrossFlushes,
 		"legacy readers skip failed": TestLegacyQuotaDataReadersSkipFailureOnlyRows,
@@ -139,6 +140,7 @@ func TestUsageAnalyticsClickHouseLogDB(t *testing.T) {
 	})
 
 	for name, run := range map[string]func(*testing.T){
+		"peak tpm":        TestGetPeakTPMTakesHourlyMaxOfMinuteTotals,
 		"availability":    testModelAvailabilityOnLogDB,
 	} {
 		t.Run(name, func(t *testing.T) {
