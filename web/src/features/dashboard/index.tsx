@@ -114,6 +114,12 @@ const LazyUserCharts = lazy(() =>
   }))
 )
 
+const LazyUserUsageTable = lazy(() =>
+  import('./components/users/user-usage-table').then((m) => ({
+    default: m.UserUsageTable,
+  }))
+)
+
 const LazyFlowCharts = lazy(() =>
   import('./components/flow/flow-charts').then((m) => ({
     default: m.FlowCharts,
@@ -426,14 +432,25 @@ export function Dashboard() {
             </>
           )}
           {activeSection === 'users' && (
-            <FadeIn>
-              <Suspense fallback={<ModelChartsFallback />}>
-                <LazyUserCharts
-                  filters={userChartsFilters}
-                  onFiltersChange={setUserChartsFilters}
-                />
-              </Suspense>
-            </FadeIn>
+            <>
+              <FadeIn>
+                <Suspense fallback={<ModelChartsFallback />}>
+                  <LazyUserCharts
+                    filters={userChartsFilters}
+                    onFiltersChange={setUserChartsFilters}
+                  />
+                </Suspense>
+              </FadeIn>
+              {isAdmin && (
+                <FadeIn delay={0.1}>
+                  <Suspense fallback={<ModelMetricsFallback />}>
+                    <LazyUserUsageTable
+                      selectedRange={userChartsFilters.selectedRange}
+                    />
+                  </Suspense>
+                </FadeIn>
+              )}
+            </>
           )}
           {activeSection === 'flow' && (
             <FadeIn>
