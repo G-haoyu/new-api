@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -22,6 +23,33 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
+	originalBaseURLs := constant.ChannelBaseURLs
+	constant.ChannelBaseURLs = append([]string(nil), originalBaseURLs...)
+	constant.ChannelBaseURLs[constant.ChannelTypeDeepSeek] = "https://deepseek.server.example"
+	t.Cleanup(func() {
+		constant.ChannelBaseURLs = originalBaseURLs
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/default_base_urls", nil)
+	GetChannelDefaultBaseURLs(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool           `json:"success"`
+		Data    map[int]string `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, "https://deepseek.server.example", response.Data[constant.ChannelTypeDeepSeek])
+	assert.Equal(t, "https://api.openai.com", response.Data[constant.ChannelTypeOpenAI])
+	assert.NotContains(t, response.Data, constant.ChannelTypeAzure)
+	assert.NotContains(t, response.Data, constant.ChannelTypeNewAPI)
+	assert.NotContains(t, response.Data, constant.ChannelTypeTaskPlugin)
+}
 
 func TestValidateChannelProxy(t *testing.T) {
 	tests := []struct {
@@ -166,7 +194,7 @@ func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 
 func TestDeleteChannelResetsProxyCacheWhenPreReadFails(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}))
 	service.ResetProxyClientCache()
 	t.Cleanup(service.ResetProxyClientCache)
 
@@ -189,7 +217,7 @@ func TestDeleteChannelResetsProxyCacheWhenPreReadFails(t *testing.T) {
 
 func TestDeleteChannelBatchReportsAndAuditsActualDeletedCount(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}))
 	channel := &model.Channel{Name: "existing", Key: "test-key"}
 	require.NoError(t, db.Create(channel).Error)
 
@@ -210,14 +238,16 @@ func TestDeleteChannelBatchReportsAndAuditsActualDeletedCount(t *testing.T) {
 	assert.True(t, response.Success)
 	assert.Equal(t, int64(1), response.Data)
 
-	var auditLog model.Log
+	var auditLog model.AuditLog
 	require.NoError(t, db.Order("id desc").First(&auditLog).Error)
 	var auditData struct {
 		Operation struct {
 			Params map[string]any `json:"params"`
 		} `json:"op"`
 	}
-	require.NoError(t, common.UnmarshalJsonStr(auditLog.Other, &auditData))
+	encodedAudit, err := common.Marshal(auditLog.Other)
+	require.NoError(t, err)
+	require.NoError(t, common.Unmarshal(encodedAudit, &auditData))
 	assert.Equal(t, float64(1), auditData.Operation.Params["count"])
 }
 
@@ -279,10 +309,11 @@ func TestBuildTestLogOtherInjectsTieredInfo(t *testing.T) {
 		RequestRules: requestRules,
 	})
 
-	require.Equal(t, "tiered_expr", other["billing_mode"])
-	require.Equal(t, "base", other["matched_tier"])
-	require.Equal(t, requestRules, other["request_rules"])
-	require.NotEmpty(t, other["expr_b64"])
+	fields := other.Snapshot()
+	require.Equal(t, "tiered_expr", fields["billing_mode"])
+	require.Equal(t, "base", fields["matched_tier"])
+	require.Equal(t, requestRules, fields["request_rules"])
+	require.NotEmpty(t, fields["expr_b64"])
 }
 
 func TestResolveChannelTestUserIDUsesRequestUser(t *testing.T) {
@@ -461,5 +492,131 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
-	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
+	require.Contains(t, recorder.Body.String(), "A channel test task is already running or queued")
+}
+
+func TestDisablingChannelModelCircuitBreakerRestoresRoutes(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.Log{}))
+	previousSetting := *operation_setting.GetMonitorSetting()
+	previousOptionMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	operation_setting.GetMonitorSetting().ChannelModelCircuitBreakerEnabled = true
+	t.Cleanup(func() {
+		*operation_setting.GetMonitorSetting() = previousSetting
+		common.OptionMap = previousOptionMap
+	})
+	require.NoError(t, db.Create(&model.ChannelModelStatus{
+		ChannelId: 1,
+		Model:     "gpt-5",
+		Reason:    "upstream returned 429",
+	}).Error)
+
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/option/",
+		strings.NewReader(`{"key":"monitor_setting.channel_model_circuit_breaker_enabled","value":false}`),
+	)
+
+	UpdateOption(ctx)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var payload struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+	assert.True(t, payload.Success)
+	assert.False(t, operation_setting.IsChannelModelCircuitBreakerEnabled())
+	var count int64
+	require.NoError(t, db.Model(&model.ChannelModelStatus{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestEnablingChannelModelCircuitBreakerClearsStaleRoutes(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.Log{}))
+	previousSetting := *operation_setting.GetMonitorSetting()
+	previousOptionMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	operation_setting.GetMonitorSetting().ChannelModelCircuitBreakerEnabled = false
+	t.Cleanup(func() {
+		*operation_setting.GetMonitorSetting() = previousSetting
+		common.OptionMap = previousOptionMap
+	})
+	require.NoError(t, db.Create(&model.ChannelModelStatus{
+		ChannelId: 1,
+		Model:     "gpt-5",
+		Reason:    "stale failure",
+	}).Error)
+
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/option/",
+		strings.NewReader(`{"key":"monitor_setting.channel_model_circuit_breaker_enabled","value":true}`),
+	)
+
+	UpdateOption(ctx)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var payload struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+	assert.True(t, payload.Success)
+	assert.True(t, operation_setting.IsChannelModelCircuitBreakerEnabled())
+	var count int64
+	require.NoError(t, db.Model(&model.ChannelModelStatus{}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestGetChannelModelEventsFiltersQueryableHistory(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.Create(&[]model.ChannelModelEvent{
+		{ChannelId: 1, ChannelName: "east", Model: "gpt-5", Event: model.ChannelModelEventDisabled, CreatedAt: 100},
+		{ChannelId: 1, ChannelName: "east", Model: "gpt-5", Event: model.ChannelModelEventRecovered, CreatedAt: 200},
+		{ChannelId: 2, ChannelName: "west", Model: "gpt-4", Event: model.ChannelModelEventDisabled, CreatedAt: 300},
+	}).Error)
+
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/channel/model-events?channel_id=1&model=gpt-5&event=recovered&start_time=150&end_time=250&p=1&page_size=20", nil)
+
+	GetChannelModelEvents(ctx)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Total int                       `json:"total"`
+			Items []model.ChannelModelEvent `json:"items"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+	assert.True(t, payload.Success)
+	assert.Equal(t, 1, payload.Data.Total)
+	require.Len(t, payload.Data.Items, 1)
+	assert.Equal(t, model.ChannelModelEventRecovered, payload.Data.Items[0].Event)
+}
+
+func TestUpdateOptionRejectsInvalidChannelModelRecoveryThreshold(t *testing.T) {
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/option/",
+		strings.NewReader(`{"key":"monitor_setting.channel_model_recovery_success_threshold","value":0}`),
+	)
+
+	UpdateOption(ctx)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	var payload struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+	assert.False(t, payload.Success)
 }

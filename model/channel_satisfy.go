@@ -1,6 +1,8 @@
 package model
 
 import (
+	"slices"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
@@ -19,11 +21,14 @@ func IsChannelEnabledForGroupModel(group string, modelName string, channelID int
 	if group2model2channels == nil {
 		return false
 	}
+	if isChannelModelDisabledLocked(channelID, modelName) {
+		return false
+	}
 
 	if isChannelIDInList(group2model2channels[group][modelName], channelID) {
 		return true
 	}
-	normalized := ratio_setting.FormatMatchingModelName(modelName)
+	normalized := ratio_setting.RoutingMatchModelName(modelName)
 	if normalized != "" && normalized != modelName {
 		return isChannelIDInList(group2model2channels[group][normalized], channelID)
 	}
@@ -43,6 +48,9 @@ func IsChannelEnabledForAnyGroupModel(groups []string, modelName string, channel
 }
 
 func isChannelEnabledForGroupModelDB(group string, modelName string, channelID int) bool {
+	if IsChannelModelDisabled(channelID, modelName) {
+		return false
+	}
 	var count int64
 	err := DB.Model(&Ability{}).
 		Where(commonGroupCol+" = ? and model = ? and channel_id = ? and enabled = ?", group, modelName, channelID, true).
@@ -50,7 +58,7 @@ func isChannelEnabledForGroupModelDB(group string, modelName string, channelID i
 	if err == nil && count > 0 {
 		return true
 	}
-	normalized := ratio_setting.FormatMatchingModelName(modelName)
+	normalized := ratio_setting.RoutingMatchModelName(modelName)
 	if normalized == "" || normalized == modelName {
 		return false
 	}
@@ -62,10 +70,44 @@ func isChannelEnabledForGroupModelDB(group string, modelName string, channelID i
 }
 
 func isChannelIDInList(list []int, channelID int) bool {
-	for _, id := range list {
-		if id == channelID {
-			return true
+	return slices.Contains(list, channelID)
+}
+
+// GetEnabledChannelIDsForGroupModel returns the same group/model channel
+// scope used by native routing. It is intentionally a snapshot copy so callers
+// can safely add request-path and other per-request filters.
+func GetEnabledChannelIDsForGroupModel(group, modelName string) []int {
+	if group == "" || modelName == "" {
+		return []int{}
+	}
+	var ids []int
+	if common.MemoryCacheEnabled {
+		channelSyncLock.RLock()
+		if group2model2channels != nil {
+			ids = append(ids, group2model2channels[group][modelName]...)
+			if len(ids) == 0 {
+				normalized := ratio_setting.FormatMatchingModelName(modelName)
+				if normalized != "" && normalized != modelName {
+					ids = append(ids, group2model2channels[group][normalized]...)
+				}
+			}
+		}
+		channelSyncLock.RUnlock()
+	} else {
+		DB.Model(&Ability{}).
+			Where(commonGroupCol+" = ? and enabled = ? and model = ?", group, commonTrueVal, modelName).
+			Pluck("channel_id", &ids)
+		if len(ids) == 0 {
+			normalized := ratio_setting.FormatMatchingModelName(modelName)
+			if normalized != "" && normalized != modelName {
+				DB.Model(&Ability{}).
+					Where(commonGroupCol+" = ? and enabled = ? and model = ?", group, commonTrueVal, normalized).
+					Pluck("channel_id", &ids)
+			}
 		}
 	}
-	return false
+	if ids == nil {
+		return []int{}
+	}
+	return ids
 }

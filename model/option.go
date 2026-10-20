@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -58,8 +60,6 @@ func InitOptionMap() {
 	common.OptionMap["TaskEnabled"] = strconv.FormatBool(common.TaskEnabled)
 	common.OptionMap["TaskPluginEnabled"] = strconv.FormatBool(constant.TaskPluginEnabled)
 	jsplugin.DefaultRegistry.SetEnabled(constant.TaskPluginEnabled)
-	common.OptionMap["TaskPluginOverrideEnabled"] = strconv.FormatBool(constant.TaskPluginOverrideEnabled)
-	jsplugin.DefaultRegistry.SetOverrideEnabled(constant.TaskPluginOverrideEnabled)
 	common.OptionMap[setting.TaskPluginMarketplaceSourcesKey] = setting.TaskPluginMarketplaceSources2JsonString()
 	common.OptionMap[setting.TaskPluginDisabledFactoryKeysKey] = "[]"
 	jsplugin.DefaultRegistry.SetDisabledFactoryKeys(nil)
@@ -69,6 +69,9 @@ func InitOptionMap() {
 	common.OptionMap["EmailAliasRestrictionEnabled"] = strconv.FormatBool(common.EmailAliasRestrictionEnabled)
 	common.OptionMap["EmailDomainWhitelist"] = strings.Join(common.EmailDomainWhitelist, ",")
 	common.OptionMap["SMTPServer"] = ""
+	common.OptionMap["EmailProvider"] = "smtp"
+	common.OptionMap["ResendApiKey"] = ""
+	common.OptionMap["ResendFrom"] = ""
 	common.OptionMap["SMTPFrom"] = ""
 	common.OptionMap["SMTPPort"] = strconv.Itoa(common.SMTPPort)
 	common.OptionMap["SMTPAccount"] = ""
@@ -146,6 +149,7 @@ func InitOptionMap() {
 	common.OptionMap["QuotaForNewUser"] = strconv.Itoa(common.QuotaForNewUser)
 	common.OptionMap["QuotaForInviter"] = strconv.Itoa(common.QuotaForInviter)
 	common.OptionMap["QuotaForInvitee"] = strconv.Itoa(common.QuotaForInvitee)
+	common.OptionMap["QuotaRemindEnabled"] = strconv.FormatBool(common.QuotaRemindEnabled)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
 	common.OptionMap["ModelRequestRateLimitCount"] = strconv.Itoa(setting.ModelRequestRateLimitCount)
@@ -190,30 +194,88 @@ func InitOptionMap() {
 	common.OptionMap["ExposeRatioEnabled"] = strconv.FormatBool(ratio_setting.IsExposeRatioEnabled())
 	common.OptionMap["OtelCaptureMode"] = observability.ContentCaptureMode()
 
+	// Scheduler integration defaults. Values persisted in the options table
+	// override these environment-backed defaults during startup.
+	common.OptionMap["SchedulerEnabled"] = os.Getenv("SCHEDULER_ENABLED")
+	if common.OptionMap["SchedulerEnabled"] == "" {
+		common.OptionMap["SchedulerEnabled"] = "false"
+	}
+	common.OptionMap["SchedulerURL"] = os.Getenv("SCHEDULER_URL")
+	common.OptionMap["SchedulerBootstrapURLs"] = os.Getenv("SCHEDULER_BOOTSTRAP_URLS")
+	// SchedulerLocalURL 不再放入 OptionMap:本机地址只从 .env 实时读取
+	// (见 service.schedulerClientConfigFromOptions),不落 DB、不被 DB 覆盖。
+	common.OptionMap["SchedulerToken"] = os.Getenv("SCHEDULER_TOKEN")
+	common.OptionMap["SchedulerMode"] = os.Getenv("SCHEDULER_MODE")
+	if common.OptionMap["SchedulerMode"] == "" {
+		common.OptionMap["SchedulerMode"] = "shadow"
+	}
+	common.OptionMap["SchedulerCanaryPercent"] = os.Getenv("SCHEDULER_CANARY_PERCENT")
+	if common.OptionMap["SchedulerCanaryPercent"] == "" {
+		common.OptionMap["SchedulerCanaryPercent"] = "0"
+	}
+	common.OptionMap["SchedulerCanarySalt"] = os.Getenv("SCHEDULER_CANARY_SALT")
+	if common.OptionMap["SchedulerCanarySalt"] == "" {
+		common.OptionMap["SchedulerCanarySalt"] = "scheduler-v2"
+	}
+	common.OptionMap["SchedulerShadowTimeoutMS"] = os.Getenv("SCHEDULER_SHADOW_TIMEOUT_MS")
+	if common.OptionMap["SchedulerShadowTimeoutMS"] == "" {
+		common.OptionMap["SchedulerShadowTimeoutMS"] = "100"
+	}
+	common.OptionMap["SchedulerRuntimePrefix"] = os.Getenv("SCHEDULER_RUNTIME_PREFIX")
+	if common.OptionMap["SchedulerRuntimePrefix"] == "" {
+		common.OptionMap["SchedulerRuntimePrefix"] = "new-api:scheduler:runtime"
+	}
+	common.OptionMap["SchedulerRuntimeHighWatermark"] = os.Getenv("SCHEDULER_RUNTIME_HIGH_WATERMARK")
+	if common.OptionMap["SchedulerRuntimeHighWatermark"] == "" {
+		common.OptionMap["SchedulerRuntimeHighWatermark"] = "0.8"
+	}
+	common.OptionMap["SchedulerSigningSecret"] = os.Getenv("SCHEDULER_SIGNING_SECRET")
+	common.OptionMap["SchedulerEmergencyNativeRouting"] = "false"
+	common.OptionMap["SchedulerEmergencyMaxDurationSeconds"] = "600"
+	common.OptionMap["SchedulerEmergencyGroups"] = ""
+	common.OptionMap["SchedulerEmergencyModels"] = ""
+	common.OptionMap["SchedulerKillSwitch"] = os.Getenv("SCHEDULER_KILL_SWITCH")
+	if common.OptionMap["SchedulerKillSwitch"] == "" {
+		common.OptionMap["SchedulerKillSwitch"] = "false"
+	}
+
 	// 自动添加所有注册的模型配置
 	modelConfigs := config.GlobalConfig.ExportAllConfigs()
-	for k, v := range modelConfigs {
-		common.OptionMap[k] = v
-	}
+	maps.Copy(common.OptionMap, modelConfigs)
 
 	common.OptionMapRWMutex.Unlock()
 	loadOptionsFromDatabase()
 }
 
 func loadOptionsFromDatabase() {
+	requestPolicyOptionMutex.Lock()
+	defer requestPolicyOptionMutex.Unlock()
+	defer func() {
+		if err := refreshRequestPolicySnapshot(); err != nil {
+			common.SysError(common.LogText("invalid request policy: %s", err.Error()))
+		}
+	}()
+	passkeyOptionMutex.Lock()
+	defer passkeyOptionMutex.Unlock()
 	options, _ := AllOption()
+	passkeyOptions := make(map[string]string)
 	for _, option := range options {
+		if IsPasskeyDomainOption(option.Key) {
+			passkeyOptions[option.Key] = option.Value
+			continue
+		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
-			common.SysLog("failed to update option map: " + err.Error())
+			common.SysLog(common.LogText("failed to update option map: %s", err.Error()))
 		}
 	}
+	applyPasskeyDomainOptions(passkeyOptions)
 }
 
 func SyncOptions(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
-		common.SysLog("syncing options from database")
+		common.SysLog(common.LogText("syncing options from database"))
 		loadOptionsFromDatabase()
 	}
 }
@@ -233,11 +295,41 @@ func validateOptionValue(key string, value string) error {
 			return fmt.Errorf("invalid GPT reasoning policy: %s", value)
 		}
 	}
+	if key == legacyAccessTokenRetireAtKey {
+		return errLegacyRetireAtReadOnly
+	}
+	if err := operation_setting.ValidateQuotaOption(key, value); err != nil {
+		return err
+	}
+	if key == "EmailProvider" || key == "ResendApiKey" || key == "ResendFrom" {
+		if key == "EmailProvider" && value != "smtp" && value != "resend" {
+			return common.NewMessage("Email sending method must be SMTP or Resend")
+		}
+		common.OptionMapRWMutex.RLock()
+		settings := map[string]string{
+			"EmailProvider": common.OptionMap["EmailProvider"],
+			"ResendApiKey":  common.OptionMap["ResendApiKey"],
+			"ResendFrom":    common.OptionMap["ResendFrom"],
+		}
+		common.OptionMapRWMutex.RUnlock()
+		settings[key] = value
+		// While Resend is the active method, a change must keep settings it can
+		// send with. Inactive drafts are checked when Resend is turned on.
+		if settings["EmailProvider"] == "resend" {
+			return common.ValidateResendConfiguration(settings["ResendApiKey"], settings["ResendFrom"])
+		}
+	}
+	if key == "ResendKeyConfigured" {
+		return common.NewMessage("Resend key configuration status is read-only")
+	}
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)
 	}
 	if key == operation_setting.ChannelTestConcurrencyOptionKey {
 		return operation_setting.ValidateChannelTestConcurrency(value)
+	}
+	if key == operation_setting.LogMaxRangeDaysOptionKey {
+		return operation_setting.ValidateLogMaxRangeDays(value)
 	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
@@ -262,6 +354,16 @@ func normalizeOptionValue(key string, value string) string {
 
 func UpdateOption(key string, value string) error {
 	value = normalizeOptionValue(key, value)
+	if IsRequestPolicyOption(key) {
+		return UpdateRequestPolicyOptions(map[string]string{key: value})
+	}
+	if IsPasskeyDomainOption(key) {
+		_, err := UpdatePasskeyDomainOptions(map[string]string{key: value}, false, "")
+		return err
+	}
+	if IsModelPricingOption(key) {
+		return UpdateModelPricingOptions(map[string]string{key: value})
+	}
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
@@ -294,6 +396,12 @@ func UpdateOptionsBulk(values map[string]string) error {
 		return nil
 	}
 	normalizedValues := make(map[string]string, len(values))
+	for key := range values {
+		if IsPasskeyDomainOption(key) {
+			_, err := UpdatePasskeyDomainOptions(values, false, "")
+			return err
+		}
+	}
 	for key, value := range values {
 		value = normalizeOptionValue(key, value)
 		if err := validateOptionValue(key, value); err != nil {
@@ -301,6 +409,26 @@ func UpdateOptionsBulk(values map[string]string) error {
 		}
 		normalizedValues[key] = value
 	}
+	var policySnapshot *RequestPolicySnapshot
+	for key := range values {
+		if IsRequestPolicyOption(key) {
+			requestPolicyOptionMutex.Lock()
+			defer requestPolicyOptionMutex.Unlock()
+			options := maps.Clone(CurrentRequestPolicy().Options)
+			for key, value := range values {
+				if IsRequestPolicyOption(key) {
+					options[key] = value
+				}
+			}
+			var err error
+			policySnapshot, err = BuildRequestPolicy(options)
+			if err != nil {
+				return err
+			}
+			break
+		}
+	}
+
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range normalizedValues {
 			option := Option{Key: k}
@@ -322,11 +450,14 @@ func UpdateOptionsBulk(values map[string]string) error {
 			return err
 		}
 	}
+	if policySnapshot != nil {
+		requestPolicySnapshot.Store(policySnapshot)
+	}
 	return nil
 }
 
 func updateOptionMap(key string, value string) (err error) {
-	if key == retiredThemeOptionKey {
+	if key == retiredThemeOptionKey || key == legacyAccessTokenRetireAtKey {
 		common.OptionMapRWMutex.Lock()
 		delete(common.OptionMap, key)
 		common.OptionMapRWMutex.Unlock()
@@ -384,6 +515,8 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticDisableChannelEnabled = boolValue
 		case "AutomaticEnableChannelEnabled":
 			common.AutomaticEnableChannelEnabled = boolValue
+		case "QuotaRemindEnabled":
+			common.QuotaRemindEnabled = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
 		case "DisplayInCurrencyEnabled":
@@ -405,9 +538,6 @@ func updateOptionMap(key string, value string) (err error) {
 		case "TaskPluginEnabled":
 			constant.TaskPluginEnabled = boolValue
 			jsplugin.DefaultRegistry.SetEnabled(boolValue)
-		case "TaskPluginOverrideEnabled":
-			constant.TaskPluginOverrideEnabled = boolValue
-			jsplugin.DefaultRegistry.SetOverrideEnabled(boolValue)
 		case "DataExportEnabled":
 			common.DataExportEnabled = boolValue
 		case "DefaultCollapseSidebar":

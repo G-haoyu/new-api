@@ -16,15 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ChannelAffinitySection } from '../general/channel-affinity'
 import { IoNetDeploymentSettingsSection } from '../integrations/ionet-deployment-settings-section'
 import type { ModelSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
 import { ClaudeSettingsCard } from './claude-settings-card'
+import { ChannelModelCircuitBreakerSection } from './channel-model-circuit-breaker-section'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
-import { RoutingReliabilitySection } from './routing-reliability-section'
 
 function formatJsonForEditor(value: string, fallback: string) {
   const raw = (value ?? '').toString().trim()
@@ -76,28 +75,29 @@ const MODELS_SECTIONS = [
       />
     ),
   },
+
   {
-    id: 'routing-reliability',
-    titleKey: 'Routing Reliability',
+    id: 'channel-model-circuit-breaker',
+    titleKey: 'Channel-model circuit breaker',
     build: (settings: ModelSettings) => (
-      <RoutingReliabilitySection
+      <ChannelModelCircuitBreakerSection
         defaultValues={{
-          RetryTimes: settings.RetryTimes,
-          ChannelDisableThreshold: settings.ChannelDisableThreshold,
-          AutomaticDisableChannelEnabled:
-            settings.AutomaticDisableChannelEnabled,
-          AutomaticEnableChannelEnabled: settings.AutomaticEnableChannelEnabled,
-          AutomaticDisableKeywords: settings.AutomaticDisableKeywords,
-          AutomaticDisableStatusCodes: settings.AutomaticDisableStatusCodes,
-          AutomaticRetryStatusCodes: settings.AutomaticRetryStatusCodes,
-          'monitor_setting.auto_test_channel_enabled':
-            settings['monitor_setting.auto_test_channel_enabled'],
-          'monitor_setting.auto_test_channel_minutes':
-            settings['monitor_setting.auto_test_channel_minutes'],
-          'monitor_setting.channel_test_concurrency':
-            settings['monitor_setting.channel_test_concurrency'],
-          'monitor_setting.channel_test_mode':
-            settings['monitor_setting.channel_test_mode'],
+          'monitor_setting.channel_model_circuit_breaker_enabled': settings['monitor_setting.channel_model_circuit_breaker_enabled'],
+          'monitor_setting.channel_model_excluded_channel_ids': settings['monitor_setting.channel_model_excluded_channel_ids'],
+          'monitor_setting.channel_error_window_minutes': settings['monitor_setting.channel_error_window_minutes'],
+          'monitor_setting.channel_error_threshold': settings['monitor_setting.channel_error_threshold'],
+          'monitor_setting.channel_error_consecutive_threshold': settings['monitor_setting.channel_error_consecutive_threshold'],
+          'monitor_setting.channel_error_status_codes': settings['monitor_setting.channel_error_status_codes'],
+          'monitor_setting.channel_model_recovery_enabled': settings['monitor_setting.channel_model_recovery_enabled'],
+          'monitor_setting.channel_model_recovery_success_threshold': settings['monitor_setting.channel_model_recovery_success_threshold'],
+          'monitor_setting.channel_model_recovery_delay_minutes': settings['monitor_setting.channel_model_recovery_delay_minutes'],
+          'monitor_setting.channel_model_recovery_interval_minutes': settings['monitor_setting.channel_model_recovery_interval_minutes'],
+          'monitor_setting.channel_model_recovery_concurrency': settings['monitor_setting.channel_model_recovery_concurrency'],
+          'monitor_setting.channel_model_event_retention_days': settings['monitor_setting.channel_model_event_retention_days'],
+          'monitor_setting.channel_model_wecom_bot_enabled': settings['monitor_setting.channel_model_wecom_bot_enabled'],
+          'monitor_setting.channel_model_wecom_bot_url': settings['monitor_setting.channel_model_wecom_bot_url'],
+          'monitor_setting.channel_model_wecom_bot_webhook_key_configured': settings['monitor_setting.channel_model_wecom_bot_webhook_key_configured'],
+          'monitor_setting.channel_model_wecom_bot_contact': settings['monitor_setting.channel_model_wecom_bot_contact'],
         }}
       />
     ),
@@ -158,28 +158,7 @@ const MODELS_SECTIONS = [
       />
     ),
   },
-  {
-    id: 'channel-affinity',
-    titleKey: 'Channel Affinity',
-    build: (settings: ModelSettings) => (
-      <ChannelAffinitySection
-        defaultValues={{
-          'channel_affinity_setting.enabled':
-            settings['channel_affinity_setting.enabled'],
-          'channel_affinity_setting.switch_on_success':
-            settings['channel_affinity_setting.switch_on_success'],
-          'channel_affinity_setting.keep_on_channel_disabled':
-            settings['channel_affinity_setting.keep_on_channel_disabled'],
-          'channel_affinity_setting.max_entries':
-            settings['channel_affinity_setting.max_entries'],
-          'channel_affinity_setting.default_ttl_seconds':
-            settings['channel_affinity_setting.default_ttl_seconds'],
-          'channel_affinity_setting.rules':
-            settings['channel_affinity_setting.rules'],
-        }}
-      />
-    ),
-  },
+
   {
     id: 'model-deployment',
     titleKey: 'Model Deployment',

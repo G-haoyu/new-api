@@ -16,6 +16,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -165,6 +166,8 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
+	c.Set("original_model", testModel)
+	c.Set("model", testModel)
 	group, _ := model.GetUserGroup(testUserID, false)
 	c.Set("group", group)
 
@@ -259,6 +262,13 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewError(err, types.ErrorCodeChannelModelMappedError),
 		}
 	}
+	if err := helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry()),
+		}
+	}
 
 	testModel = info.UpstreamModelName
 	// 更新请求中的模型名称
@@ -285,7 +295,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	//// 创建一个用于日志的 info 副本，移除 ApiKey
 	//logInfo := info
 	//logInfo.ApiKey = ""
-	common.SysLog(fmt.Sprintf("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
+	common.SysLog(common.LogText("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
 
 	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
 	if err != nil {
@@ -439,7 +449,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		httpResp = resp.(*http.Response)
 		if httpResp.StatusCode != http.StatusOK {
 			err := service.RelayErrorHandler(c.Request.Context(), httpResp, true)
-			common.SysError(fmt.Sprintf(
+			common.SysError(common.LogText(
 				"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%v",
 				channel.Id,
 				channel.Name,
@@ -500,16 +510,16 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		ModelName:        info.OriginModelName,
-		TokenName:        "模型测试",
+		TokenName:        "Model test",
 		Quota:            quota,
-		Content:          "模型测试",
+		Content:          []*common.Message{common.NewMessage("Model test")},
 		UseTimeSeconds:   int(consumedTime),
 		IsStream:         info.IsStream,
 		FastMode:         info.FastMode,
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	common.SysLog(common.LogText("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
 	return testResult{
 		context:     c,
 		localErr:    nil,
@@ -553,7 +563,7 @@ func settleTestQuota(info *relaycommon.RelayInfo, priceData hosttypes.PriceData,
 	return common.QuotaFromFloat(priceData.ModelPrice * common.QuotaPerUnit), nil
 }
 
-func buildTestLogOther(c *gin.Context, info *relaycommon.RelayInfo, priceData hosttypes.PriceData, usage *dto.Usage, tieredResult *billingexpr.TieredResult) map[string]interface{} {
+func buildTestLogOther(c *gin.Context, info *relaycommon.RelayInfo, priceData hosttypes.PriceData, usage *dto.Usage, tieredResult *billingexpr.TieredResult) *model.LogOther {
 	other := service.GenerateTextOtherInfo(c, info, priceData.ModelRatio, priceData.GroupRatioInfo.GroupRatio, priceData.CompletionRatio,
 		usage.PromptTokensDetails.CachedTokens, priceData.CacheRatio, priceData.ModelPrice, priceData.GroupRatioInfo.GroupSpecialRatio)
 	if tieredResult != nil {
@@ -607,7 +617,7 @@ func detectErrorFromTestResponseBody(respBody []byte) error {
 		return fmt.Errorf("upstream error: %s", message)
 	}
 
-	for _, line := range bytes.Split(b, []byte{'\n'}) {
+	for line := range bytes.SplitSeq(b, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
@@ -633,7 +643,7 @@ func validateStreamTestResponseBody(respBody []byte) error {
 		return errors.New("stream response body is empty")
 	}
 
-	for _, line := range bytes.Split(b, []byte{'\n'}) {
+	for line := range bytes.SplitSeq(b, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
 			continue
@@ -911,11 +921,136 @@ type channelTestSummary struct {
 	Enabled   int `json:"enabled"`
 }
 
+type channelModelRecoverySummary struct {
+	Tested    int `json:"tested"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Recovered int `json:"recovered"`
+}
+
+func runChannelModelRecoveryTask(ctx context.Context, report func(processed, total int)) (channelModelRecoverySummary, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	setting := operation_setting.GetMonitorSetting()
+	now := common.GetTimestamp()
+	statuses := make([]model.ChannelModelStatus, 0)
+	if setting.ChannelModelCircuitBreakerEnabled && setting.ChannelModelRecoveryEnabled {
+		var err error
+		statuses, err = model.GetDueChannelModelRecoveries(now, int64(setting.ChannelModelRecoveryDelayMinutes)*60, int64(setting.ChannelModelRecoveryIntervalMinutes)*60, 1000)
+		if err != nil {
+			return channelModelRecoverySummary{}, err
+		}
+	}
+	if report != nil {
+		report(0, len(statuses))
+	}
+	retentionDays := setting.ChannelModelEventRetentionDays
+	if retentionDays < 1 {
+		retentionDays = operation_setting.DefaultChannelModelEventRetentionDays
+	}
+	if _, err := model.CleanupChannelModelEvents(common.GetTimestamp() - int64(retentionDays)*86400); err != nil {
+		common.SysError("failed to clean up channel model events: " + err.Error())
+	}
+	if len(statuses) == 0 {
+		return channelModelRecoverySummary{}, nil
+	}
+	channelIDs := make([]int, 0, len(statuses))
+	seen := make(map[int]bool)
+	for _, status := range statuses {
+		if !seen[status.ChannelId] {
+			seen[status.ChannelId] = true
+			channelIDs = append(channelIDs, status.ChannelId)
+		}
+	}
+	channels, err := model.GetChannelsByIds(channelIDs)
+	if err != nil {
+		return channelModelRecoverySummary{}, err
+	}
+	byID := make(map[int]*model.Channel, len(channels))
+	for _, channel := range channels {
+		byID[channel.Id] = channel
+	}
+	testUserID, err := resolveChannelTestUserID(nil)
+	if err != nil {
+		return channelModelRecoverySummary{}, err
+	}
+	summary := channelModelRecoverySummary{}
+	for i, status := range statuses {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		channel := byID[status.ChannelId]
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		probe := testChannel(ctx, channel, testUserID, status.Model, "", shouldUseStreamForAutomaticChannelTest(channel))
+		if ctx.Err() != nil {
+			break
+		}
+		summary.Tested++
+		succeeded := probe.localErr == nil && probe.newAPIError == nil
+		successCount, exists, recordErr := model.RecordChannelModelRecoveryProbe(status.ChannelId, status.Model, succeeded, common.GetTimestamp())
+		if recordErr != nil {
+			common.SysError(fmt.Sprintf("failed to record channel model recovery probe: channel_id=%d model=%s error=%v", status.ChannelId, status.Model, recordErr))
+			summary.Failed++
+			continue
+		}
+		if !exists {
+			continue
+		}
+		event := model.ChannelModelEvent{ChannelId: status.ChannelId, ChannelName: channel.Name, Model: status.Model, SuccessCount: successCount}
+		if succeeded {
+			event.Event = model.ChannelModelEventProbeSuccess
+			summary.Succeeded++
+		} else {
+			event.Event = model.ChannelModelEventProbeFailed
+			summary.Failed++
+			if probe.newAPIError != nil {
+				event.StatusCode = probe.newAPIError.UpstreamStatusCode()
+				event.Reason = probe.newAPIError.ErrorWithStatusCode()
+			} else if probe.localErr != nil {
+				event.Reason = probe.localErr.Error()
+			}
+		}
+		if err := model.RecordChannelModelEvent(&event); err != nil {
+			common.SysError("failed to record channel model probe event: " + err.Error())
+		}
+		if succeeded && successCount >= setting.ChannelModelRecoverySuccessThreshold {
+			service.EnableChannelModel(status.ChannelId, status.Model, channel.Name, successCount)
+			summary.Recovered++
+		}
+		if report != nil {
+			report(i+1, len(statuses))
+		}
+	}
+	return summary, nil
+}
+
 func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool, disableThreshold int64) channelTestSummary {
 	summary := channelTestSummary{}
 	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
+	testModel := ""
+	if channel.TestModel != nil {
+		candidate := strings.TrimSpace(*channel.TestModel)
+		if candidate != "" && !model.IsChannelModelDisabled(channel.Id, candidate) {
+			testModel = candidate
+		}
+	}
+	if testModel == "" {
+		for _, candidate := range channel.GetModels() {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" && !model.IsChannelModelDisabled(channel.Id, candidate) {
+				testModel = candidate
+				break
+			}
+		}
+	}
+	if testModel == "" {
+		return summary
+	}
 	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+	result := testChannel(ctx, channel, testUserID, testModel, "", shouldUseStreamForAutomaticChannelTest(channel))
 	milliseconds := time.Since(tik).Milliseconds()
 	if ctx.Err() != nil {
 		return summary
@@ -925,13 +1060,28 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 
 	shouldBanChannel := false
 	newAPIError := result.newAPIError
+	modelFailureThresholdReached := false
 	if newAPIError != nil {
 		shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
+		if operation_setting.IsChannelModelCircuitBreakerEnabled() && !operation_setting.IsChannelModelCircuitBreakerExcluded(channel.Id) &&
+			channel.GetAutoBan() && service.IsChannelModelFailureMatch(newAPIError) {
+			modelFailureThresholdReached = service.RecordChannelModelFailure(channel.Id, testModel)
+			shouldBanChannel = false
+		} else {
+			service.ResetChannelModelFailureConsecutive(channel.Id, testModel)
+		}
+	} else {
+		service.ResetChannelModelFailureConsecutive(channel.Id, testModel)
 	}
 
 	if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
 		if milliseconds > disableThreshold {
-			err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
+			// The reason is stored with the channel and sent in the disable
+			// notice; no request states a language here.
+			err := errors.New(i18n.Translate("", i18n.MsgChannelResponseTimeExceeded, map[string]any{
+				"Seconds":   fmt.Sprintf("%.2f", float64(milliseconds)/1000.0),
+				"Threshold": fmt.Sprintf("%.2f", float64(disableThreshold)/1000.0),
+			}))
 			newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
 			shouldBanChannel = true
 		}
@@ -943,8 +1093,11 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		summary.Failed++
 	}
 
-	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+	if allowDisable && isChannelEnabled && modelFailureThresholdReached && channel.GetAutoBan() {
+		service.DisableChannelModel(channel.Id, testModel, channel.Name, newAPIError.ErrorWithStatusCode(), newAPIError.UpstreamStatusCode(), channel.GetAutoBan())
+		summary.Disabled++
+	} else if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
+		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil)
 		summary.Disabled++
 	}
 
@@ -1078,8 +1231,9 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 // stops promptly. mode selects the channel set: an empty mode falls back to the
 // configured monitor ChannelTestMode (scheduled behavior), while a manual
 // trigger passes ChannelTestModeScheduledAll to test every channel. When notify
-// is set the root user is notified on completion. Cross-instance execution is
-// guarded by the system task per-type lock, so no process-local guard is needed.
+// is set, the administrators who receive channel notices are notified on
+// completion. Cross-instance execution is guarded by the system task per-type
+// lock, so no process-local guard is needed.
 func runChannelTestTask(ctx context.Context, mode string, notify bool, report func(processed, total int)) (channelTestSummary, error) {
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
@@ -1097,7 +1251,9 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
 	summary := performChannelTests(ctx, selected, testUserID, allowDisable, concurrency, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
-		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
+		service.NotifyChannelWatchers(dto.NotifyTypeChannelTest, func(lang string) (string, string) {
+			return i18n.Translate(lang, i18n.MsgChannelTestCompletedSubject), i18n.Translate(lang, i18n.MsgChannelTestCompletedContent)
+		})
 	}
 	return summary, nil
 }
@@ -1132,15 +1288,12 @@ func TestAllChannels(c *gin.Context) {
 		return
 	}
 	if !created {
-		c.JSON(http.StatusConflict, gin.H{
-			"success": false,
-			"message": "已有通道测试任务正在运行或等待中，不能启动本次手动任务",
-			"data": gin.H{
-				"task_id": task.TaskID,
-				"status":  task.Status,
-				"type":    task.Type,
-			},
-		})
+		msg := common.NewMessage("A channel test task is already running or queued. Cannot start this manual task")
+		common.ApiErrorStatus(c, http.StatusConflict, msg, gin.H{"data": gin.H{
+			"task_id": task.TaskID,
+			"status":  task.Status,
+			"type":    task.Type,
+		}})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

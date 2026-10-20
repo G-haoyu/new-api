@@ -46,6 +46,7 @@ export const apiKeySchema = z.object({
   model_limits_enabled: z.boolean(),
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
+  allow_user_quota_query: z.boolean().optional().default(false),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -91,6 +92,7 @@ export interface ApiKeyFormData {
   model_limits_enabled: boolean
   model_limits: string
   allow_ips: string
+  allow_user_quota_query: boolean
   group: string
   auto_groups: string[]
   cross_group_retry: boolean
@@ -99,6 +101,26 @@ export interface ApiKeyFormData {
 export interface TokenAutoGroupsConfig {
   groups: string[]
   max_count: number
+}
+
+// ============================================================================
+// Scheduler Routing Preference (token-level)
+// ============================================================================
+
+export type RoutingMode =
+  | 'balanced'
+  | 'price'
+  | 'latency'
+  | 'throughput'
+  | 'quality'
+
+// Mirrors relaykit/dto.RoutingPreference: only the sort mode is configurable.
+export interface RoutingPreference {
+  mode?: RoutingMode
+}
+
+export interface TokenRoutingPreferenceData {
+  routing_preference: RoutingPreference | null
 }
 
 // ============================================================================

@@ -58,6 +58,12 @@ type FinishInput struct {
 	// InitChannelMeta; at BeginAttempt time the embedded ChannelMeta is still
 	// nil, so this is read late.
 	UpstreamModelName string
+	// CostMultiplier is the <channel, model> cost multiplier attribute, keyed
+	// by UpstreamModelName (the model-mapped name, since that is what the
+	// channel actually serves). Collected at Finish time for the same reason
+	// as UpstreamModelName. It never touches billing; the recorder scales
+	// cost_actual with it. Zero means "unset, record exactly what was billed".
+	CostMultiplier float64
 }
 
 // Finish closes the attempt, classifies its outcome, and enqueues the record.
@@ -150,6 +156,8 @@ func (a *Attempt) buildRecord(
 	firstTokenTime *time.Time,
 ) *model.RelayAttempt {
 	totalMs := endTime.Sub(a.startTime).Milliseconds()
+
+	a.finishCostMultiplier = in.CostMultiplier
 
 	record := &model.RelayAttempt{
 		CreatedAt: endTime.Unix(),
@@ -255,18 +263,29 @@ func (a *Attempt) applyPricing(record *model.RelayAttempt) {
 	}
 }
 
+// recordedCost scales the settled cost by the <channel, model> cost multiplier
+// attribute before it is recorded in cost_actual. The multiplier never takes
+// part in billing; QuotaFromFloat truncates and saturates the product so a
+// bogus multiplier cannot wrap the Int32 telemetry column.
+// Caller must hold a.mu.
+func (a *Attempt) recordedCost() int {
+	if a.finishCostMultiplier <= 0 {
+		return a.costActual
+	}
+	return common.QuotaFromFloat(float64(a.costActual) * a.finishCostMultiplier)
+}
+
 // applyUsage records settled usage. Nothing is written when billing never
 // reported usage for this attempt, which is the normal case for a failed
 // attempt: nil there means "never settled", not "zero tokens".
-func (a *Attempt) applyUsage(record *model.RelayAttempt, endTime time.Time, firstTokenTime *time.Time) {
-	if !a.usageKnown {
+func (a *Attempt) applyUsage(record *model.RelayAttempt, endTime time.Time, firstTokenTime *time.Time) {	if !a.usageKnown {
 		return
 	}
 
 	record.InputTokensActual = int32Ptr(a.inputTokens)
 	record.OutputTokensActual = int32Ptr(a.outputTokens)
 	record.CachedTokens = int32Ptr(a.cachedTokens)
-	record.CostActual = int32Ptr(a.costActual)
+	record.CostActual = int32Ptr(a.recordedCost())
 	if a.reasoningTokens > 0 {
 		record.ReasoningTokens = int32Ptr(a.reasoningTokens)
 	}

@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -19,9 +18,53 @@ import (
 // service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
+	service.RegisterSystemTaskHandler(channelModelRecoveryHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+}
+
+type channelModelRecoveryHandler struct{}
+
+func (channelModelRecoveryHandler) Type() string {
+	return model.SystemTaskTypeChannelModelRecovery
+}
+
+func (channelModelRecoveryHandler) Enabled() bool {
+	setting := operation_setting.GetMonitorSetting()
+	now := common.GetTimestamp()
+	retentionDays := setting.ChannelModelEventRetentionDays
+	if retentionDays < 1 {
+		retentionDays = operation_setting.DefaultChannelModelEventRetentionDays
+	}
+	cleanupDue := model.HasChannelModelEventsBefore(now - int64(retentionDays)*86400)
+	if !setting.ChannelModelCircuitBreakerEnabled || !setting.ChannelModelRecoveryEnabled {
+		return cleanupDue
+	}
+	return cleanupDue || model.HasDueChannelModelRecovery(
+		now,
+		int64(setting.ChannelModelRecoveryDelayMinutes)*60,
+		int64(setting.ChannelModelRecoveryIntervalMinutes)*60,
+	)
+}
+
+func (channelModelRecoveryHandler) Interval() time.Duration {
+	minutes := operation_setting.GetMonitorSetting().ChannelModelRecoveryIntervalMinutes
+	if minutes < 1 {
+		minutes = operation_setting.DefaultChannelModelRecoveryIntervalMinutes
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (channelModelRecoveryHandler) NewPayload() any { return nil }
+
+func (channelModelRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := runChannelModelRecoveryTask(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -158,6 +201,6 @@ func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status mod
 		errorMessage = runErr.Error()
 	}
 	if err := model.FinishSystemTask(task.TaskID, runnerID, status, result, errorMessage); err != nil {
-		common.SysLog(fmt.Sprintf("system task %s failed to persist result: %v", task.TaskID, err))
+		common.SysLog(common.LogText("system task %s failed to persist result: %v", task.TaskID, err))
 	}
 }

@@ -25,7 +25,9 @@ import type {
   GetApiKeysResponse,
   SearchApiKeysParams,
   ApiKeyFormData,
+  RoutingPreference,
   TokenAutoGroupsConfig,
+  TokenRoutingPreferenceData,
 } from './types'
 
 // ============================================================================
@@ -82,6 +84,25 @@ export async function updateApiKey(
   data: ApiKeyFormData & { id: number }
 ): Promise<ApiResponse<ApiKey>> {
   const res = await api.put('/api/token/', data)
+  return res.data
+}
+
+// Get the Scheduler routing preference of a single API key (null = default)
+export async function getApiKeyRoutingPreference(
+  id: number
+): Promise<ApiResponse<TokenRoutingPreferenceData>> {
+  const res = await api.get(`/api/token/${id}/routing-preference`)
+  return res.data
+}
+
+// Replace the routing preference of an API key; null clears it
+export async function updateApiKeyRoutingPreference(
+  id: number,
+  preference: RoutingPreference | null
+): Promise<ApiResponse<TokenRoutingPreferenceData>> {
+  const res = await api.put(`/api/token/${id}/routing-preference`, {
+    routing_preference: preference,
+  })
   return res.data
 }
 

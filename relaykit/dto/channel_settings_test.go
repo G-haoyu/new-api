@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"math"
 	"regexp"
 	"testing"
 
@@ -585,6 +586,84 @@ func TestAdvancedCustomValidateAlphaSearchConverterPath(t *testing.T) {
 	}
 }
 
+func TestAdvancedCustomValidateRoutePassThroughBody(t *testing.T) {
+	valid := &AdvancedCustomConfig{
+		Routes: []AdvancedCustomRoute{
+			{
+				IncomingPath:           "/v1/chat/completions",
+				UpstreamPath:           "/v1/chat/completions",
+				PassThroughBodyEnabled: true,
+			},
+			{
+				IncomingPath:           "/v1/rerank",
+				UpstreamPath:           "/v1/rerank",
+				Converter:              AdvancedCustomConverterSGLangRerank,
+				PassThroughBodyEnabled: true,
+			},
+			{
+				IncomingPath: "/v1/messages",
+				UpstreamPath: "/v1/chat/completions",
+				Converter:    advancedCustomConverterClaudeMessagesToOpenAIChat,
+			},
+		},
+	}
+	require.NoError(t, valid.Validate())
+
+	route, ok := valid.MatchPathForModel("/v1/chat/completions", "gpt-4o")
+	require.True(t, ok)
+	assert.True(t, route.PassThroughBodyEnabled)
+	route, ok = valid.MatchPathForModel("/v1/messages", "gpt-4o")
+	require.True(t, ok)
+	assert.False(t, route.PassThroughBodyEnabled)
+
+	encoded, err := json.Marshal(valid.Routes[2])
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "pass_through_body_enabled")
+
+	tests := []struct {
+		name  string
+		route AdvancedCustomRoute
+		want  string
+	}{
+		{
+			name: "converter route",
+			route: AdvancedCustomRoute{
+				IncomingPath:           "/v1/messages",
+				UpstreamPath:           "/v1/chat/completions",
+				Converter:              advancedCustomConverterClaudeMessagesToOpenAIChat,
+				PassThroughBodyEnabled: true,
+			},
+			want: "pass_through_body_enabled requires converter none",
+		},
+		{
+			name: "model list route",
+			route: AdvancedCustomRoute{
+				IncomingPath:           AdvancedCustomModelListPath,
+				UpstreamPath:           "/v1/models",
+				PassThroughBodyEnabled: true,
+			},
+			want: "pass_through_body_enabled must be false for /v1/models",
+		},
+		{
+			name: "balance route",
+			route: AdvancedCustomRoute{
+				IncomingPath:           AdvancedCustomBalancePath,
+				UpstreamPath:           "/provider/balance",
+				PassThroughBodyEnabled: true,
+			},
+			want: "pass_through_body_enabled must be false for /v1/dashboard/billing/credit_grants",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (&AdvancedCustomConfig{Routes: []AdvancedCustomRoute{tt.route}}).Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestChannelSettingsHTTPTransportJSONRoundTrip(t *testing.T) {
 	legacy := `{"proxy":"http://127.0.0.1:8080","force_format":true}`
 	var settings ChannelSettings
@@ -598,20 +677,24 @@ func TestChannelSettingsHTTPTransportJSONRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "http_protocol")
 	assert.NotContains(t, string(encoded), "http2_connection_shards")
+	assert.NotContains(t, string(encoded), "tls_insecure_skip_verify")
 
 	explicit := ChannelSettings{
 		Proxy:                 "socks5://127.0.0.1:1080",
 		HTTPProtocol:          HTTPProtocolHTTP1,
 		HTTP2ConnectionShards: 1,
+		TLSInsecureSkipVerify: true,
 	}
 	encoded, err = json.Marshal(explicit)
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), `"http_protocol":"http1"`)
+	assert.Contains(t, string(encoded), `"tls_insecure_skip_verify":true`)
 
 	var decoded ChannelSettings
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, explicit.HTTPProtocol, decoded.HTTPProtocol)
 	assert.Equal(t, 1, decoded.HTTP2ConnectionShards)
+	assert.True(t, decoded.TLSInsecureSkipVerify)
 
 	sharded := ChannelSettings{HTTP2ConnectionShards: 4}
 	encoded, err = json.Marshal(sharded)
@@ -641,4 +724,104 @@ func TestChannelSettingsValidateHTTPTransport(t *testing.T) {
 	err = (&ChannelSettings{HTTPProtocol: "http1", HTTP2ConnectionShards: 2}).ValidateHTTPTransport()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "http2_connection_shards")
+}
+
+func TestChannelSettingsCostMultiplierForModel(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting ChannelSettings
+		model   string
+		want    float64
+	}{
+		{
+			name:    "exact model match returns its multiplier",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5}},
+			model:   "gpt-4o",
+			want:    1.5,
+		},
+		{
+			name:    "unlisted model defaults to one",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5}},
+			model:   "claude-3",
+			want:    1.0,
+		},
+		{
+			name:    "empty map defaults to one",
+			setting: ChannelSettings{},
+			model:   "gpt-4o",
+			want:    1.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.InDelta(t, tt.want, tt.setting.CostMultiplierForModel(tt.model), 0.000001)
+		})
+	}
+}
+
+func TestChannelSettingsValidateCostMultiplier(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting ChannelSettings
+		wantErr string
+	}{
+		{
+			name:    "positive multipliers are valid",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 1.5, "claude-3": 0.8}},
+		},
+		{
+			name:    "zero multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": 0}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "negative multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": -1}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "NaN multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": math.NaN()}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "infinite multiplier rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"gpt-4o": math.Inf(1)}},
+			wantErr: "cost_multiplier",
+		},
+		{
+			name:    "blank model name rejected",
+			setting: ChannelSettings{CostMultiplierMap: map[string]float64{"  ": 1.5}},
+			wantErr: "cost_multiplier",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.setting.ValidateCostMultiplier()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestChannelOtherSettingsValidateToolLossPolicy(t *testing.T) {
+	require.NoError(t, (*ChannelOtherSettings)(nil).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "allow"}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "safe"}).ValidateToolLossPolicy())
+	require.NoError(t, (&ChannelOtherSettings{ToolLossPolicy: "strict"}).ValidateToolLossPolicy())
+
+	err := (&ChannelOtherSettings{ToolLossPolicy: "drop"}).ValidateToolLossPolicy()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_loss_policy")
 }

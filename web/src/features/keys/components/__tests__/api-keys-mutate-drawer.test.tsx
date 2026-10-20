@@ -37,6 +37,7 @@ type ApiMethod = (url: string, data?: unknown) => Promise<{ data: unknown }>
 type MockableApi = {
   get: ApiMethod
   post: ApiMethod
+  put: ApiMethod
 }
 type RenderedDrawer = {
   queryClient: InstanceType<typeof QueryClient>
@@ -45,6 +46,7 @@ type RenderedDrawer = {
 const apiClient = api as unknown as MockableApi
 const originalGet = apiClient.get
 const originalPost = apiClient.post
+const originalPut = apiClient.put
 let renderedDrawer: RenderedDrawer | null = null
 
 function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
@@ -80,7 +82,18 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
     expect(url).toBe('/api/token/')
     expect(data && typeof data === 'object').toBeTruthy()
     createdPayloads.push(data as Record<string, unknown>)
-    return { data: { success: true, data: {} } }
+    return {
+      data: { success: true, data: { id: 100 + createdPayloads.length } },
+    }
+  }
+}
+
+function installRoutingPreferenceFixture(
+  routingWrites: Array<{ url: string; data: unknown }>
+) {
+  apiClient.put = async (url, data) => {
+    routingWrites.push({ url, data })
+    return { data: { success: true, data } }
   }
 }
 
@@ -196,6 +209,7 @@ function selectComboboxOption(
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  apiClient.put = originalPut
   localStorage.clear()
   if (renderedDrawer) {
     renderedDrawer.queryClient.clear()
@@ -276,5 +290,74 @@ describe('API keys mutate drawer Auto group integration', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
+  })
+
+  test('writes the token-level routing preference for each created key only when enabled', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    const routingWrites: Array<{ url: string; data: unknown }> = []
+    installApiFixtures(createdPayloads)
+    installRoutingPreferenceFixture(routingWrites)
+    await renderCreateDrawer()
+
+    const routingSwitch = [
+      ...document.querySelectorAll<HTMLLabelElement>('label'),
+    ]
+      .find(
+        (label) => label.textContent?.trim() === 'Custom routing preference'
+      )
+      ?.closest('[data-slot="form-item"]')
+      ?.querySelector<HTMLElement>('[role="switch"]')
+    if (!routingSwitch) throw new Error('Expected routing preference switch')
+    fireEvent.click(routingSwitch)
+    await waitFor(() =>
+      expect(document.body.textContent?.includes('Provider sort')).toBe(true)
+    )
+
+    changeInput(getControlByLabel('Name'), 'routed')
+    changeInput(getControlByLabel('Quantity'), '2')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(routingWrites).toHaveLength(2))
+
+    expect(routingWrites.map((write) => write.url)).toEqual([
+      '/api/token/101/routing-preference',
+      '/api/token/102/routing-preference',
+    ])
+    expect(routingWrites[0]?.data).toEqual({
+      routing_preference: { mode: 'balanced' },
+    })
+  })
+
+  test('does not write a routing preference when the section stays disabled', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    const routingWrites: Array<{ url: string; data: unknown }> = []
+    installApiFixtures(createdPayloads)
+    installRoutingPreferenceFixture(routingWrites)
+    await renderCreateDrawer()
+
+    changeInput(getControlByLabel('Name'), 'plain')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(routingWrites).toHaveLength(0)
+  })
+})
+
+describe('API keys mutate drawer user quota query switch', () => {
+  test('sends false for a new key after the switch, which starts on, is turned off', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer()
+
+    fireEvent.click(findButton('Advanced Settings', true))
+    const quotaQuerySwitch = await screen.findByRole('switch', {
+      name: 'Allow querying user quota',
+    })
+    expect(quotaQuerySwitch).toBeChecked()
+    fireEvent.click(quotaQuerySwitch)
+    expect(quotaQuerySwitch).not.toBeChecked()
+
+    changeInput(getControlByLabel('Name'), 'no-user-quota')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
   })
 })
