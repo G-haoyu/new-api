@@ -68,16 +68,6 @@ const LOG_STAT_CARD_FALLBACK_KEYS = [
   'average-tpm',
 ] as const
 
-const PERFORMANCE_METRIC_FALLBACK_KEYS = [
-  'success-rate',
-  'average-latency',
-  'throughput',
-] as const
-const PERFORMANCE_MODEL_FALLBACK_KEYS = [
-  'primary-model',
-  'secondary-model',
-] as const
-
 const LazyLogStatCards = lazy(() =>
   import('./components/models/log-stat-cards').then((m) => ({
     default: m.LogStatCards,
@@ -102,9 +92,9 @@ const LazyConsumptionDistributionChart = lazy(() =>
   }))
 )
 
-const LazyPerformanceOverview = lazy(() =>
-  import('./components/models/performance-overview').then((m) => ({
-    default: m.PerformanceOverview,
+const LazyModelAvailability = lazy(() =>
+  import('./components/models/model-availability').then((m) => ({
+    default: m.ModelAvailability,
   }))
 )
 
@@ -185,29 +175,6 @@ function ModelMetricsFallback() {
             <Skeleton className='h-4 w-20' />
           </div>
         ))}
-      </div>
-    </div>
-  )
-}
-
-function PerformanceOverviewFallback() {
-  return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 sm:px-5'>
-        <div className='flex items-center gap-2'>
-          <Skeleton className='h-4 w-24' />
-        </div>
-        {PERFORMANCE_METRIC_FALLBACK_KEYS.map((key) => (
-          <div key={key} className='flex items-center gap-1.5'>
-            <Skeleton className='h-3 w-14' />
-            <Skeleton className='h-4 w-16' />
-          </div>
-        ))}
-        <div className='ml-auto flex items-center gap-2'>
-          {PERFORMANCE_MODEL_FALLBACK_KEYS.map((key) => (
-            <Skeleton key={key} className='h-5 w-28 rounded-full' />
-          ))}
-        </div>
       </div>
     </div>
   )
@@ -396,13 +363,11 @@ export function Dashboard() {
                   <LazyModelMetricsTable filters={modelFilters} />
                 </Suspense>
               </FadeIn>
-              {isAdmin && (
-                <FadeIn delay={0.1}>
-                  <Suspense fallback={<PerformanceOverviewFallback />}>
-                    <LazyPerformanceOverview />
-                  </Suspense>
-                </FadeIn>
-              )}
+              <FadeIn delay={0.1}>
+                <Suspense fallback={<ModelMetricsFallback />}>
+                  <LazyModelAvailability />
+                </Suspense>
+              </FadeIn>
               <FadeIn delay={0.15}>
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyConsumptionDistributionChart

@@ -235,6 +235,65 @@ export interface UsageAnalyticsData {
 }
 
 // ============================================================================
+// Model Availability Types (/api/perf-metrics/availability)
+// ============================================================================
+
+export type ModelAvailabilityMinutes = 10 | 30 | 60
+
+export interface ModelAvailabilityRow {
+  model_name: string
+  success_count: number
+  stream_error_count: number
+  failed_count: number
+  total_tokens: number
+  last_called_at: number
+}
+
+export type ModelAvailabilityCounts = Pick<
+  ModelAvailabilityRow,
+  'success_count' | 'stream_error_count' | 'failed_count'
+>
+
+export interface ModelAvailabilityData {
+  minutes: number
+  start_timestamp: number
+  end_timestamp: number
+  // Hard failures come from error logs; when logging is off, failed_count
+  // stays 0 and availability is overstated.
+  error_log_enabled: boolean
+  models: ModelAvailabilityRow[]
+}
+
+export type ModelAvailabilityStatusId =
+  | 'insufficient_samples'
+  | 'stable'
+  | 'fair'
+  | 'degraded'
+  | 'unstable'
+
+export interface ModelAvailabilityStatus {
+  id: ModelAvailabilityStatusId
+  // English i18n key; render with t(status.labelKey).
+  labelKey: string
+}
+
+export interface RankedModelAvailabilityRow extends ModelAvailabilityRow {
+  // 1-based position after ranking.
+  rank: number
+  // success + stream_error + failed.
+  total: number
+  // Success percentage (0-100); null when total is 0.
+  rate: number | null
+  // Wilson score lower bound as a percentage (0-100); 0 when total is 0.
+  wilson: number
+  // Share of all requests in the window, percentage (0-100).
+  share: number
+  rpm: number
+  tpm: number
+  status: ModelAvailabilityStatus
+}
+
+// ============================================================================
 // Uptime Monitoring Types
 // ============================================================================
 

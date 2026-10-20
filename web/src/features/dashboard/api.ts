@@ -20,6 +20,8 @@ import { api } from '@/lib/api'
 
 import type {
   FlowQuotaDataItem,
+  ModelAvailabilityData,
+  ModelAvailabilityMinutes,
   QuotaDataItem,
   UptimeGroupResult,
   UsageAnalyticsData,
@@ -63,6 +65,17 @@ export async function getUsageAnalytics(
     message?: string
     data?: UsageAnalyticsData
   }>(endpoint, { params })
+  return res.data
+}
+
+export async function getModelAvailability(
+  minutes: ModelAvailabilityMinutes = 10
+) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: ModelAvailabilityData
+  }>('/api/perf-metrics/availability', { params: { minutes } })
   return res.data
 }
 

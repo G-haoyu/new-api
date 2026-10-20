@@ -35,6 +35,7 @@ export {
 export {
   avgUseTime,
   cacheHitRate,
+  rankAvailability,
   ratePerMinute,
   successRate,
 } from './analytics'
