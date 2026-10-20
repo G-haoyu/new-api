@@ -56,6 +56,15 @@ export const TIME_RANGE_PRESETS = [
   { label: '29 Days', days: 29 },
 ] as const
 
+export const ADMIN_TIME_RANGE_PRESETS = [
+  ...TIME_RANGE_PRESETS,
+  { label: '60 Days', days: 60 },
+  { label: '90 Days', days: 90 },
+] as const
+
+export const ADMIN_MAX_RANGE_DAYS = 92
+export const SELF_MAX_RANGE_DAYS = 30
+
 export const MODEL_AVAILABILITY_WINDOW_MINUTES = [
   10, 30, 60,
 ] as const satisfies readonly ModelAvailabilityMinutes[]
