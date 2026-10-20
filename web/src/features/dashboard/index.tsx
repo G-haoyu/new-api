@@ -67,6 +67,7 @@ const LOG_STAT_CARD_FALLBACK_KEYS = [
   'average-rpm',
   'average-tpm',
 ] as const
+
 const PERFORMANCE_METRIC_FALLBACK_KEYS = [
   'success-rate',
   'average-latency',
@@ -247,7 +248,6 @@ export function Dashboard() {
     }
   )
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
-
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
   }, [])
@@ -387,11 +387,7 @@ export function Dashboard() {
               </FadeIn>
               <FadeIn delay={0.05}>
                 <Suspense fallback={<ModelMetricsFallback />}>
-                  <LazyModelMetricsTable
-                    data={modelData}
-                    filters={modelFilters}
-                    loading={dataLoading}
-                  />
+                  <LazyModelMetricsTable filters={modelFilters} />
                 </Suspense>
               </FadeIn>
               {isAdmin && (

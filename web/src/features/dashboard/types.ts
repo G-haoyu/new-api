@@ -173,6 +173,68 @@ export interface ProcessedFlowData {
 }
 
 // ============================================================================
+// Usage Analytics Types (/api/data/analytics, /api/data/analytics/self)
+// ============================================================================
+
+export type UsageAnalyticsGroupBy =
+  | 'summary'
+  | 'model'
+  | 'user'
+  | 'user_model'
+  | 'model_channel'
+
+// Aggregated quota_data counters shared by the summary and every grouped row.
+export interface UsageMetrics {
+  // Consume requests including stream-interrupted ones.
+  request_count: number
+  quota: number
+  token_used: number
+  input_tokens: number
+  completion_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  // Seconds; successful, non-interrupted requests only.
+  use_time_total: number
+  use_time_count: number
+  stream_error_count: number
+  // Final failures after retries (a request retried across channels counts once).
+  failed_count: number
+  // Requests recorded after the detailed counters existed (legacy rows excluded).
+  tracked_count: number
+  // Unix seconds; 0 when only legacy rows matched.
+  last_called_at: number
+}
+
+export interface UsageAnalyticsSummary extends UsageMetrics {
+  active_users: number
+  model_count: number
+}
+
+// Dimension fields are present only when they are part of the grouping.
+export interface UsageAnalyticsRow extends UsageMetrics {
+  model_name?: string
+  user_id?: number
+  username?: string
+  display_name?: string
+  channel_id?: number
+  channel_name?: string
+  user_count?: number
+}
+
+export interface UsageAnalyticsParams {
+  start_timestamp: number
+  end_timestamp: number
+  group_by: UsageAnalyticsGroupBy
+  username?: string
+  model?: string
+}
+
+export interface UsageAnalyticsData {
+  summary: UsageAnalyticsSummary | null
+  rows: UsageAnalyticsRow[]
+}
+
+// ============================================================================
 // Uptime Monitoring Types
 // ============================================================================
 

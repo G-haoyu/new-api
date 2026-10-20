@@ -22,6 +22,8 @@ import type {
   FlowQuotaDataItem,
   QuotaDataItem,
   UptimeGroupResult,
+  UsageAnalyticsData,
+  UsageAnalyticsParams,
 } from './types'
 
 // ============================================================================
@@ -48,6 +50,19 @@ export async function getUserQuotaDates(
     endpoint,
     { params }
   )
+  return res.data
+}
+
+export async function getUsageAnalytics(
+  params: UsageAnalyticsParams,
+  isAdmin = false
+) {
+  const endpoint = isAdmin ? '/api/data/analytics' : '/api/data/analytics/self'
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: UsageAnalyticsData
+  }>(endpoint, { params })
   return res.data
 }
 
