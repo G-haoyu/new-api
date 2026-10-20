@@ -29,12 +29,14 @@ import {
   RadioTower,
   ReceiptText,
   ScrollText,
-  SlidersHorizontal,
   Sparkles,
   Store,
   TicketPercent,
   UserRoundCog,
   WalletCards,
+  ClipboardList,
+  Settings,
+  ShieldCheck,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -110,6 +112,11 @@ export function useSidebarData(): SidebarData {
             icon: ScrollText,
           },
           {
+            title: t('Audit Logs'),
+            url: '/usage-logs/audit',
+            icon: ClipboardList,
+          },
+          {
             title: t('Task Logs'),
             url: '/usage-logs/task',
             activeUrls: ['/usage-logs/drawing'],
@@ -131,6 +138,11 @@ export function useSidebarData(): SidebarData {
             title: t('Profile'),
             url: '/profile',
             icon: CircleUserRound,
+          },
+          {
+            title: t('Security & Access'),
+            url: '/security',
+            icon: ShieldCheck,
           },
         ],
       },
@@ -179,7 +191,8 @@ export function useSidebarData(): SidebarData {
             title: t('System Settings'),
             url: '/system-settings/site',
             activeUrls: ['/system-settings'],
-            icon: SlidersHorizontal,
+            icon: Settings,
+            requiredRole: ROLE.SUPER_ADMIN,
           },
         ],
       },

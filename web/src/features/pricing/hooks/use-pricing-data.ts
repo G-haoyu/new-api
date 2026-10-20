@@ -20,6 +20,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
 import { useStatus } from '@/hooks/use-status'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getAllModelSquare, getPricing } from '../api'
 import { modelSquareQueryKeys } from '../lib/query-keys'
@@ -29,17 +30,14 @@ type UsePricingDataOptions = {
   modelSquare?: boolean
 }
 
-export function usePricingData(
-  input: boolean | UsePricingDataOptions = true
-) {
+export function usePricingData(input: boolean | UsePricingDataOptions = true) {
   const { status } = useStatus()
-  const modelSquare =
-    typeof input === 'object' && input.modelSquare === true
+  const modelSquare = typeof input === 'object' && input.modelSquare === true
   const enabled = typeof input === 'boolean' ? input : true
 
   const pricingQuery = useQuery<PricingData>({
     queryKey: ['pricing'],
-    queryFn: getPricing,
+    queryFn: async () => requireServerSuccess(await getPricing()),
     enabled: enabled && !modelSquare,
     staleTime: 5 * 60 * 1000,
   })
@@ -53,12 +51,8 @@ export function usePricingData(
   const isLoading = modelSquare
     ? modelSquareQuery.isLoading
     : pricingQuery.isLoading
-  const error = modelSquare
-    ? modelSquareQuery.error
-    : pricingQuery.error
-  const refetch = modelSquare
-    ? modelSquareQuery.refetch
-    : pricingQuery.refetch
+  const error = modelSquare ? modelSquareQuery.error : pricingQuery.error
+  const refetch = modelSquare ? modelSquareQuery.refetch : pricingQuery.refetch
 
   // Ensure rates never reach zero to prevent division errors
   const priceRate = useMemo(
@@ -147,9 +141,7 @@ export function usePricingData(
     endpointMap: modelSquare
       ? modelSquareEndpoints
       : (pricingQuery.data?.supported_endpoint ?? {}),
-    autoGroups: modelSquare
-      ? []
-      : (pricingQuery.data?.auto_groups ?? []),
+    autoGroups: modelSquare ? [] : (pricingQuery.data?.auto_groups ?? []),
     isLoading,
     error,
     refetch,
