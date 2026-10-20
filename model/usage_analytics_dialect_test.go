@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -72,8 +73,79 @@ func runUsageAnalyticsDialectSuite(t *testing.T, dbType common.DatabaseType, mai
 		"consume log columns":        TestRecordConsumeLogWritesExtendedQuotaDataColumns,
 		"failure flush increments":   TestLogQuotaDataFinalFailureAccumulatesAcrossFlushes,
 		"legacy readers skip failed": TestLegacyQuotaDataReadersSkipFailureOnlyRows,
+		"availability":               testModelAvailabilityOnLogDB,
 	} {
 		t.Run(name, run)
+	}
+}
+
+func testModelAvailabilityOnLogDB(t *testing.T) {
+	clearDialectTestLogs(t)
+	t.Cleanup(func() { clearDialectTestLogs(t) })
+	streamError := common.MapToJsonStr(map[string]interface{}{"stream_status": map[string]interface{}{"status": "error"}})
+	streamOk := common.MapToJsonStr(map[string]interface{}{"stream_status": map[string]interface{}{"status": "ok"}})
+	require.NoError(t, LOG_DB.Create(&[]Log{
+		{RequestId: "retry", Type: LogTypeError, ModelName: "m-retry", CreatedAt: 1100},
+		{RequestId: "retry", Type: LogTypeError, ModelName: "m-retry", CreatedAt: 1101},
+		{RequestId: "retry", Type: LogTypeConsume, ModelName: "m-retry", CreatedAt: 1102, PromptTokens: 10, CompletionTokens: 5},
+		{RequestId: "fail", Type: LogTypeError, ModelName: "m-fail", CreatedAt: 1200},
+		{RequestId: "fail", Type: LogTypeError, ModelName: "m-fail", CreatedAt: 1201},
+		{RequestId: "late", Type: LogTypeError, ModelName: "m-fail", CreatedAt: 1990},
+		{RequestId: "late", Type: LogTypeConsume, ModelName: "m-fail", CreatedAt: 2040},
+		{RequestId: "stream-error", Type: LogTypeConsume, ModelName: "m-stream", CreatedAt: 1300, PromptTokens: 3, CompletionTokens: 4, Other: streamError},
+		{RequestId: "stream-ok", Type: LogTypeConsume, ModelName: "m-stream", CreatedAt: 1301, PromptTokens: 1, CompletionTokens: 2, Other: streamOk},
+		{RequestId: "legacy", Type: LogTypeConsume, ModelName: "m-stream", CreatedAt: 1302, PromptTokens: 5},
+		{RequestId: "not-json", Type: LogTypeConsume, ModelName: "m-stream", CreatedAt: 1303, Other: "not json"},
+		{RequestId: "refund", Type: LogTypeRefund, ModelName: "m-stream", CreatedAt: 1500},
+	}).Error)
+
+	models, err := queryModelAvailability(1000, 2000)
+	require.NoError(t, err)
+	assert.Equal(t, []ModelAvailability{
+		{ModelName: "m-fail", FailedCount: 1, LastCalledAt: 1201},
+		{ModelName: "m-retry", SuccessCount: 1, TotalTokens: 15, LastCalledAt: 1102},
+		{ModelName: "m-stream", SuccessCount: 3, StreamErrorCount: 1, TotalTokens: 15, LastCalledAt: 1303},
+	}, models)
+}
+
+// ClickHouse DELETE is asynchronous; TRUNCATE keeps test cleanup synchronous.
+func clearDialectTestLogs(t *testing.T) {
+	t.Helper()
+	statement := "DELETE FROM logs"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		statement = "TRUNCATE TABLE logs"
+	}
+	require.NoError(t, LOG_DB.Exec(statement).Error)
+}
+
+// ClickHouse covers the log database; the main database remains SQLite.
+func TestUsageAnalyticsClickHouseLogDB(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("TEST_CLICKHOUSE_LOG_DSN"))
+	if dsn == "" {
+		t.Skip("TEST_CLICKHOUSE_LOG_DSN is not configured")
+	}
+	previousLogDB, previousLogType, previousMaster := LOG_DB, common.LogDatabaseType(), common.IsMasterNode
+	common.IsMasterNode = true
+	require.NoError(t, InitLogDBWithDSN(dsn))
+	require.True(t, common.UsingLogDatabase(common.DatabaseTypeClickHouse))
+	t.Cleanup(func() {
+		if sqlDB, err := LOG_DB.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+		LOG_DB = previousLogDB
+		common.SetLogDatabaseType(previousLogType)
+		common.IsMasterNode = previousMaster
+		initCol()
+	})
+
+	for name, run := range map[string]func(*testing.T){
+		"availability":    testModelAvailabilityOnLogDB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearDialectTestLogs(t)
+			t.Cleanup(func() { clearDialectTestLogs(t) })
+			run(t)
+		})
 	}
 }
 

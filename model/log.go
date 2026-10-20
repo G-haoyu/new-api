@@ -679,37 +679,33 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 
 const logSearchCountLimit = 10000
 
+// logStreamStatusExpr extracts Other.stream_status.status for the log dialect.
+func logStreamStatusExpr(column string) (string, bool) {
+	switch common.LogDatabaseType() {
+	case common.DatabaseTypeSQLite:
+		return "json_extract(CASE WHEN json_valid(" + column + ") THEN " + column + " ELSE '{}' END, '$.stream_status.status')", true
+	case common.DatabaseTypeMySQL:
+		return "JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID(" + column + ") THEN " + column + " ELSE '{}' END, '$.stream_status.status'))", true
+	case common.DatabaseTypePostgreSQL:
+		return "CASE WHEN " + column + " ~ '^\\s*\\{.*\\}\\s*$' THEN (" + column + "::jsonb -> 'stream_status' ->> 'status') ELSE NULL END", true
+	case common.DatabaseTypeClickHouse:
+		return "JSONExtractString(" + column + ", 'stream_status', 'status')", true
+	default:
+		return "", false
+	}
+}
+
 // applyStreamErrorFilter restricts logs to records whose generated stream
-// status object reports an error. The Other column is text on all supported
-// databases, so each dialect uses its native JSON extractor while guarding
-// against legacy rows with an empty or invalid Other value.
 func applyStreamErrorFilter(tx *gorm.DB, column string, enabled bool) *gorm.DB {
 	if !enabled {
 		return tx
 	}
-
-	switch common.LogDatabaseType() {
-	case common.DatabaseTypeSQLite:
-		return tx.Where(
-			"json_extract(CASE WHEN json_valid("+column+") THEN "+column+" ELSE '{}' END, '$.stream_status.status') = ?",
-			"error",
-		)
-	case common.DatabaseTypeMySQL:
-		return tx.Where(
-			"JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID("+column+") THEN "+column+" ELSE '{}' END, '$.stream_status.status')) = ?",
-			"error",
-		)
-	case common.DatabaseTypePostgreSQL:
-		return tx.Where(
-			"CASE WHEN "+column+" ~ '^\\s*\\{.*\\}\\s*$' THEN ("+column+"::jsonb -> 'stream_status' ->> 'status') ELSE NULL END = ?",
-			"error",
-		)
-	case common.DatabaseTypeClickHouse:
-		return tx.Where("JSONExtractString("+column+", 'stream_status', 'status') = ?", "error")
-	default:
+	statusExpr, ok := logStreamStatusExpr(column)
+	if !ok {
 		common.SysError("stream error filter unsupported on log database type: " + string(common.LogDatabaseType()))
 		return tx.Where("1 = 0")
 	}
+	return tx.Where(statusExpr+" = ?", "error")
 }
 
 // applyRetryFilter restricts logs to requests that attempted more than one
