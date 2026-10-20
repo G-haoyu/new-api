@@ -20,6 +20,8 @@ import { api } from '@/lib/api'
 
 import type {
   FlowQuotaDataItem,
+  IselfUsageParams,
+  IselfUsageRow,
   ModelAvailabilityData,
   ModelAvailabilityMinutes,
   PeakTpmParams,
@@ -77,6 +79,16 @@ export async function getPeakTpm(params: PeakTpmParams) {
     message?: string
     data?: PeakTpmPoint[]
   }>('/api/data/peak-tpm', { params })
+  return res.data
+}
+
+export async function getIselfUsage(params: IselfUsageParams, isAdmin = false) {
+  const endpoint = isAdmin ? '/api/data/iself' : '/api/data/iself/self'
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: IselfUsageRow[]
+  }>(endpoint, { params })
   return res.data
 }
 

@@ -32,6 +32,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ROLE } from '@/lib/roles'
+import { computeTimeRange, getRollingDateRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -113,6 +114,12 @@ const LazyUserCharts = lazy(() =>
 const LazyUserUsageTable = lazy(() =>
   import('./components/users/user-usage-table').then((m) => ({
     default: m.UserUsageTable,
+  }))
+)
+
+const LazyIselfUsageTable = lazy(() =>
+  import('./components/users/iself-usage-table').then((m) => ({
+    default: m.IselfUsageTable,
   }))
 )
 
@@ -227,6 +234,28 @@ export function Dashboard() {
     }
   )
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
+  const [iselfVisible, setIselfVisible] = useState(false)
+
+  const iselfParams = useMemo(() => {
+    if (activeSection === 'users') {
+      const { start, end } = getRollingDateRange(
+        userChartsFilters.selectedRange
+      )
+      return {
+        start_timestamp: Math.floor(start.getTime() / 1000),
+        end_timestamp: Math.floor(end.getTime() / 1000),
+      }
+    }
+    return {
+      ...computeTimeRange(
+        getDefaultDays(modelFilters.time_granularity),
+        modelFilters.start_timestamp,
+        modelFilters.end_timestamp
+      ),
+      username: modelFilters.username,
+    }
+  }, [activeSection, modelFilters, userChartsFilters.selectedRange])
+
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
   }, [])
@@ -324,7 +353,23 @@ export function Dashboard() {
         />
       </>
     ) : null
-  const sectionActions = modelActions ?? flowActions
+  const sectionActions = (
+    <>
+      {(activeSection === 'models' ||
+        (activeSection === 'users' && isAdmin)) && (
+        <Button
+          variant={iselfVisible ? 'secondary' : 'outline'}
+          size='sm'
+          aria-pressed={iselfVisible}
+          aria-controls='dashboard-iself-usage'
+          onClick={() => setIselfVisible((visible) => !visible)}
+        >
+          {t('iSelf data')}
+        </Button>
+      )}
+      {modelActions ?? flowActions}
+    </>
+  )
 
   return (
     <SectionPageLayout>
@@ -369,6 +414,11 @@ export function Dashboard() {
                   <LazyModelMetricsTable filters={modelFilters} />
                 </Suspense>
               </FadeIn>
+              {iselfVisible && (
+                <Suspense fallback={<ModelMetricsFallback />}>
+                  <LazyIselfUsageTable params={iselfParams} />
+                </Suspense>
+              )}
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelMetricsFallback />}>
                   <LazyModelAvailability />
@@ -427,6 +477,11 @@ export function Dashboard() {
                     />
                   </Suspense>
                 </FadeIn>
+              )}
+              {iselfVisible && (
+                <Suspense fallback={<ModelMetricsFallback />}>
+                  <LazyIselfUsageTable params={iselfParams} />
+                </Suspense>
               )}
             </>
           )}

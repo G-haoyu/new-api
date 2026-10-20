@@ -252,6 +252,20 @@ export interface PeakTpmPoint {
   peak_tpm: number
 }
 
+export interface IselfUsageRow {
+  email: string
+  source: 'iself'
+  model_name: string
+  request_count: number
+  quota: number
+  input_tokens: number
+  completion_tokens: number
+  token_used: number
+  last_called_at: number
+}
+
+export type IselfUsageParams = Omit<UsageAnalyticsParams, 'group_by'>
+
 // ============================================================================
 // Model Availability Types (/api/perf-metrics/availability)
 // ============================================================================
