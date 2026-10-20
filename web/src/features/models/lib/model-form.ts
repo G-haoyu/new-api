@@ -36,6 +36,15 @@ export const modelFormSchema = z.object({
   tags: z.array(z.string()).default([]),
   vendor_id: z.number().optional(),
   endpoints: z.string().default(''),
+  context_length: z
+    .string()
+    .refine(
+      (value) => value === '' || /^\d+$/.test(value),
+      'Context length must be a non-negative integer'
+    )
+    .default(''),
+  parameter_count: z.string().default(''),
+  release_date: z.string().default(''),
   name_rule: z.number().min(0).max(3).default(0),
   status: z.boolean().default(true),
   sync_official: z.boolean().default(true),
@@ -78,6 +87,9 @@ export function transformModelToFormDefaults(model: Model): ModelFormValues {
     tags: parseTagsFromUtils(model.tags),
     vendor_id: model.vendor_id,
     endpoints: model.endpoints || '',
+    context_length: model.context_length ? String(model.context_length) : '',
+    parameter_count: model.parameter_count || '',
+    release_date: model.release_date || '',
     name_rule: model.name_rule || 0,
     status: model.status === 1,
     sync_official: model.sync_official === 1,
@@ -100,6 +112,10 @@ export function transformFormDataToModelPayload(
     tags: formatTagsArray(formData.tags),
     vendor_id: formData.vendor_id,
     endpoints: formData.endpoints || '',
+    context_length:
+      formData.context_length === '' ? 0 : Number(formData.context_length),
+    parameter_count: formData.parameter_count,
+    release_date: formData.release_date,
     name_rule: formData.name_rule,
     status: formData.status ? 1 : 0,
     sync_official: formData.sync_official ? 1 : 0,

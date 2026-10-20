@@ -21,8 +21,10 @@ import i18next from 'i18next'
 import { toast } from 'sonner'
 
 import { invalidateModelSquareQueries } from '@/features/pricing/lib/query-keys'
+import { handleServerError } from '@/lib/handle-server-error'
 
 import { updateModelStatus, deleteModel as deleteModelAPI } from '../api'
+import { invalidateVendorData } from '../vendor-api'
 import { modelsQueryKeys } from './query-keys'
 
 // ============================================================================
@@ -40,17 +42,17 @@ export async function handleEnableModel(
   try {
     const response = await updateModelStatus(id, 1)
     if (response.success) {
-      toast.success(i18next.t('Model enabled successfully'))
-      queryClient?.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
-      await invalidateModelSquareQueries(queryClient)
+      toast.success(i18next.t('Model shown in model square'))
+      if (queryClient) await invalidateVendorData(queryClient)
       onSuccess?.()
     } else {
-      toast.error(response.message || i18next.t('Failed to enable model'))
+      handleServerError(
+        response,
+        i18next.t('Failed to show model in model square')
+      )
     }
   } catch (error: unknown) {
-    toast.error(
-      (error as Error)?.message || i18next.t('Failed to enable model')
-    )
+    handleServerError(error, i18next.t('Failed to show model in model square'))
   }
 }
 
@@ -65,16 +67,19 @@ export async function handleDisableModel(
   try {
     const response = await updateModelStatus(id, 0)
     if (response.success) {
-      toast.success(i18next.t('Model disabled successfully'))
-      queryClient?.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
-      await invalidateModelSquareQueries(queryClient)
+      toast.success(i18next.t('Model hidden from model square'))
+      if (queryClient) await invalidateVendorData(queryClient)
       onSuccess?.()
     } else {
-      toast.error(response.message || i18next.t('Failed to disable model'))
+      handleServerError(
+        response,
+        i18next.t('Failed to hide model from model square')
+      )
     }
   } catch (error: unknown) {
-    toast.error(
-      (error as Error)?.message || i18next.t('Failed to disable model')
+    handleServerError(
+      error,
+      i18next.t('Failed to hide model from model square')
     )
   }
 }
@@ -209,12 +214,11 @@ export async function handleBatchEnableModels(
 
     if (successCount > 0) {
       toast.success(
-        i18next.t('Successfully enabled {{count}} model(s)', {
+        i18next.t('Shown {{count}} models in model square', {
           count: successCount,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
-      await invalidateModelSquareQueries(queryClient)
+      if (queryClient) await invalidateVendorData(queryClient)
       onSuccess?.()
     }
 
@@ -224,7 +228,7 @@ export async function handleBatchEnableModels(
       )
     }
   } catch (error: unknown) {
-    toast.error((error as Error)?.message || i18next.t('Batch enable failed'))
+    handleServerError(error, i18next.t('Batch enable failed'))
   }
 }
 
@@ -258,12 +262,11 @@ export async function handleBatchDisableModels(
 
     if (successCount > 0) {
       toast.success(
-        i18next.t('Successfully disabled {{count}} model(s)', {
+        i18next.t('Hidden {{count}} models from model square', {
           count: successCount,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
-      await invalidateModelSquareQueries(queryClient)
+      if (queryClient) await invalidateVendorData(queryClient)
       onSuccess?.()
     }
 
@@ -275,6 +278,6 @@ export async function handleBatchDisableModels(
       )
     }
   } catch (error: unknown) {
-    toast.error((error as Error)?.message || i18next.t('Batch disable failed'))
+    handleServerError(error, i18next.t('Batch disable failed'))
   }
 }
