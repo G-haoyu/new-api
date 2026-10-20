@@ -38,6 +38,7 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
+import { UsageExportButton } from './components/models/usage-export-button'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
 import { DEFAULT_TIME_GRANULARITY } from './constants'
 import {
@@ -314,6 +315,7 @@ export function Dashboard() {
           onFilterChange={handleFilterChange}
           onReset={handleResetFilters}
         />
+        {isAdmin && <UsageExportButton filters={modelFilters} />}
       </>
     ) : null
   const flowActions =
