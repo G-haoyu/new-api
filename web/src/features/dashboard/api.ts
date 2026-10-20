@@ -22,6 +22,8 @@ import type {
   FlowQuotaDataItem,
   ModelAvailabilityData,
   ModelAvailabilityMinutes,
+  PeakTpmParams,
+  PeakTpmPoint,
   QuotaDataItem,
   UptimeGroupResult,
   UsageAnalyticsData,
@@ -65,6 +67,16 @@ export async function getUsageAnalytics(
     message?: string
     data?: UsageAnalyticsData
   }>(endpoint, { params })
+  return res.data
+}
+
+// Admin-only hourly peaks; hours without traffic are omitted.
+export async function getPeakTpm(params: PeakTpmParams) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: PeakTpmPoint[]
+  }>('/api/data/peak-tpm', { params })
   return res.data
 }
 

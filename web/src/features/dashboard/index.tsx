@@ -98,6 +98,12 @@ const LazyModelAvailability = lazy(() =>
   }))
 )
 
+const LazyPeakTpmChart = lazy(() =>
+  import('./components/models/peak-tpm-chart').then((m) => ({
+    default: m.PeakTpmChart,
+  }))
+)
+
 const LazyUserCharts = lazy(() =>
   import('./components/users/user-charts').then((m) => ({
     default: m.UserCharts,
@@ -394,6 +400,13 @@ export function Dashboard() {
                   />
                 </Suspense>
               </FadeIn>
+              {isAdmin && (
+                <FadeIn delay={0.25}>
+                  <Suspense fallback={<ModelChartsFallback />}>
+                    <LazyPeakTpmChart filters={modelFilters} />
+                  </Suspense>
+                </FadeIn>
+              )}
             </>
           )}
           {activeSection === 'users' && (

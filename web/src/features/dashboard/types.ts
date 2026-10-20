@@ -235,6 +235,24 @@ export interface UsageAnalyticsData {
 }
 
 // ============================================================================
+// Peak TPM Types (/api/data/peak-tpm)
+// ============================================================================
+
+export interface PeakTpmParams {
+  start_timestamp: number
+  end_timestamp: number
+  username?: string
+  model?: string
+}
+
+export interface PeakTpmPoint {
+  // Unix seconds at the start of the hour.
+  hour: number
+  // Highest per-minute token sum observed within the hour.
+  peak_tpm: number
+}
+
+// ============================================================================
 // Model Availability Types (/api/perf-metrics/availability)
 // ============================================================================
 
