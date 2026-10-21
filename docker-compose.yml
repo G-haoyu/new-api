@@ -41,7 +41,7 @@ services:
       - RELAY_ATTEMPT_LOG_BUFFER_SIZE=4096
       - RELAY_ATTEMPT_LOG_BATCH_SIZE=200
       - RELAY_ATTEMPT_LOG_FLUSH_MS=2000
-      - LOG_SQL_CLICKHOUSE_TTL_DAYS=7
+      - GLOBAL_API_RATE_LIMIT_ENABLE=false
       #      - LOG_SQL_CLICKHOUSE_TTL_DAYS=0 # OPTIONAL: ClickHouse log retention days. Unset or 0 disables automatic deletion; set to e.g. 30 to keep 30 days
       - REDIS_CONN_STRING=redis://:123456@redis:6379 # ⚠️ IMPORTANT: Change the password in production!
       - TZ=Asia/Shanghai
