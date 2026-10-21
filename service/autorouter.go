@@ -14,6 +14,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -110,11 +111,19 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 	policy := setting.Policy()
 	result := &autorouter.Result{Source: autorouter.SourceDefault}
 
+	otelRuntime := observability.FromContext(c.Request.Context())
+	routeCtx, routeSpan := otelRuntime.StartAutoRouter(c.Request.Context())
+	routeInput := map[string]any{}
+	route := observability.Observation{Input: routeInput}
+
 	var instruction autorouter.Instruction
 	if storage, err := common.GetBodyStorage(c); err == nil {
 		if body, err := storage.Bytes(); err == nil {
 			instruction = autorouter.ExtractInstruction(body)
 		}
+	}
+	if instruction.Auxiliary {
+		routeInput["auxiliary"] = true
 	}
 
 	ok := false
@@ -123,6 +132,11 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		cache := getAutoRouterCache()
 		ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
+		if otelRuntime.RecordsContent(nil) {
+			for key, value := range state {
+				routeInput[key] = value
+			}
+		}
 		decisionKey := autoRouterCacheKey("d", tokenID, autorouter.QuestionsVersion, state["current_task"], state["previous_task"])
 		routeKey := autoRouterCacheKey("r", tokenID, instruction.Text)
 
@@ -137,23 +151,43 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 					previous = &entry.Route
 				}
 			}
+			routeInput["previous_route"] = previous
 
 			client := autorouter.JevClient{Endpoint: setting.JevEndpoint, HTTPClient: autoRouterClient}
-			ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(setting.JevTimeoutMs)*time.Millisecond)
+			jevCtx, jevSpan := otelRuntime.StartJevClassify(routeCtx)
+			ctx, cancel := context.WithTimeout(jevCtx, time.Duration(setting.JevTimeoutMs)*time.Millisecond)
 			started := time.Now()
 			response, err := client.Classify(ctx, state)
 			cancel()
 			result.Jev = &autorouter.JevCall{Endpoint: setting.JevEndpoint, LatencyMs: time.Since(started).Milliseconds()}
+			jev := observability.Observation{Err: err}
+			jevInput := map[string]any{"questions_version": autorouter.QuestionsVersion}
+			if otelRuntime.RecordsContent(err) {
+				jevInput["state"] = state
+			}
+			jev.Input = jevInput
+
 			if err != nil {
 				result.Jev.Error = err.Error()
+				route.Warning = "jev failed: " + err.Error()
 			} else {
 				result.Jev.Response = response.ResponseBody
 				decision := response.Decision(instruction.Previous != "")
 				result.Decision = &decision
+				jev.Model = response.Model
+				jevOutput := map[string]any{"answers": response.Answers}
+				if response.LatencyMs != nil {
+					jevOutput["server_latency_ms"] = *response.LatencyMs
+				}
+				jev.Output = jevOutput
 			}
+			otelRuntime.FinishObservation(jevSpan, jev)
 
 			var inherited bool
 			result.Route, inherited, ok = autorouter.SelectRoute(result.Decision, previous, policy, available)
+			if inherited && err == nil {
+				route.Warning = "jev decision untrusted"
+			}
 			switch {
 			case !inherited:
 				result.Source = autorouter.SourceJev
@@ -177,7 +211,23 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, available)
 	}
 	if !ok {
-		return result, errors.New("auto router found no available model for this token and group")
+		route.Err = errors.New("auto router found no available model for this token and group")
+	}
+	route.Output = result
+	route.Metadata = map[string]string{
+		"route_model":    result.Model,
+		"route_effort":   result.Effort,
+		"source":         result.Source,
+		"resolved_model": result.ResolvedModel,
+	}
+	route.TraceMetadata = map[string]string{
+		"auto_router_model":  result.Model,
+		"auto_router_effort": result.Effort,
+		"auto_router_source": result.Source,
+	}
+	otelRuntime.FinishObservation(routeSpan, route)
+	if !ok {
+		return result, route.Err
 	}
 	c.Set(ginKeyAutoRouterResult, result)
 	if result.Decision != nil && result.Decision.TaskType != autorouter.TaskTypeUnknown &&

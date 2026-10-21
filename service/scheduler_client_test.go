@@ -18,10 +18,14 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestSignSchedulerRequestUsesCanonicalPayload(t *testing.T) {
@@ -677,6 +681,73 @@ func TestRunSchedulerShadowRejectsIncompleteResponse(t *testing.T) {
 	if err := RunSchedulerShadow(c, "m", "default"); err == nil {
 		t.Fatal("expected incomplete response error")
 	}
+}
+
+func TestRunSchedulerShadowRecordsDecisionSpan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	newTracedContext := func(t *testing.T) (*gin.Context, *tracetest.InMemoryExporter) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)))
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request = c.Request.WithContext(observability.ContextWithRuntimeForTest(c.Request.Context(), provider))
+		c.Set(common.RequestIdKey, "traced")
+		return c, exporter
+	}
+	attr := func(span tracetest.SpanStub, key string) string {
+		for _, kv := range span.Attributes {
+			if string(kv.Key) == key {
+				return kv.Value.AsString()
+			}
+		}
+		return ""
+	}
+
+	t.Run("shadow success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"decision_id":"d9","catalog_version":"catalog-v1","candidates":[{"endpoint_id":"ep1","channel_id":7,"key_index":0,"model":"m","reason":["healthy"]}]}`))
+		}))
+		defer server.Close()
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "shadow", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter := newTracedContext(t)
+		common.SetContextKey(c, constant.ContextKeyChannelId, 7)
+		require.NoError(t, RunSchedulerShadow(c, "m", "default"))
+
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		span := spans[0]
+		assert.Equal(t, "newapi.scheduler.decide", span.Name)
+		assert.Equal(t, "shadow", attr(span, "langfuse.observation.metadata.mode"))
+		assert.Equal(t, "d9", attr(span, "langfuse.observation.metadata.decision_id"))
+		assert.Equal(t, "true", attr(span, "langfuse.observation.metadata.shadow_match"))
+		assert.Contains(t, attr(span, "langfuse.observation.input"), `"request_id":"traced"`)
+		assert.Contains(t, attr(span, "langfuse.observation.output"), `"endpoint_id":"ep1"`)
+		assert.Empty(t, attr(span, "langfuse.observation.level"))
+	})
+
+	t.Run("failure level follows mode", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "enforced", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter := newTracedContext(t)
+		require.Error(t, RunSchedulerShadow(c, "m", "default"))
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assert.Equal(t, "enforced", attr(spans[0], "langfuse.observation.metadata.mode"))
+		assert.Equal(t, codes.Error, spans[0].Status.Code)
+
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "shadow", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter = newTracedContext(t)
+		require.Error(t, RunSchedulerShadow(c, "m", "default"))
+		spans = exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assert.NotEqual(t, codes.Error, spans[0].Status.Code)
+		assert.Equal(t, "WARNING", attr(spans[0], "langfuse.observation.level"))
+	})
 }
 
 func TestSchedulerCandidateForRetryIsEnforcedOnly(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 )
@@ -1091,7 +1092,7 @@ func schedulerEffectivePolicy(c *gin.Context) (map[string]any, error) {
 // RunSchedulerShadow is best-effort by design: errors never alter native
 // channel selection. A successful response is stored only as request metadata;
 // Enforced candidate consumption is a separate, explicitly gated phase.
-func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
+func RunSchedulerShadow(c *gin.Context, modelName, group string) (err error) {
 	if SchedulerKillSwitchActive() {
 		return nil
 	}
@@ -1099,6 +1100,26 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if !config.Enabled || len(config.URLs()) == 0 || config.Token == "" {
 		return nil
 	}
+	enforced := SchedulerEnforcedForRequest(c)
+	mode := "shadow"
+	if enforced {
+		mode = "enforced"
+	}
+	otelRuntime := observability.FromContext(c.Request.Context())
+	decideCtx, decideSpan := otelRuntime.StartSchedulerDecision(c.Request.Context())
+	decide := observability.Observation{Metadata: map[string]string{"mode": mode}}
+	defer func() {
+		if err != nil {
+			// A shadow decision never affects routing, so its failure is only
+			// a degradation; an enforced one fails the request.
+			if enforced {
+				decide.Err = err
+			} else {
+				decide.Warning = err.Error()
+			}
+		}
+		otelRuntime.FinishObservation(decideSpan, decide)
+	}()
 	if !schedulerCircuitAllows(time.Now()) {
 		return ErrSchedulerTemporarilyUnavailable
 	}
@@ -1124,11 +1145,12 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if allowed, ok := common.GetContextKeyType[[]int](c, constant.ContextKeySchedulerAllowedChannelIDs); ok {
 		body.AllowedChannelIDs = append([]int(nil), allowed...)
 	}
+	decide.Input = body
 	payload, err := common.Marshal(body)
 	if err != nil {
 		return err
 	}
-	outcome, err := schedulerDoRequestWithFallback(c.Request.Context(), config, http.MethodPost, "/v1/schedule", payload, true)
+	outcome, err := schedulerDoRequestWithFallback(decideCtx, config, http.MethodPost, "/v1/schedule", payload, true)
 	if err != nil {
 		return err
 	}
@@ -1142,6 +1164,8 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if err := common.DecodeJson(bytes.NewReader(outcome.body), &scheduled); err != nil {
 		return err
 	}
+	decide.Output = scheduled
+	decide.Metadata["decision_id"] = scheduled.DecisionID
 	if scheduled.DecisionID == "" || scheduled.CatalogVersion == "" || len(scheduled.Candidates) == 0 {
 		return fmt.Errorf("scheduler returned incomplete response")
 	}
@@ -1173,6 +1197,9 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 		}
 	}
 	common.SetContextKey(c, constant.ContextKeySchedulerShadowMatch, match)
+	if !enforced {
+		decide.Metadata["shadow_match"] = strconv.FormatBool(match)
+	}
 	schedulerCircuitSuccess(time.Now())
 	return nil
 }

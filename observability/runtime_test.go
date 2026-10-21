@@ -15,13 +15,13 @@ import (
 
 	rootcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -553,18 +553,14 @@ func TestStartLLMRequestPropagatesSessionID(t *testing.T) {
 				OriginModelName: "test-model",
 				RelayFormat:     "openai",
 			}, tt.request)
-			attemptCtx, attemptSpan := runtime.StartAttempt(llmCtx, nil, 7, 8, "test-channel")
-			providerCtx, providerSpan := runtime.StartProviderRequest(attemptCtx, nil, nil)
-			_, streamSpan := runtime.StartStream(providerCtx, nil)
+			attemptCtx, attemptSpan := runtime.StartAttempt(llmCtx)
 
-			runtime.FinishSpan(streamSpan, nil)
-			runtime.FinishSpan(providerSpan, nil)
-			runtime.FinishSpan(attemptSpan, nil)
+			runtime.FinishAttempt(attemptCtx, attemptSpan, AttemptTarget{ChannelID: 7}, http.StatusOK, nil, nil)
 			runtime.FinishLLM(llmCtx, llmSpan, nil, nil)
 			parentSpan.End()
 
 			spans := exporter.GetSpans()
-			require.Len(t, spans, 5)
+			require.Len(t, spans, 3)
 			for _, span := range spans {
 				require.Equal(t, tt.expected, attributeValue(span.Attributes, "session.id").AsString(), span.Name)
 			}
@@ -863,7 +859,7 @@ func TestNestedAttemptUsageAndTTFTStayOnGenerationSpan(t *testing.T) {
 		FirstResponseTime: firstResponse,
 	}
 	llmCtx, llmSpan := runtime.StartLLMRequest(context.Background(), info, nil)
-	attemptCtx, attemptSpan := runtime.StartAttempt(llmCtx, info, 7, 8, "test-channel")
+	attemptCtx, attemptSpan := runtime.StartAttempt(llmCtx)
 	inputCost := 0.001
 	outputCost := 0.002
 	runtime.RecordUsageWithCosts(attemptCtx, 10, 20, 30, 15000, 0, false, &BillingCostDetails{
@@ -871,7 +867,7 @@ func TestNestedAttemptUsageAndTTFTStayOnGenerationSpan(t *testing.T) {
 		OutputUSD: &outputCost,
 		TotalUSD:  0.003,
 	})
-	runtime.FinishSpan(attemptSpan, nil)
+	runtime.FinishAttempt(attemptCtx, attemptSpan, AttemptTarget{ChannelID: 7}, http.StatusOK, nil, nil)
 	runtime.FinishLLM(llmCtx, llmSpan, nil, info)
 
 	spans := exporter.GetSpans()
@@ -895,25 +891,6 @@ func TestNestedAttemptUsageAndTTFTStayOnGenerationSpan(t *testing.T) {
 	require.Equal(t, "", attributeValue(attempt.Attributes, "langfuse.observation.cost_details").AsString())
 	require.Equal(t, firstResponse.Format(time.RFC3339Nano), attributeValue(generation.Attributes, "langfuse.observation.completion_start_time").AsString())
 	require.Equal(t, int64(175), attributeValue(generation.Attributes, "new_api.ttft_ms").AsInt64())
-}
-
-func TestStartStreamDoesNotDuplicateStreamMarker(t *testing.T) {
-	exporter := tracetest.NewInMemoryExporter()
-	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
-	runtime := &Runtime{
-		enabled:        true,
-		tracerProvider: provider,
-		tracer:         provider.Tracer("test"),
-		propagator:     propagationTraceContextForTest(),
-	}
-	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
-
-	_, span := runtime.StartStream(context.Background(), nil)
-	runtime.FinishSpan(span, nil)
-
-	spans := exporter.GetSpans()
-	require.Len(t, spans, 1)
-	require.Equal(t, "", attributeValue(spans[0].Attributes, "new_api.stream.is_stream").AsString())
 }
 
 func TestFinishLLMDoesNotSetTTFTWithoutResponse(t *testing.T) {
@@ -1093,7 +1070,7 @@ func attributeValue(attrs []attribute.KeyValue, key string) attribute.Value {
 	return attribute.Value{}
 }
 
-func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
+func TestFinishAttemptRecordsTargetAndUpstreamOutcome(t *testing.T) {
 	newRuntime := func(t *testing.T) (*Runtime, *tracetest.InMemoryExporter) {
 		exporter := tracetest.NewInMemoryExporter()
 		provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
@@ -1107,48 +1084,81 @@ func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
 			propagator:      propagationTraceContextForTest(),
 		}, exporter
 	}
-	taskChange, benefit := 0.25, 0.75
-	decision := &autorouter.Decision{TaskType: "coding", TaskTypeProbability: 0.9, Difficulty: 3, TaskChange: &taskChange, LargerModelBenefit: &benefit}
-	info := &common.RelayInfo{RequestId: "req-auto", OriginModelName: "large", RelayFormat: "openai"}
-	request := &dto.GeneralOpenAIRequest{Model: "large"}
-	const prefix = "langfuse.observation.metadata.auto_router_"
+	target := AttemptTarget{RetryIndex: 1, ChannelID: 7, ChannelName: "primary", ChannelType: 1, UpstreamModel: "gpt-upstream"}
 
-	t.Run("jev called", func(t *testing.T) {
+	t.Run("upstream error", func(t *testing.T) {
 		runtime, exporter := newRuntime(t)
-		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
-		runtime.RecordAutoRouter(ctx, &autorouter.Result{
-			ResolvedModel: "large-high", Route: autorouter.Route{TaskType: "coding", Model: "large", Effort: "high"}, Source: autorouter.SourceJev, Decision: decision,
-			Jev: &autorouter.JevCall{Endpoint: "http://jev.test", LatencyMs: 180, Response: []byte(`{"answers":{}}`)},
-		})
-		runtime.FinishLLM(ctx, span, nil, info)
+		ctx, span := runtime.StartAttempt(context.Background())
+		req := httptest.NewRequest(http.MethodPost, "https://upstream.test/v1/chat/completions", nil)
+		resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}}
+		resp.Header.Set(rootcommon.RequestIdKey, "up-123")
+		runtime.RecordUpstreamResponse(ctx, req, resp)
+		runtime.FinishAttempt(ctx, span, target, http.StatusTooManyRequests, nil, errors.New("rate limited"))
 
 		spans := exporter.GetSpans()
 		require.Len(t, spans, 1)
 		attrs := spans[0].Attributes
-		require.Equal(t, autorouter.QuestionsVersion, attributeValue(attrs, prefix+"version").AsString())
-		require.Equal(t, "auto", attributeValue(attrs, prefix+"requested_model").AsString())
-		require.Equal(t, "large-high", attributeValue(attrs, prefix+"resolved_model").AsString())
-		require.Equal(t, "large", attributeValue(attrs, prefix+"route_model").AsString())
-		require.Equal(t, "high", attributeValue(attrs, prefix+"route_effort").AsString())
-		require.Equal(t, "coding", attributeValue(attrs, prefix+"task_type").AsString())
-		require.Equal(t, "3", attributeValue(attrs, prefix+"difficulty").AsString())
-		require.Equal(t, "0.2500", attributeValue(attrs, prefix+"task_change").AsString())
-		require.Equal(t, "0.7500", attributeValue(attrs, prefix+"larger_model_benefit").AsString())
-		require.Equal(t, "180", attributeValue(attrs, prefix+"jev_latency_ms").AsString())
-		require.Equal(t, `{"answers":{}}`, attributeValue(attrs, prefix+"jev_raw").AsString())
-		require.Equal(t, "", attributeValue(attrs, prefix+"jev_error").AsString())
+		require.Equal(t, relayAttemptSpanName, spans[0].Name)
+		require.JSONEq(t, `{"retry_index":1,"channel_id":7,"channel_name":"primary","channel_type":1,"upstream_model":"gpt-upstream"}`, attributeValue(attrs, "langfuse.observation.input").AsString())
+		var output map[string]any
+		require.NoError(t, rootcommon.UnmarshalJsonStr(attributeValue(attrs, "langfuse.observation.output").AsString(), &output))
+		require.Equal(t, float64(http.StatusTooManyRequests), output["upstream_status_code"])
+		require.Equal(t, "up-123", output["upstream_request_id"])
+		require.Equal(t, "upstream.test", output["server_address"])
+		require.Equal(t, "rate limited", output["error"])
+		require.Contains(t, output, "headers_ms")
+		require.Equal(t, "7", attributeValue(attrs, "langfuse.observation.metadata.channel_id").AsString())
+		require.Equal(t, "429", attributeValue(attrs, "langfuse.observation.metadata.status_code").AsString())
+		require.Equal(t, codes.Error, spans[0].Status.Code)
 	})
 
-	t.Run("cache hit", func(t *testing.T) {
+	t.Run("abnormal stream end", func(t *testing.T) {
 		runtime, exporter := newRuntime(t)
-		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
-		runtime.RecordAutoRouter(ctx, &autorouter.Result{ResolvedModel: "large-high", Route: autorouter.Route{TaskType: "coding", Model: "large", Effort: "high"}, Source: autorouter.SourceCache, Decision: decision})
-		runtime.FinishLLM(ctx, span, nil, info)
+		ctx, span := runtime.StartAttempt(context.Background())
+		status := common.NewStreamStatus()
+		status.SetEndReason(common.StreamEndReasonClientGone, nil)
+		runtime.FinishAttempt(ctx, span, target, http.StatusOK, status, nil)
 
 		spans := exporter.GetSpans()
 		require.Len(t, spans, 1)
-		for _, attr := range spans[0].Attributes {
-			require.False(t, strings.HasPrefix(string(attr.Key), prefix), "cache hit wrote %s", attr.Key)
-		}
+		attrs := spans[0].Attributes
+		require.Equal(t, "WARNING", attributeValue(attrs, "langfuse.observation.level").AsString())
+		require.Equal(t, "stream ended: client_gone", attributeValue(attrs, "langfuse.observation.status_message").AsString())
+		require.NotEqual(t, codes.Error, spans[0].Status.Code)
+		require.NotContains(t, attributeValue(attrs, "langfuse.observation.output").AsString(), "upstream_status_code")
 	})
+}
+
+func TestFinishObservationExportsLangfuseFields(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	runtime := FromContext(ContextWithRuntimeForTest(context.Background(), provider))
+
+	routeCtx, routeSpan := runtime.StartAutoRouter(context.Background())
+	_, jevSpan := runtime.StartJevClassify(routeCtx)
+	runtime.FinishObservation(jevSpan, Observation{Input: map[string]string{"questions_version": "v"}, Model: "jev-27b", Err: errors.New("timeout")})
+	runtime.FinishObservation(routeSpan, Observation{
+		Output:        map[string]string{"tier": "mid"},
+		Metadata:      map[string]string{"tier": "mid"},
+		TraceMetadata: map[string]string{"auto_router_tier": "mid"},
+		Warning:       "jev failed: timeout",
+	})
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 2)
+	jev, route := spans[0], spans[1]
+	require.Equal(t, jevClassifySpanName, jev.Name)
+	require.Equal(t, route.SpanContext.SpanID(), jev.Parent.SpanID())
+	require.Equal(t, "generation", attributeValue(jev.Attributes, "langfuse.observation.type").AsString())
+	require.Equal(t, "jev-27b", attributeValue(jev.Attributes, "langfuse.observation.model.name").AsString())
+	require.Equal(t, "", attributeValue(jev.Attributes, "langfuse.observation.usage_details").AsString())
+	require.Equal(t, codes.Error, jev.Status.Code)
+
+	require.Equal(t, autoRouterSpanName, route.Name)
+	require.Equal(t, "span", attributeValue(route.Attributes, "langfuse.observation.type").AsString())
+	require.JSONEq(t, `{"tier":"mid"}`, attributeValue(route.Attributes, "langfuse.observation.output").AsString())
+	require.Equal(t, "mid", attributeValue(route.Attributes, "langfuse.observation.metadata.tier").AsString())
+	require.Equal(t, "mid", attributeValue(route.Attributes, "langfuse.trace.metadata.auto_router_tier").AsString())
+	require.Equal(t, "WARNING", attributeValue(route.Attributes, "langfuse.observation.level").AsString())
 }

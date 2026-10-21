@@ -19,7 +19,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/pkg/autorouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -41,8 +40,6 @@ const (
 	traceContextKey         = "new_api_otel_trace"
 	llmRequestSpanName      = "newapi.llm.request"
 	relayAttemptSpanName    = "newapi.relay.attempt"
-	providerRequestSpanName = "newapi.provider.request"
-	streamSpanName          = "newapi.stream.consume"
 )
 
 type contentCaptureMode string
@@ -101,6 +98,19 @@ func ContentCaptureMode() string {
 }
 
 type runtimeContextKey struct{}
+
+type attemptContextKey struct{}
+
+// attemptState collects what one relay attempt learned from its upstream
+// response, exported as the attempt's output when it finishes.
+type attemptState struct {
+	started           time.Time
+	responded         bool
+	serverAddress     string
+	statusCode        int
+	upstreamRequestID string
+	headersMs         int64
+}
 
 type Runtime struct {
 	enabled         bool
@@ -337,47 +347,84 @@ func (r *Runtime) RecordInput(ctx context.Context, body []byte, format types.Rel
 	}
 }
 
-func (r *Runtime) StartAttempt(ctx context.Context, info *relaycommon.RelayInfo, channelID int, channelType int, channelName string) (context.Context, trace.Span) {
+// StartAttempt starts the span of one upstream attempt. What the attempt was
+// sent to and how it ended are recorded by FinishAttempt, so nothing here reads
+// RelayInfo while the relay may still be replacing it.
+func (r *Runtime) StartAttempt(ctx context.Context) (context.Context, trace.Span) {
 	if !r.Enabled() {
 		return ctx, trace.SpanFromContext(ctx)
 	}
 	ctx, span := r.tracer.Start(ctx, relayAttemptSpanName, trace.WithSpanKind(trace.SpanKindInternal))
-	span.SetAttributes(
-		attribute.Int("new_api.channel_id", channelID),
-		attribute.Int("new_api.channel_type", channelType),
-		attribute.String("new_api.channel_name", channelName),
-	)
 	setSessionID(span, sessionIDFromContext(ctx))
-	// RelayInfo is intentionally not read here. The relay may replace or clear
-	// it while selecting a channel; observability must never be able to panic
-	// the request path. The request/model attributes are recorded on the parent
-	// LLM span and the final upstream model is added when the attempt finishes.
-	return ctx, span
+	return context.WithValue(ctx, attemptContextKey{}, &attemptState{started: time.Now()}), span
 }
 
-func (r *Runtime) StartProviderRequest(ctx context.Context, info *relaycommon.RelayInfo, req *http.Request) (context.Context, trace.Span) {
-	if !r.Enabled() {
-		return ctx, trace.SpanFromContext(ctx)
+// RecordUpstreamResponse notes the upstream response headers on the current
+// attempt. headers_ms runs from the attempt start, so it covers request
+// conversion, connection setup and upstream queueing; for a stream the
+// headers usually arrive well before the first token.
+func (r *Runtime) RecordUpstreamResponse(ctx context.Context, req *http.Request, resp *http.Response) {
+	if !r.Enabled() || resp == nil {
+		return
 	}
-	ctx, span := r.tracer.Start(ctx, providerRequestSpanName, trace.WithSpanKind(trace.SpanKindClient))
+	state, _ := ctx.Value(attemptContextKey{}).(*attemptState)
+	if state == nil {
+		return
+	}
+	state.responded = true
+	state.statusCode = resp.StatusCode
+	state.headersMs = time.Since(state.started).Milliseconds()
+	state.upstreamRequestID = resp.Header.Get(common.RequestIdKey)
 	if req != nil && req.URL != nil {
-		span.SetAttributes(
-			attribute.String("server.address", req.URL.Hostname()),
-			attribute.String("url.path", req.URL.Path),
-			attribute.String("http.request.method", req.Method),
-		)
+		state.serverAddress = req.URL.Hostname()
 	}
-	setSessionID(span, sessionIDFromContext(ctx))
-	return ctx, span
 }
 
-func (r *Runtime) StartStream(ctx context.Context, info *relaycommon.RelayInfo) (context.Context, trace.Span) {
-	if !r.Enabled() {
-		return ctx, trace.SpanFromContext(ctx)
+// AttemptTarget is what one relay attempt was sent to.
+type AttemptTarget struct {
+	RetryIndex    int    `json:"retry_index"`
+	ChannelID     int    `json:"channel_id"`
+	ChannelName   string `json:"channel_name"`
+	ChannelType   int    `json:"channel_type"`
+	UpstreamModel string `json:"upstream_model"`
+}
+
+// FinishAttempt ends an attempt span with its target as input and its outcome
+// as output. statusCode is the gateway's status for the attempt. A stream that
+// ended abnormally without an error marks the attempt WARNING.
+func (r *Runtime) FinishAttempt(ctx context.Context, span trace.Span, target AttemptTarget, statusCode int, streamStatus *relaycommon.StreamStatus, err error) {
+	if !r.Enabled() || span == nil {
+		return
 	}
-	ctx, span := r.tracer.Start(ctx, streamSpanName, trace.WithSpanKind(trace.SpanKindInternal))
-	setSessionID(span, sessionIDFromContext(ctx))
-	return ctx, span
+	output := map[string]any{"status_code": statusCode}
+	if state, _ := ctx.Value(attemptContextKey{}).(*attemptState); state != nil && state.responded {
+		output["upstream_status_code"] = state.statusCode
+		output["headers_ms"] = state.headersMs
+		output["server_address"] = state.serverAddress
+		if state.upstreamRequestID != "" {
+			output["upstream_request_id"] = state.upstreamRequestID
+		}
+	}
+	observation := Observation{
+		Input:  target,
+		Output: output,
+		Metadata: map[string]string{
+			"channel_id":   strconv.Itoa(target.ChannelID),
+			"channel_name": target.ChannelName,
+			"status_code":  strconv.Itoa(statusCode),
+		},
+		Err: err,
+	}
+	if streamStatus != nil {
+		output["stream_end_reason"] = string(streamStatus.EndReason)
+		if !streamStatus.IsNormalEnd() || streamStatus.HasErrors() {
+			observation.Warning = "stream ended: " + string(streamStatus.EndReason)
+		}
+	}
+	if err != nil {
+		output["error"] = err.Error()
+	}
+	r.FinishObservation(span, observation)
 }
 
 func (r *Runtime) Inject(ctx context.Context, req *http.Request) {
@@ -459,51 +506,6 @@ func (r *Runtime) recordUsage(ctx context.Context, promptTokens, completionToken
 			span.SetAttributes(attribute.String("langfuse.observation.cost_details", string(cost)))
 		}
 	}
-}
-
-// RecordAutoRouter writes the jev classification behind an "auto" request into
-// the generation's metadata, one filterable key per field. Requests resolved
-// from the decision cache did not call jev and record nothing.
-func (r *Runtime) RecordAutoRouter(ctx context.Context, result *autorouter.Result) {
-	if !r.Enabled() || result == nil || result.Jev == nil {
-		return
-	}
-	span := generationSpanFromContext(ctx)
-	if !span.IsRecording() {
-		return
-	}
-	const prefix = "langfuse.observation.metadata.auto_router_"
-	formatFloat := func(value float64) string { return strconv.FormatFloat(value, 'f', 4, 64) }
-	attrs := []attribute.KeyValue{
-		attribute.String(prefix+"version", autorouter.QuestionsVersion),
-		attribute.String(prefix+"requested_model", autorouter.AutoModel),
-		attribute.String(prefix+"resolved_model", result.ResolvedModel),
-		attribute.String(prefix+"route_model", result.Model),
-		attribute.String(prefix+"route_effort", result.Effort),
-		attribute.String(prefix+"source", result.Source),
-		attribute.String(prefix+"jev_endpoint", result.Jev.Endpoint),
-		attribute.String(prefix+"jev_latency_ms", strconv.FormatInt(result.Jev.LatencyMs, 10)),
-	}
-	if result.Jev.Error != "" {
-		attrs = append(attrs, attribute.String(prefix+"jev_error", result.Jev.Error))
-	}
-	if len(result.Jev.Response) > 0 {
-		attrs = append(attrs, attribute.String(prefix+"jev_raw", string(result.Jev.Response)))
-	}
-	if decision := result.Decision; decision != nil {
-		attrs = append(attrs,
-			attribute.String(prefix+"task_type", decision.TaskType),
-			attribute.String(prefix+"task_type_prob", formatFloat(decision.TaskTypeProbability)),
-			attribute.String(prefix+"difficulty", strconv.Itoa(decision.Difficulty)),
-		)
-		if decision.TaskChange != nil {
-			attrs = append(attrs, attribute.String(prefix+"task_change", formatFloat(*decision.TaskChange)))
-		}
-		if decision.LargerModelBenefit != nil {
-			attrs = append(attrs, attribute.String(prefix+"larger_model_benefit", formatFloat(*decision.LargerModelBenefit)))
-		}
-	}
-	span.SetAttributes(attrs...)
 }
 
 func validBillingCostDetails(costs *BillingCostDetails) bool {
@@ -629,17 +631,6 @@ func (r *Runtime) shouldRecordContent(err error) bool {
 func resolveCaptureMode() contentCaptureMode {
 	mode, _ := normalizeCaptureMode(os.Getenv("NEW_API_OTEL_CAPTURE_MODE"))
 	return mode
-}
-
-func (r *Runtime) FinishSpan(span trace.Span, err error) {
-	if !r.Enabled() || span == nil {
-		return
-	}
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-	}
-	span.End()
 }
 
 func TraceID(ctx context.Context) string {

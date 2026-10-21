@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,11 +11,15 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // fakeJev answers by the current task: "hard" is a very difficult coding task,
@@ -161,6 +166,89 @@ func TestResolveAutoModelAuxiliarySkipsJev(t *testing.T) {
 	assert.Equal(t, "general-medium", result.ResolvedModel)
 	assert.Equal(t, autorouter.SourceDefault, result.Source)
 	assert.Equal(t, int32(0), calls.Load())
+}
+
+func TestResolveAutoModelTraceSpans(t *testing.T) {
+	newTracedContext := func(t *testing.T, tokenID int, body string) (*gin.Context, *tracetest.InMemoryExporter) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)))
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		c := newAutoRouterContext(tokenID, body)
+		c.Request = c.Request.WithContext(observability.ContextWithRuntimeForTest(c.Request.Context(), provider))
+		return c, exporter
+	}
+	spansByName := func(exporter *tracetest.InMemoryExporter) map[string]tracetest.SpanStub {
+		spans := map[string]tracetest.SpanStub{}
+		for _, span := range exporter.GetSpans() {
+			spans[span.Name] = span
+		}
+		return spans
+	}
+	attr := func(span tracetest.SpanStub, key string) string {
+		for _, kv := range span.Attributes {
+			if string(kv.Key) == key {
+				return kv.Value.AsString()
+			}
+		}
+		return ""
+	}
+	body := `{"messages":[{"role":"user","content":"hard"}]}`
+
+	t.Run("jev called then cache hit", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+
+		c, exporter := newTracedContext(t, 9601, body)
+		_, err := ResolveAutoModel(c, allModelsAvailable)
+		require.NoError(t, err)
+		spans := spansByName(exporter)
+		require.Len(t, spans, 2)
+		route, jev := spans["newapi.auto_router"], spans["newapi.jev.classify"]
+		assert.Equal(t, route.SpanContext.SpanID(), jev.Parent.SpanID())
+		assert.Equal(t, "generation", attr(jev, "langfuse.observation.type"))
+		assert.Contains(t, attr(jev, "langfuse.observation.input"), `"current_task":"hard"`)
+		assert.Contains(t, attr(jev, "langfuse.observation.output"), `"task_type"`)
+		assert.Equal(t, autorouter.SourceJev, attr(route, "langfuse.observation.metadata.source"))
+		assert.Equal(t, "coder-xhigh", attr(route, "langfuse.observation.metadata.resolved_model"))
+		assert.Equal(t, "coder", attr(route, "langfuse.trace.metadata.auto_router_model"))
+		assert.Equal(t, "xhigh", attr(route, "langfuse.trace.metadata.auto_router_effort"))
+		assert.Empty(t, attr(route, "langfuse.observation.level"))
+
+		c, exporter = newTracedContext(t, 9601, body)
+		_, err = ResolveAutoModel(c, allModelsAvailable)
+		require.NoError(t, err)
+		spans = spansByName(exporter)
+		require.Len(t, spans, 1, "a cache hit must not record a jev call")
+		assert.Equal(t, autorouter.SourceCache, attr(spans["newapi.auto_router"], "langfuse.observation.metadata.source"))
+	})
+
+	t.Run("jev timeout", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 200*time.Millisecond).URL, 50)
+
+		c, exporter := newTracedContext(t, 9602, body)
+		_, err := ResolveAutoModel(c, allModelsAvailable)
+		require.NoError(t, err)
+		spans := spansByName(exporter)
+		require.Len(t, spans, 2)
+		assert.Equal(t, codes.Error, spans["newapi.jev.classify"].Status.Code)
+		route := spans["newapi.auto_router"]
+		assert.Equal(t, "WARNING", attr(route, "langfuse.observation.level"))
+		assert.Contains(t, attr(route, "langfuse.observation.status_message"), "jev failed")
+	})
+
+	t.Run("no available model", func(t *testing.T) {
+		useAutoRouterSetting(t, "", 1000)
+
+		c, exporter := newTracedContext(t, 9603, `{"messages":[{"role":"user","content":"[SUGGESTION MODE: next prompt]"}]}`)
+		_, err := ResolveAutoModel(c, func(string) bool { return false })
+		require.Error(t, err)
+		spans := spansByName(exporter)
+		require.Len(t, spans, 1)
+		route := spans["newapi.auto_router"]
+		assert.Equal(t, codes.Error, route.Status.Code)
+		assert.JSONEq(t, `{"auxiliary":true}`, attr(route, "langfuse.observation.input"))
+	})
 }
 
 func TestAutoRouterListedOnlyWhenResolvable(t *testing.T) {
