@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	appI18n "github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
@@ -68,9 +69,9 @@ func TestDistributeRecordsIselfEmailWithoutAffinity(t *testing.T) {
 			require.False(t, c.IsAborted())
 			assert.Equal(t, tt.want, common.GetContextKeyString(c, constant.ContextKeyIselfEmail))
 			assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
-			adminInfo := map[string]interface{}{}
-			service.AppendChannelAffinityAdminInfo(c, adminInfo)
-			assert.Empty(t, adminInfo, "recording an email must not mark affinity as used")
+			other := model.NewLogOther()
+			service.AppendChannelAffinityAdminInfo(c, other)
+			assert.Empty(t, other.Snapshot(), "recording an email must not mark affinity as used")
 		})
 	}
 }

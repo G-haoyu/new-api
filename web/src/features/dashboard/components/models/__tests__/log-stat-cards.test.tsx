@@ -94,6 +94,42 @@ afterEach(() => {
 })
 
 describe('LogStatCards analytics cards', () => {
+  test('shows upstream cache totals alongside scoped quality metrics', async () => {
+    get.mockImplementation(async (url: string) => ({
+      data: {
+        success: true,
+        data: url.startsWith('/api/data/analytics')
+          ? { summary: SUMMARY, rows: [] }
+          : [
+              {
+                count: 10,
+                quota: 0,
+                token_used: 1000,
+                cache_read_tokens: 320,
+                cache_creation_tokens: 180,
+              },
+            ],
+      },
+    }))
+    renderCards(ROLE.ADMIN)
+
+    expect(
+      await within(
+        screen.getByRole('group', { name: 'Cache Read' })
+      ).findByText('320')
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('group', { name: 'Cache Write' })).getByText(
+        '180'
+      )
+    ).toBeInTheDocument()
+    expect(
+      await within(
+        screen.getByRole('group', { name: 'Success rate' })
+      ).findByText('95%')
+    ).toBeInTheDocument()
+  })
+
   test('admin sees success rate, cache hit rate and active users from the summary', async () => {
     respondWithSummary(SUMMARY)
     renderCards(ROLE.ADMIN)

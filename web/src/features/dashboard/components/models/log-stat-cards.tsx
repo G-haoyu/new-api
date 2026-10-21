@@ -69,7 +69,7 @@ interface StatCellItem {
   hints?: string[]
 }
 
-const MAX_INLINE_STAT_CHARS = 9
+const MAX_INLINE_STAT_CHARS = 7
 
 function formatStatNumber(value: number, locale: Intl.LocalesArgument) {
   const fullValue = formatNumber(value, locale)
@@ -126,7 +126,11 @@ function StatCell(props: { item: StatCellItem; className?: string }) {
     <div
       role='group'
       aria-labelledby={titleId}
-      className={cn('min-w-0 px-2.5 py-1.5 sm:px-5 sm:py-4', props.className)}
+      aria-busy={props.item.loading}
+      className={cn(
+        'min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-4 xl:px-4',
+        props.className
+      )}
     >
       <div className='flex min-w-0 items-center gap-1.5 sm:gap-2'>
         <IconBadge
@@ -161,11 +165,9 @@ export function LogStatCards(props: LogStatCardsProps) {
   const statCardsConfig = useModelStatCardsConfig()
   const user = useAuthStore((state) => state.auth.user)
   const isAdmin = !!(user?.role && user.role >= 10)
-  const [stats, setStats] = useState<{
-    totalQuota: number
-    totalCount: number
-    totalTokens: number
-  } | null>(null)
+  const [stats, setStats] = useState<ReturnType<
+    typeof calculateDashboardStats
+  > | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
@@ -246,6 +248,8 @@ export function LogStatCards(props: LogStatCardsProps) {
     rpm: stats?.totalCount ?? 0,
     quota: stats?.totalQuota ?? 0,
     tpm: stats?.totalTokens ?? 0,
+    cacheRead: stats?.totalCacheReadTokens ?? 0,
+    cacheCreation: stats?.totalCacheCreationTokens ?? 0,
   }
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
 
@@ -336,7 +340,7 @@ export function LogStatCards(props: LogStatCardsProps) {
 
   return (
     <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-5'>
+      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-7'>
         {volumeItems.map((item, idx) => (
           <StatCell
             key={item.key}
@@ -359,6 +363,11 @@ export function LogStatCards(props: LogStatCardsProps) {
           />
         ))}
       </div>
+      {/*<p className='text-muted-foreground border-t px-3 py-2 text-xs'>*/}
+      {/*  {t(*/}
+      {/*    'Cache usage is recorded only after the upgrade; historical data is not backfilled.'*/}
+      {/*  )}*/}
+      {/*</p>*/}
     </div>
   )
 }

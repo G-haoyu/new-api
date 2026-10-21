@@ -57,6 +57,7 @@ const defaultModelSettings: ModelSettings = {
   ExposeRatioEnabled: false,
   'billing_setting.billing_mode': '{}',
   'billing_setting.billing_expr': '{}',
+  'billing_setting.plugin_billing_expr': '{}',
   'tool_price_setting.prices': '{}',
   TopupGroupRatio: '',
   GroupRatio: '',
@@ -91,7 +92,8 @@ const defaultModelSettings: ModelSettings = {
   'monitor_setting.channel_model_recovery_concurrency': 4,
   'monitor_setting.channel_model_event_retention_days': 30,
   'monitor_setting.channel_model_wecom_bot_enabled': false,
-  'monitor_setting.channel_model_wecom_bot_url': 'https://alertplus.intsig.net/api/alarm/receive/',
+  'monitor_setting.channel_model_wecom_bot_url':
+    'https://alertplus.intsig.net/api/alarm/receive/',
   'monitor_setting.channel_model_wecom_bot_webhook_key_configured': false,
   'monitor_setting.channel_model_wecom_bot_contact': '',
   'channel_affinity_setting.enabled': false,

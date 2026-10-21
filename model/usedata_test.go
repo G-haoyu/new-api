@@ -41,7 +41,7 @@ func TestRecordConsumeLogWritesExtendedQuotaDataColumns(t *testing.T) {
 			name: "anthropic falls back to cache_creation_tokens",
 			params: RecordConsumeLogParams{ModelName: "claude-semantic", PromptTokens: 100, CompletionTokens: 50,
 				DashboardTokenUsed: &anthropicTotal, UseTimeSeconds: 4, OutcomeTracked: true,
-				Other: map[string]interface{}{"usage_semantic": "anthropic", "cache_tokens": 300, "cache_creation_tokens": 200}},
+				Other: &LogOther{public: map[string]any{"usage_semantic": "anthropic", "cache_tokens": 300, "cache_creation_tokens": 200}}},
 			tokenUsed: 650, inputTokens: 600, completionTokens: 50, cacheReadTokens: 300, cacheWriteTokens: 200,
 			trackedCount: 1, useTimeTotal: 4, useTimeCount: 1,
 		},
@@ -49,27 +49,27 @@ func TestRecordConsumeLogWritesExtendedQuotaDataColumns(t *testing.T) {
 			name: "anthropic prefers normalized cache_write_tokens",
 			params: RecordConsumeLogParams{ModelName: "claude-split", PromptTokens: 40, CompletionTokens: 20,
 				DashboardTokenUsed: &explicitWriteTotal, UseTimeSeconds: 2, OutcomeTracked: true,
-				Other: map[string]interface{}{"cache_tokens": 10, "cache_creation_tokens": 5, "cache_write_tokens": 30}},
+				Other: &LogOther{public: map[string]any{"cache_tokens": 10, "cache_creation_tokens": 5, "cache_write_tokens": 30}}},
 			tokenUsed: 100, inputTokens: 80, completionTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 30,
 			trackedCount: 1, useTimeTotal: 2, useTimeCount: 1,
 		},
 		{
 			name: "openai prompt tokens already include cache",
 			params: RecordConsumeLogParams{ModelName: "gpt-openai", PromptTokens: 1000, CompletionTokens: 100, UseTimeSeconds: 3,
-				OutcomeTracked: true, Other: map[string]interface{}{"cache_tokens": 400}},
+				OutcomeTracked: true, Other: &LogOther{public: map[string]any{"cache_tokens": 400}}},
 			tokenUsed: 1100, inputTokens: 1000, completionTokens: 100, cacheReadTokens: 400,
 			trackedCount: 1, useTimeTotal: 3, useTimeCount: 1,
 		},
 		{
 			name: "interrupted stream counts as stream error without latency",
 			params: RecordConsumeLogParams{ModelName: "gpt-stream-error", PromptTokens: 20, CompletionTokens: 10, UseTimeSeconds: 9, IsStream: true,
-				OutcomeTracked: true, Other: map[string]interface{}{"stream_status": map[string]interface{}{"status": "error", "end_reason": "timeout"}}},
+				OutcomeTracked: true, Other: &LogOther{public: map[string]any{"stream_status": map[string]interface{}{"status": "error", "end_reason": "timeout"}}}},
 			tokenUsed: 30, inputTokens: 20, completionTokens: 10, trackedCount: 1, streamErrorCount: 1,
 		},
 		{
 			name: "completed stream keeps latency",
 			params: RecordConsumeLogParams{ModelName: "gpt-stream-ok", PromptTokens: 20, CompletionTokens: 10, UseTimeSeconds: 5, IsStream: true,
-				OutcomeTracked: true, Other: map[string]interface{}{"stream_status": map[string]interface{}{"status": "ok", "end_reason": "done"}}},
+				OutcomeTracked: true, Other: &LogOther{public: map[string]any{"stream_status": map[string]interface{}{"status": "ok", "end_reason": "done"}}}},
 			tokenUsed: 30, inputTokens: 20, completionTokens: 10, trackedCount: 1, useTimeTotal: 5, useTimeCount: 1,
 		},
 		{
@@ -82,7 +82,7 @@ func TestRecordConsumeLogWritesExtendedQuotaDataColumns(t *testing.T) {
 			// Paths without final-failure tracking must not affect success rates.
 			name: "untracked path keeps volume but no outcome metrics",
 			params: RecordConsumeLogParams{ModelName: "mj-imagine", Quota: 30, UseTimeSeconds: 7,
-				Other: map[string]interface{}{"stream_status": map[string]interface{}{"status": "error"}}},
+				Other: &LogOther{public: map[string]any{"stream_status": map[string]interface{}{"status": "error"}}}},
 			tokenUsed: 0,
 		},
 	}
@@ -106,8 +106,9 @@ func TestRecordConsumeLogWritesExtendedQuotaDataColumns(t *testing.T) {
 			assert.Equal(t, tt.tokenUsed, row.TokenUsed)
 			assert.Equal(t, tt.inputTokens, row.InputTokens)
 			assert.Equal(t, tt.completionTokens, row.CompletionTokens)
-			assert.Equal(t, tt.cacheReadTokens, row.CacheReadTokens)
+			assert.Equal(t, int64(tt.cacheReadTokens), row.CacheReadTokens)
 			assert.Equal(t, tt.cacheWriteTokens, row.CacheWriteTokens)
+			assert.Equal(t, int64(tt.cacheWriteTokens), row.CacheCreationTokens)
 			assert.Equal(t, tt.trackedCount, row.TrackedCount)
 			assert.Equal(t, tt.useTimeTotal, row.UseTimeTotal)
 			assert.Equal(t, tt.useTimeCount, row.UseTimeCount)
@@ -143,7 +144,7 @@ func TestLogQuotaDataFinalFailureAccumulatesAcrossFlushes(t *testing.T) {
 	LogQuotaData(failure(hour + 500))
 	LogQuotaData(QuotaDataLogParams{UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: hour + 300,
 		UseGroup: "default", TokenID: 11, ChannelID: 3, NodeName: "node-a", Quota: 70, TokenUsed: 40, UseTimeSeconds: 2,
-		OutcomeTracked: true})
+		CacheReadTokens: 12, CacheWriteTokens: 7, CacheCreationTokens: 7, OutcomeTracked: true})
 	SaveQuotaDataCache()
 	row = loadRow()
 	assert.Equal(t, 1, row.Count)
@@ -151,6 +152,9 @@ func TestLogQuotaDataFinalFailureAccumulatesAcrossFlushes(t *testing.T) {
 	assert.Equal(t, 2, row.FailedCount)
 	assert.Equal(t, 70, row.Quota)
 	assert.Equal(t, 40, row.TokenUsed)
+	assert.Equal(t, int64(12), row.CacheReadTokens)
+	assert.Equal(t, 7, row.CacheWriteTokens)
+	assert.Equal(t, int64(7), row.CacheCreationTokens)
 	assert.Equal(t, int64(2), row.UseTimeTotal)
 	assert.Equal(t, int64(1), row.UseTimeCount)
 	assert.Equal(t, int64(hour+500), row.LastCalledAt)
@@ -160,6 +164,8 @@ func TestLogQuotaDataFinalFailureAccumulatesAcrossFlushes(t *testing.T) {
 	SaveQuotaDataCache()
 	row = loadRow()
 	assert.Equal(t, 3, row.FailedCount)
+	assert.Equal(t, int64(12), row.CacheReadTokens)
+	assert.Equal(t, int64(7), row.CacheCreationTokens)
 	assert.Equal(t, int64(hour+500), row.LastCalledAt)
 }
 
@@ -167,7 +173,7 @@ func TestLegacyQuotaDataReadersSkipFailureOnlyRows(t *testing.T) {
 	resetUsageAnalyticsState(t)
 	hour := int64(36000)
 	rows := []QuotaData{
-		{UserID: 1, Username: "alice", ModelName: "gpt-a", UseGroup: "default", CreatedAt: hour, Count: 2, Quota: 100, TokenUsed: 50, LastCalledAt: hour + 1},
+		{UserID: 1, Username: "alice", ModelName: "gpt-a", UseGroup: "default", CreatedAt: hour, Count: 2, Quota: 100, TokenUsed: 50, CacheReadTokens: 12, CacheCreationTokens: 7, LastCalledAt: hour + 1},
 		{UserID: 1, Username: "alice", ModelName: "gpt-broken", UseGroup: "default", CreatedAt: hour, FailedCount: 3, LastCalledAt: hour + 2},
 		{UserID: 2, Username: "bob", ModelName: "gpt-a", UseGroup: "default", CreatedAt: hour, FailedCount: 1, LastCalledAt: hour + 3},
 	}
@@ -180,6 +186,8 @@ func TestLegacyQuotaDataReadersSkipFailureOnlyRows(t *testing.T) {
 	require.Len(t, all, 1)
 	assert.Equal(t, "gpt-a", all[0].ModelName)
 	assert.Equal(t, 2, all[0].Count)
+	assert.Equal(t, int64(12), all[0].CacheReadTokens)
+	assert.Equal(t, int64(7), all[0].CacheCreationTokens)
 
 	byUsername, err := GetAllQuotaDates(hour, hour+3600, "bob")
 	require.NoError(t, err)
@@ -189,11 +197,15 @@ func TestLegacyQuotaDataReadersSkipFailureOnlyRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, byUserID, 1)
 	assert.Equal(t, "gpt-a", byUserID[0].ModelName)
+	assert.Equal(t, int64(12), byUserID[0].CacheReadTokens)
+	assert.Equal(t, int64(7), byUserID[0].CacheCreationTokens)
 
 	byUser, err := GetQuotaDataGroupByUser(hour, hour+3600)
 	require.NoError(t, err)
 	require.Len(t, byUser, 1)
 	assert.Equal(t, "alice", byUser[0].Username)
+	assert.Equal(t, int64(12), byUser[0].CacheReadTokens)
+	assert.Equal(t, int64(7), byUser[0].CacheCreationTokens)
 
 	flow, err := GetFlowQuotaData(hour, hour+3600, "", 0, common.RoleAdminUser)
 	require.NoError(t, err)
