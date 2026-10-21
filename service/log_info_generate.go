@@ -126,6 +126,9 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	}
 
 	AppendRelayLogAdminInfo(ctx, relayInfo, other)
+	if autoRouterResult := GetAutoRouterResult(ctx); autoRouterResult != nil {
+		other.SetAdmin("auto_router", autoRouterResult)
+	}
 	AppendResponseModelLogInfo(relayInfo, other)
 	appendRequestPath(ctx, relayInfo, other)
 	appendRequestConversionChain(relayInfo, other)

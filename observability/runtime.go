@@ -19,6 +19,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -458,6 +459,50 @@ func (r *Runtime) recordUsage(ctx context.Context, promptTokens, completionToken
 			span.SetAttributes(attribute.String("langfuse.observation.cost_details", string(cost)))
 		}
 	}
+}
+
+// RecordAutoRouter writes the jev classification behind an "auto" request into
+// the generation's metadata, one filterable key per field. Requests resolved
+// from the decision cache did not call jev and record nothing.
+func (r *Runtime) RecordAutoRouter(ctx context.Context, result *autorouter.Result) {
+	if !r.Enabled() || result == nil || result.Jev == nil {
+		return
+	}
+	span := generationSpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	const prefix = "langfuse.observation.metadata.auto_router_"
+	formatFloat := func(value float64) string { return strconv.FormatFloat(value, 'f', 4, 64) }
+	attrs := []attribute.KeyValue{
+		attribute.String(prefix+"version", autorouter.QuestionsVersion),
+		attribute.String(prefix+"requested_model", autorouter.AutoModel),
+		attribute.String(prefix+"resolved_model", result.ResolvedModel),
+		attribute.String(prefix+"tier", result.Tier),
+		attribute.String(prefix+"source", result.Source),
+		attribute.String(prefix+"jev_endpoint", result.Jev.Endpoint),
+		attribute.String(prefix+"jev_latency_ms", strconv.FormatInt(result.Jev.LatencyMs, 10)),
+	}
+	if result.Jev.Error != "" {
+		attrs = append(attrs, attribute.String(prefix+"jev_error", result.Jev.Error))
+	}
+	if len(result.Jev.Response) > 0 {
+		attrs = append(attrs, attribute.String(prefix+"jev_raw", string(result.Jev.Response)))
+	}
+	if decision := result.Decision; decision != nil {
+		attrs = append(attrs,
+			attribute.String(prefix+"task_type", decision.TaskType),
+			attribute.String(prefix+"task_type_prob", formatFloat(decision.TaskTypeProbability)),
+			attribute.String(prefix+"difficulty", strconv.Itoa(decision.Difficulty)),
+		)
+		if decision.TaskChange != nil {
+			attrs = append(attrs, attribute.String(prefix+"task_change", formatFloat(*decision.TaskChange)))
+		}
+		if decision.LargerModelBenefit != nil {
+			attrs = append(attrs, attribute.String(prefix+"larger_model_benefit", formatFloat(*decision.LargerModelBenefit)))
+		}
+	}
+	span.SetAttributes(attrs...)
 }
 
 func validBillingCostDetails(costs *BillingCostDetails) bool {

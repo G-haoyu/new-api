@@ -65,11 +65,17 @@ func Distribute() func(c *gin.Context) {
 		if workload := strings.TrimSpace(modelRequest.Workload); workload != "" {
 			common.SetContextKey(c, constant.ContextKeySchedulerWorkload, workload)
 		}
+		autoRouting := shouldSelectChannel && service.IsAutoRouterRequest(c, modelRequest.Model)
 		_, pinned, _ := constraints.ResolvedPin()
+		if pinned && autoRouting {
+			abortWithOpenAiMessage(c, http.StatusBadRequest, "model auto is not supported for a token pinned to a channel")
+			return
+		}
 		if !pinned {
 			// Select a channel for the user
 			// check token model mapping
 			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+			var tokenModelLimit map[string]bool
 			if modelLimitEnable {
 				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
 				if !ok {
@@ -77,12 +83,12 @@ func Distribute() func(c *gin.Context) {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
 					return
 				}
-				var tokenModelLimit map[string]bool
 				tokenModelLimit, ok = s.(map[string]bool)
 				if !ok {
 					tokenModelLimit = map[string]bool{}
 				}
-				if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) {
+			// "auto" is not a whitelist entry; it resolves to a whitelisted model below.
+			if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) && !autoRouting {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
 					return
 				}
@@ -110,13 +116,30 @@ func Distribute() func(c *gin.Context) {
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, playgroundRequest.Group)
 					}
 				}
+
+				if autoRouting {
+					usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+					result, err := service.ResolveAutoModel(c, func(candidate string) bool {
+						if modelLimitEnable {
+							if !TokenModelLimitAllows(tokenModelLimit, candidate) {
+								return false
+							}
+						}
+						return len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0
+					})
+					if err != nil {
+						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, err.Error(), types.ErrorCodeModelNotFound)
+						return
+					}
+					modelRequest.Model = result.ResolvedModel
+				}
 			}
 		}
 		if !pinned && shouldSelectChannel {
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectGroup string
 			if service.SchedulerClient().Enabled {
-				setSchedulerAllowedChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path)
+				common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, usableChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path))
 			}
 			if service.SchedulerEnforcedForRequest(c) {
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
@@ -220,10 +243,11 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-// setSchedulerAllowedChannelIDs projects new-api's effective group/model
-// permissions into the Scheduler request. Scheduler ranks endpoints, but it
-// must never rank a channel outside the native permission scope.
-func setSchedulerAllowedChannelIDs(c *gin.Context, modelName, usingGroup, requestPath string) {
+// usableChannelIDs is new-api's effective group/model permission scope: the
+// enabled channels of the group (or auto groups) that serve the model on this
+// request path. Scheduler must never rank a channel outside it, and the auto
+// router only picks models that have one.
+func usableChannelIDs(c *gin.Context, modelName, usingGroup, requestPath string) []int {
 	groups := []string{usingGroup}
 	if usingGroup == "auto" {
 		groups = service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
@@ -244,7 +268,7 @@ func setSchedulerAllowedChannelIDs(c *gin.Context, modelName, usingGroup, reques
 		ids = append(ids, channelID)
 	}
 	slices.Sort(ids)
-	common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, ids)
+	return ids
 }
 
 // getModelFromRequest 从请求中读取模型信息

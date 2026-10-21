@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/ai360"
@@ -266,7 +267,18 @@ func ListModels(c *gin.Context, modelType int) {
 	if len(ownerGroups) > 0 {
 		ownerByModel = getPreferredModelOwners(userModelNames, ownerGroups)
 	}
-	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames))
+	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames)+1)
+	if service.AutoRouterListed(userModelNames) {
+		userOpenAiModels = append(userOpenAiModels, dto.OpenAIModels{
+			Id:      autorouter.AutoModel,
+			Object:  "model",
+			Created: 1626777600,
+			OwnedBy: "new-api",
+			SupportedEndpointTypes: []constant.EndpointType{
+				constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse, constant.EndpointTypeAnthropic,
+			},
+		})
+	}
 	for _, modelName := range userModelNames {
 		userOpenAiModels = append(userOpenAiModels, buildOpenAIModel(modelName, ownerByModel))
 	}

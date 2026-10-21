@@ -15,6 +15,7 @@ import (
 
 	rootcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -1090,4 +1091,63 @@ func attributeValue(attrs []attribute.KeyValue, key string) attribute.Value {
 		}
 	}
 	return attribute.Value{}
+}
+
+func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
+	newRuntime := func(t *testing.T) (*Runtime, *tracetest.InMemoryExporter) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := trace.NewTracerProvider(trace.WithSpanProcessor(trace.NewSimpleSpanProcessor(exporter)))
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		return &Runtime{
+			enabled:         true,
+			captureMode:     captureModeFull,
+			captureMaxBytes: 1024,
+			tracerProvider:  provider,
+			tracer:          provider.Tracer("test"),
+			propagator:      propagationTraceContextForTest(),
+		}, exporter
+	}
+	taskChange, benefit := 0.25, 0.75
+	decision := &autorouter.Decision{TaskType: "coding", TaskTypeProbability: 0.9, Difficulty: 3, TaskChange: &taskChange, LargerModelBenefit: &benefit}
+	info := &common.RelayInfo{RequestId: "req-auto", OriginModelName: "large", RelayFormat: "openai"}
+	request := &dto.GeneralOpenAIRequest{Model: "large"}
+	const prefix = "langfuse.observation.metadata.auto_router_"
+
+	t.Run("jev called", func(t *testing.T) {
+		runtime, exporter := newRuntime(t)
+		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
+		runtime.RecordAutoRouter(ctx, &autorouter.Result{
+			ResolvedModel: "large", Tier: autorouter.TierHigh, Source: autorouter.SourceJev, Decision: decision,
+			Jev: &autorouter.JevCall{Endpoint: "http://jev.test", LatencyMs: 180, Response: []byte(`{"answers":{}}`)},
+		})
+		runtime.FinishLLM(ctx, span, nil, info)
+
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		attrs := spans[0].Attributes
+		require.Equal(t, autorouter.QuestionsVersion, attributeValue(attrs, prefix+"version").AsString())
+		require.Equal(t, "auto", attributeValue(attrs, prefix+"requested_model").AsString())
+		require.Equal(t, "large", attributeValue(attrs, prefix+"resolved_model").AsString())
+		require.Equal(t, "high", attributeValue(attrs, prefix+"tier").AsString())
+		require.Equal(t, "coding", attributeValue(attrs, prefix+"task_type").AsString())
+		require.Equal(t, "3", attributeValue(attrs, prefix+"difficulty").AsString())
+		require.Equal(t, "0.2500", attributeValue(attrs, prefix+"task_change").AsString())
+		require.Equal(t, "0.7500", attributeValue(attrs, prefix+"larger_model_benefit").AsString())
+		require.Equal(t, "180", attributeValue(attrs, prefix+"jev_latency_ms").AsString())
+		require.Equal(t, `{"answers":{}}`, attributeValue(attrs, prefix+"jev_raw").AsString())
+		require.Equal(t, "", attributeValue(attrs, prefix+"jev_error").AsString())
+	})
+
+	t.Run("cache hit", func(t *testing.T) {
+		runtime, exporter := newRuntime(t)
+		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
+		runtime.RecordAutoRouter(ctx, &autorouter.Result{ResolvedModel: "large", Tier: autorouter.TierHigh, Source: autorouter.SourceCache, Decision: decision})
+		runtime.FinishLLM(ctx, span, nil, info)
+
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		for _, attr := range spans[0].Attributes {
+			require.False(t, strings.HasPrefix(string(attr.Key), prefix), "cache hit wrote %s", attr.Key)
+		}
+	})
 }

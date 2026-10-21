@@ -147,6 +147,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if otelRuntime != nil {
 		traceCtx, llmSpan = otelRuntime.StartLLMRequest(traceCtx, relayInfo, request)
 		c.Request = c.Request.WithContext(traceCtx)
+		otelRuntime.RecordAutoRouter(traceCtx, service.GetAutoRouterResult(c))
 		// The raw client body keeps unknown fields that DTO round-trips would
 		// drop; the client-format strip in RecordClientRequest removes the
 		// conversation context so only request parameters remain.
