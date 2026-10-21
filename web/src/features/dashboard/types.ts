@@ -175,6 +175,159 @@ export interface ProcessedFlowData {
 }
 
 // ============================================================================
+// Usage Analytics Types (/api/data/analytics, /api/data/analytics/self)
+// ============================================================================
+
+export type UsageAnalyticsGroupBy =
+  | 'summary'
+  | 'model'
+  | 'user'
+  | 'user_model'
+  | 'model_channel'
+
+// Aggregated quota_data counters shared by the summary and every grouped row.
+export interface UsageMetrics {
+  // Consume requests including stream-interrupted ones.
+  request_count: number
+  quota: number
+  token_used: number
+  input_tokens: number
+  completion_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  // Seconds; successful, non-interrupted requests only.
+  use_time_total: number
+  use_time_count: number
+  stream_error_count: number
+  // Final failures after retries (a request retried across channels counts once).
+  failed_count: number
+  // Requests recorded after the detailed counters existed (legacy rows excluded).
+  tracked_count: number
+  // Unix seconds; 0 when only legacy rows matched.
+  last_called_at: number
+}
+
+export interface UsageAnalyticsSummary extends UsageMetrics {
+  active_users: number
+  model_count: number
+}
+
+// Dimension fields are present only when they are part of the grouping.
+export interface UsageAnalyticsRow extends UsageMetrics {
+  model_name?: string
+  user_id?: number
+  username?: string
+  display_name?: string
+  channel_id?: number
+  channel_name?: string
+  user_count?: number
+}
+
+export interface UsageAnalyticsParams {
+  start_timestamp: number
+  end_timestamp: number
+  group_by: UsageAnalyticsGroupBy
+  username?: string
+  model?: string
+}
+
+export interface UsageAnalyticsData {
+  summary: UsageAnalyticsSummary | null
+  rows: UsageAnalyticsRow[]
+}
+
+// ============================================================================
+// Peak TPM Types (/api/data/peak-tpm)
+// ============================================================================
+
+export interface PeakTpmParams {
+  start_timestamp: number
+  end_timestamp: number
+  username?: string
+  model?: string
+}
+
+export interface PeakTpmPoint {
+  // Unix seconds at the start of the hour.
+  hour: number
+  // Highest per-minute token sum observed within the hour.
+  peak_tpm: number
+}
+
+export interface IselfUsageRow {
+  email: string
+  source: 'iself'
+  model_name: string
+  request_count: number
+  quota: number
+  input_tokens: number
+  completion_tokens: number
+  token_used: number
+  last_called_at: number
+}
+
+export type IselfUsageParams = Omit<UsageAnalyticsParams, 'group_by'>
+
+// ============================================================================
+// Model Availability Types (/api/perf-metrics/availability)
+// ============================================================================
+
+export type ModelAvailabilityMinutes = 10 | 30 | 60
+
+export interface ModelAvailabilityRow {
+  model_name: string
+  success_count: number
+  stream_error_count: number
+  failed_count: number
+  total_tokens: number
+  last_called_at: number
+}
+
+export type ModelAvailabilityCounts = Pick<
+  ModelAvailabilityRow,
+  'success_count' | 'stream_error_count' | 'failed_count'
+>
+
+export interface ModelAvailabilityData {
+  minutes: number
+  start_timestamp: number
+  end_timestamp: number
+  // Hard failures come from error logs; when logging is off, failed_count
+  // stays 0 and availability is overstated.
+  error_log_enabled: boolean
+  models: ModelAvailabilityRow[]
+}
+
+export type ModelAvailabilityStatusId =
+  | 'insufficient_samples'
+  | 'stable'
+  | 'fair'
+  | 'degraded'
+  | 'unstable'
+
+export interface ModelAvailabilityStatus {
+  id: ModelAvailabilityStatusId
+  // English i18n key; render with t(status.labelKey).
+  labelKey: string
+}
+
+export interface RankedModelAvailabilityRow extends ModelAvailabilityRow {
+  // 1-based position after ranking.
+  rank: number
+  // success + stream_error + failed.
+  total: number
+  // Success percentage (0-100); null when total is 0.
+  rate: number | null
+  // Wilson score lower bound as a percentage (0-100); 0 when total is 0.
+  wilson: number
+  // Share of all requests in the window, percentage (0-100).
+  share: number
+  rpm: number
+  tpm: number
+  status: ModelAvailabilityStatus
+}
+
+// ============================================================================
 // Uptime Monitoring Types
 // ============================================================================
 

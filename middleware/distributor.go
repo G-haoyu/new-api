@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"slices"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +38,24 @@ type ModelRequest struct {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		// Record the configured email header independently of affinity routing.
+	emailHeader:
+		for _, rule := range operation_setting.GetChannelAffinitySetting().Rules {
+			for _, source := range rule.KeySources {
+				if source.Type != "request_header" {
+					continue
+				}
+				if email := strings.TrimSpace(c.GetHeader(source.Key)); email != "" {
+					address, err := mail.ParseAddress(email)
+					if err != nil || address.Address != email {
+						continue
+					}
+					common.SetContextKey(c, constant.ContextKeyIselfEmail, email)
+					break emailHeader
+				}
+			}
+		}
+
 		var channel *model.Channel
 		defer func() {
 			if c.Writer.Status() >= 400 {

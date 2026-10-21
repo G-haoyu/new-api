@@ -55,7 +55,9 @@ func rankingBucketExpr(bucketSize int64) string {
 	return fmt.Sprintf("(created_at / %d) * %d", bucketSize, bucketSize)
 }
 
+// Exclude failure-only rows from usage rankings.
 func applyRankingQuotaTimeRange(query *gorm.DB, startTime int64, endTime int64) *gorm.DB {
+	query = query.Where("count > 0")
 	if startTime > 0 {
 		query = query.Where("created_at >= ?", startTime)
 	}

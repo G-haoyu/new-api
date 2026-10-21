@@ -32,6 +32,13 @@ export {
   openExternalSpeedTest,
   getDefaultPingStatus,
 } from './api-info'
+export {
+  avgUseTime,
+  cacheHitRate,
+  rankAvailability,
+  ratePerMinute,
+  successRate,
+} from './analytics'
 export { processChartData, processUserChartData } from './charts'
 export {
   buildDashboardFlowData,
@@ -41,7 +48,6 @@ export {
   getFlowStages,
 } from './flow'
 export {
-  buildModelMetrics,
   calculateDashboardStats,
   getDashboardDurationMinutes,
   safeDivide,

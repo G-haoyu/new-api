@@ -20,8 +20,16 @@ import { api } from '@/lib/api'
 
 import type {
   FlowQuotaDataItem,
+  IselfUsageParams,
+  IselfUsageRow,
+  ModelAvailabilityData,
+  ModelAvailabilityMinutes,
+  PeakTpmParams,
+  PeakTpmPoint,
   QuotaDataItem,
   UptimeGroupResult,
+  UsageAnalyticsData,
+  UsageAnalyticsParams,
 } from './types'
 
 // ============================================================================
@@ -48,6 +56,50 @@ export async function getUserQuotaDates(
     endpoint,
     { params }
   )
+  return res.data
+}
+
+export async function getUsageAnalytics(
+  params: UsageAnalyticsParams,
+  isAdmin = false
+) {
+  const endpoint = isAdmin ? '/api/data/analytics' : '/api/data/analytics/self'
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: UsageAnalyticsData
+  }>(endpoint, { params })
+  return res.data
+}
+
+// Admin-only hourly peaks; hours without traffic are omitted.
+export async function getPeakTpm(params: PeakTpmParams) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: PeakTpmPoint[]
+  }>('/api/data/peak-tpm', { params })
+  return res.data
+}
+
+export async function getIselfUsage(params: IselfUsageParams, isAdmin = false) {
+  const endpoint = isAdmin ? '/api/data/iself' : '/api/data/iself/self'
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: IselfUsageRow[]
+  }>(endpoint, { params })
+  return res.data
+}
+
+export async function getModelAvailability(
+  minutes: ModelAvailabilityMinutes = 10
+) {
+  const res = await api.get<{
+    success: boolean
+    message?: string
+    data?: ModelAvailabilityData
+  }>('/api/perf-metrics/availability', { params: { minutes } })
   return res.data
 }
 
