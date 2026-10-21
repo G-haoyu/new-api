@@ -733,6 +733,15 @@ export const STATIC_I18N_KEYS = [
   'The model that was requested',
   'The upstream channel that served the requests',
 
+  // Dashboard labels from constants.ts
+  '60 Days',
+  '90 Days',
+  'Insufficient samples',
+  'Stable',
+  'Fair',
+  'Degraded',
+  'Unstable',
+
   // API token audit events
   'Create API token',
   'Create API token “{{name}}”',
