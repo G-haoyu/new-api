@@ -905,6 +905,7 @@
     "Batch testing models...": "モデルをバッチテスト中...",
     "Batch updated channel status ({{count}}/{{total}} changed)": "チャネルの状態を一括更新（{{count}}/{{total}} 件変更）",
     "Batch upstream model update": "上流モデル一括更新",
+    "Auto router model ranking": "自動ルーティングのモデルランキング更新",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "一括上流モデル更新を処理しました：{{channels}} チャネル、{{added}} 個追加、{{removed}} 個削除、{{fails}} 個失敗",
     "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}": "Vertex AI キーの一括追加には JSON 配列が必要です（例：{{example}}）。入力を確認してください：{{error}}",
     "Before conversion": "変換前",

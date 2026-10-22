@@ -905,6 +905,7 @@
     "Batch testing models...": "正在批量测试模型...",
     "Batch updated channel status ({{count}}/{{total}} changed)": "批量更新渠道状态（{{count}}/{{total}} 个已变更）",
     "Batch upstream model update": "上游模型批量更新",
+    "Auto router model ranking": "智能路由模型榜单更新",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "已批量处理上游模型更新：渠道 {{channels}} 个，加入 {{added}} 个，删除 {{removed}} 个，失败 {{fails}} 个",
     "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}": "批量添加 Vertex AI 必须使用标准的 JSON 数组格式，例如 {{example}}，请检查输入：{{error}}",
     "Before conversion": "迁移前",

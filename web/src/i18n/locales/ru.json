@@ -905,6 +905,7 @@
     "Batch testing models...": "Пакетное тестирование моделей...",
     "Batch updated channel status ({{count}}/{{total}} changed)": "Массовое обновление статусов каналов (изменено: {{count}}/{{total}})",
     "Batch upstream model update": "Пакетное обновление вышестоящих моделей",
+    "Auto router model ranking": "Обновление рейтинга моделей автомаршрутизации",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "Пакетное обновление моделей: {{channels}} каналов, {{added}} добавлено, {{removed}} удалено, {{fails}} ошибок",
     "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}": "Для пакетного добавления ключей Vertex AI нужен массив JSON, например {{example}}. Проверьте ввод: {{error}}",
     "Before conversion": "До преобразования",

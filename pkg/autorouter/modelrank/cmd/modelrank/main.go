@@ -1,6 +1,7 @@
 // Command modelrank writes the autorouter ranking with its full evidence to a
-// file: the mapping embedded as the autorouter defaults, or a ranking to audit
-// offline.
+// file. The gateway refreshes the ranking itself on a schedule; this command
+// regenerates the mapping embedded as the first-boot default and audits a
+// ranking offline.
 //
 //	OPENROUTER_API_KEY=... go run ./pkg/autorouter/modelrank/cmd/modelrank
 //	go run ./pkg/autorouter/modelrank/cmd/modelrank -out /tmp/task_models.json -livebench-release 20261014

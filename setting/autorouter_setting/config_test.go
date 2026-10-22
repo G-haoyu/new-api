@@ -18,4 +18,6 @@ func TestDefaultsFromTaskModelsJSON(t *testing.T) {
 	for _, source := range []string{"generated_at", "openrouter_benchmarks", "livebench", "lmarena", "openrouter_usage"} {
 		assert.NotEmpty(t, s.RankSources[source], source)
 	}
+	assert.True(t, s.RankRefreshEnabled)
+	assert.Equal(t, 24, s.RankRefreshIntervalHours)
 }

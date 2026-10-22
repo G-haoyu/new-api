@@ -905,6 +905,7 @@
     "Batch testing models...": "Batch testing models...",
     "Batch updated channel status ({{count}}/{{total}} changed)": "Batch updated channel status ({{count}}/{{total}} changed)",
     "Batch upstream model update": "Batch upstream model update",
+    "Auto router model ranking": "Auto router model ranking",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed",
     "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}": "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}",
     "Before conversion": "Before conversion",

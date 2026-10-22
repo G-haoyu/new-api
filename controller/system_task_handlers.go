@@ -2,17 +2,21 @@ package controller
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter/modelrank"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
-// update, and async task polling (Midjourney / Suno / video) jobs into the
+// update, auto router ranking and async task polling (Midjourney / Suno /
+// video) jobs into the
 // system task framework so a DB lease dedups execution across multiple master
 // instances and each run is recorded as one task row. Call this before
 // service.StartSystemTaskRunner.
@@ -22,6 +26,62 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(autoRouterRankHandler{})
+}
+
+// autoRouterRankHandler regenerates the auto router's task → model lists from
+// public leaderboards. One node builds them under the task lease and writes
+// the options; the others pick them up through the option sync, so a new
+// ranking takes effect everywhere without a restart.
+type autoRouterRankHandler struct{}
+
+func (autoRouterRankHandler) Type() string { return model.SystemTaskTypeAutoRouterRank }
+
+func (autoRouterRankHandler) Enabled() bool {
+	setting := autorouter_setting.GetAutoRouterSetting()
+	return setting.Enabled && setting.RankRefreshEnabled && os.Getenv("OPENROUTER_API_KEY") != ""
+}
+
+func (autoRouterRankHandler) Interval() time.Duration {
+	return time.Duration(max(autorouter_setting.GetAutoRouterSetting().RankRefreshIntervalHours, 1)) * time.Hour
+}
+
+func (autoRouterRankHandler) NewPayload() any { return nil }
+
+// Run leaves the current lists in place when any source fails, so a failed
+// refresh only delays the next ranking. rank_sources is written last and
+// marks a complete update.
+func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	cfg := modelrank.DefaultConfig()
+	cfg.APIKey = os.Getenv("OPENROUTER_API_KEY")
+	mapping, err := modelrank.Build(ctx, cfg)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	options := []struct {
+		key   string
+		value any
+	}{
+		{"autorouter_setting.task_models", mapping.TaskModels},
+		{"autorouter_setting.default_models", mapping.DefaultModels},
+		{"autorouter_setting.rank_sources", mapping.Sources},
+	}
+	for _, option := range options {
+		value, err := common.Marshal(option.value)
+		if err == nil {
+			err = model.UpdateOption(option.key, string(value))
+		}
+		if err != nil {
+			finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+			return
+		}
+	}
+	summary := map[string]any{"rank_sources": mapping.Sources, "default_models": len(mapping.DefaultModels)}
+	for taskType, models := range mapping.TaskModels {
+		summary[taskType] = map[string]any{"models": len(models), "top": models[:min(len(models), 3)]}
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 type channelModelRecoveryHandler struct{}

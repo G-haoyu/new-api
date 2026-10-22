@@ -905,6 +905,7 @@
     "Batch testing models...": "Đang kiểm thử mô hình hàng loạt...",
     "Batch updated channel status ({{count}}/{{total}} changed)": "Đã cập nhật trạng thái kênh hàng loạt ({{count}}/{{total}} đã thay đổi)",
     "Batch upstream model update": "Cập nhật mô hình thượng nguồn hàng loạt",
+    "Auto router model ranking": "Cập nhật bảng xếp hạng mô hình định tuyến tự động",
     "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed": "Đã áp dụng cập nhật hàng loạt mô hình upstream: {{channels}} kênh, {{added}} đã thêm, {{removed}} đã xóa, {{fails}} thất bại",
     "Batch-adding Vertex AI keys requires a JSON array, for example {{example}}. Check the input: {{error}}": "Thêm hàng loạt khóa Vertex AI cần một mảng JSON, ví dụ {{example}}. Hãy kiểm tra dữ liệu nhập: {{error}}",
     "Before conversion": "Trước khi chuyển đổi",
