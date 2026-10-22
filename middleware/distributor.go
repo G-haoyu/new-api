@@ -87,8 +87,8 @@ func Distribute() func(c *gin.Context) {
 				if !ok {
 					tokenModelLimit = map[string]bool{}
 				}
-			// "auto" is not a whitelist entry; it resolves to a whitelisted model below.
-			if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) && !autoRouting {
+				// "auto" is not a whitelist entry; it resolves to a whitelisted model below.
+				if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) && !autoRouting {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
 					return
 				}
@@ -119,13 +119,34 @@ func Distribute() func(c *gin.Context) {
 
 				if autoRouting {
 					usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
-					result, err := service.ResolveAutoModel(c, func(candidate string) bool {
-						if modelLimitEnable {
-							if !TokenModelLimitAllows(tokenModelLimit, candidate) {
-								return false
+					// The task and default lists hold every ranked model, each
+					// probed in up to five effort variants, so availability is
+					// memoized per request; without the memory cache every
+					// channel lookup is a query, so candidates are first narrowed
+					// to the groups' enabled models with one query per group.
+					var enabled map[string]bool
+					if !common.MemoryCacheEnabled {
+						enabled = map[string]bool{}
+						groups := []string{usingGroup}
+						if usingGroup == "auto" {
+							groups = service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+						}
+						for _, group := range groups {
+							for _, name := range model.GetGroupEnabledModels(group) {
+								enabled[name] = true
 							}
 						}
-						return len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0
+					}
+					usable := map[string]bool{}
+					result, err := service.ResolveAutoModel(c, func(candidate string) bool {
+						if ok, seen := usable[candidate]; seen {
+							return ok
+						}
+						ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
+							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)]) &&
+							len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0
+						usable[candidate] = ok
+						return ok
 					})
 					if err != nil {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, err.Error(), types.ErrorCodeModelNotFound)
