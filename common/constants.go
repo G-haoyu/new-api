@@ -127,6 +127,17 @@ var TurnstileSecretKey = ""
 var TelegramBotToken = ""
 var TelegramBotName = ""
 
+var HoidcEnabled = false
+var HoidcLoginPage = ""
+var HoidcSsoApi = ""
+var HoidcPlatformId = ""
+var HoidcAllowSignup = false
+var HoidcEnforceSso = false
+var SsoSyncEnabled = false
+var SsoUserListApiUrl = ""
+var SsoUserListPlatformId = ""
+var SsoUserListSecret = ""
+
 var QuotaForNewUser = 0
 var QuotaForInviter = 0
 var QuotaForInvitee = 0
@@ -249,6 +260,7 @@ var RateLimitKeyExpirationDuration = 20 * time.Minute
 const (
 	UserStatusEnabled  = 1 // don't use 0, 0 is the default value!
 	UserStatusDisabled = 2 // also don't use 0
+	UserStatusResigned = 3 // SSO user not seen in sync for 3+ days
 )
 
 const (

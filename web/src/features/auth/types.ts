@@ -107,6 +107,8 @@ export interface SystemStatus {
     telegram_oauth?: boolean
     telegram_oauth_configured?: boolean
     telegram_bot_name?: string
+    hoidc_enabled?: boolean
+    hoidc_enforce_sso?: boolean
     passkey_login?: boolean
     wechat_login?: boolean
     wechat_qrcode?: string
@@ -154,6 +156,8 @@ export interface SystemStatus {
   telegram_oauth?: boolean
   telegram_oauth_configured?: boolean
   telegram_bot_name?: string
+  hoidc_enabled?: boolean
+  hoidc_enforce_sso?: boolean
   passkey_login?: boolean
   wechat_login?: boolean
   wechat_qrcode?: string

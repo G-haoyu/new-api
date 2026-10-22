@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Link } from '@tanstack/react-router'
-import { Loader2, LogIn, KeyRound } from 'lucide-react'
+import { Loader2, LogIn, KeyRound, Shield } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -120,8 +120,14 @@ export function UserAuthForm({
     status?.telegram_oauth ||
     (status?.custom_oauth_providers?.length ?? 0) > 0
   )
+  const hoidcEnabled = Boolean(
+    status?.hoidc_enabled ?? status?.data?.hoidc_enabled
+  )
+  const hoidcEnforceSso = Boolean(
+    status?.hoidc_enforce_sso ?? status?.data?.hoidc_enforce_sso
+  )
   const hasAlternativeLogin =
-    passkeyLoginEnabled || hasWeChatLogin || hasOAuthLogin
+    passkeyLoginEnabled || hasWeChatLogin || hasOAuthLogin || hoidcEnabled
 
   useEffect(() => {
     if (requiresLegalConsent) {
@@ -299,9 +305,14 @@ export function UserAuthForm({
     }
   }
 
+  function handleSsoLogin() {
+    const redirect = redirectTo || '/model-square'
+    window.location.href = `/api/sso/hoidc/login?redirect=${encodeURIComponent(redirect)}`
+  }
+
   const alternativeLoginMethods = (
     <>
-      {passkeyLoginEnabled && (
+      {!hoidcEnforceSso && passkeyLoginEnabled && (
         <div className='mt-2 space-y-1'>
           <Button
             type='button'
@@ -331,14 +342,18 @@ export function UserAuthForm({
         </div>
       )}
 
-      {/* OAuth Providers */}
-      <OAuthProviders
-        status={status}
-        redirectTo={redirectTo}
-        disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
-        onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
-        isWeChatLoading={isWeChatSubmitting}
-      />
+      {!hoidcEnforceSso && (
+        <>
+          {/* OAuth Providers */}
+          <OAuthProviders
+            status={status}
+            redirectTo={redirectTo}
+            disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
+            onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
+            isWeChatLoading={isWeChatSubmitting}
+          />
+        </>
+      )}
     </>
   )
 
@@ -351,7 +366,7 @@ export function UserAuthForm({
       >
         {hasAlternativeLogin && alternativeLoginMethods}
 
-        {passwordLoginEnabled && (
+        {passwordLoginEnabled && !hoidcEnforceSso && (
           <>
             {/* Username Field */}
             <FormField
@@ -395,10 +410,24 @@ export function UserAuthForm({
               )}
             />
 
+            {/* SSO Login Button */}
+            {hoidcEnabled && (
+              <Button
+                type='button'
+                variant='outline'
+                className='w-full justify-center gap-2'
+                disabled={requiresLegalConsent && !agreedToLegal}
+                onClick={handleSsoLogin}
+              >
+                <Shield className='h-4 w-4' />
+                {t('SSO Login')}
+              </Button>
+            )}
+
             {/* Submit Button */}
             <Button
               type='submit'
-              className='mt-2 w-full justify-center gap-2'
+              className='w-full justify-center gap-2'
               disabled={isLoading}
             >
               {isLoading ? <Loader2 className='animate-spin' /> : <LogIn />}

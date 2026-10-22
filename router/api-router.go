@@ -67,6 +67,14 @@ func SetApiRouter(router *gin.Engine) {
 		apiRouter.GET("/oauth/telegram/bind/:flow_token", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.TelegramLegacyAuth)
 		// Standard OAuth providers (GitHub, Discord, OIDC, LinuxDO, Telegram) - unified route
 		apiRouter.GET("/oauth/:provider", middleware.CriticalRateLimit(), middleware.DisableCache(), middleware.TryUserAuth(), controller.HandleOAuth)
+
+		// HOIDC SSO login/callback
+		ssoGroup := apiRouter.Group("/sso/hoidc")
+		{
+			ssoGroup.GET("/login", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.SsoHoidcLogin)
+			ssoGroup.GET("/callback", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.SsoHoidcCallback)
+		}
+
 		apiRouter.GET("/ratio_config", middleware.CriticalRateLimit(), controller.GetRatioConfig)
 
 		apiRouter.POST("/stripe/webhook", anonymousRequestBodyLimit, controller.StripeWebhook)
