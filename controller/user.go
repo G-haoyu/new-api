@@ -893,7 +893,7 @@ func UpdateSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	isSsoUser := currentUser.Password == ""
+	isSsoUser := common.HoidcEnforceSso && currentUser.Password == ""
 	if isSsoUser {
 		if passwordRequested {
 			common.ApiErrorT(c, "SSO users cannot change password")
