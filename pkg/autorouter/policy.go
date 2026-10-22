@@ -5,79 +5,141 @@ import "slices"
 // AutoModel is the model name a client sends to let the gateway pick one.
 const AutoModel = "auto"
 
-// Tiers in ascending capability order. A tier maps to an ordered model list;
-// reasoning effort is expressed by an effort-suffixed model name.
-const (
-	TierLow  = "low"
-	TierMid  = "mid"
-	TierHigh = "high"
-)
+// effortLadder lists reasoning efforts in ascending strength. A model supports
+// an effort when the effort-suffixed name (model + "-" + effort) is usable;
+// the channel adaptors turn that suffix into the provider's reasoning field.
+var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
-var tierOrder = []string{TierLow, TierMid, TierHigh}
-
-// Policy holds the tunable routing rules. The rules are provisional and will
-// be recalibrated against a labeled set.
+// Policy holds the tunable routing rules: the task type picks the model, the
+// difficulty picks the reasoning effort.
 type Policy struct {
-	// Tiers maps a tier to its models in preference order.
-	Tiers       map[string][]string
-	DefaultTier string
-	// UpgradeBenefit is the larger_model_benefit at or above which the tier
+	// TaskModels maps a jev task type to its models in preference order.
+	TaskModels map[string][]string
+	// DefaultModels serve a task type with no available model in TaskModels
+	// and a request with no usable classification.
+	DefaultModels []string
+	// DifficultyEfforts maps difficulty rungs (1-based) to efforts; rungs past
+	// the end use the last entry.
+	DifficultyEfforts []string
+	DefaultEffort     string
+	// UpgradeBenefit is the larger_model_benefit at or above which the effort
 	// goes up one rung.
 	UpgradeBenefit float64
 	// MinTaskTypeProbability is the task type probability below which the
-	// classification is not trusted and the previous tier is inherited.
+	// classification is not trusted and the previous route is inherited.
 	MinTaskTypeProbability float64
 	// ContinuationTaskChange is the task_change below which the request
-	// continues the previous task, so the tier may go up but never down — a
-	// downgrade mid-task would switch models and drop the prompt cache.
+	// continues the previous task: the model stays, so the prompt cache
+	// survives, and the effort may go up but never down.
 	ContinuationTaskChange float64
 }
 
-// SelectTier maps a jev decision to a tier. previousTier is the tier the
-// previous instruction was routed to, empty when unknown. inherited reports
-// that the decision was not trusted and the tier came from previousTier or
-// the default.
-func SelectTier(decision Decision, previousTier string, policy Policy) (tier string, inherited bool) {
-	fallback := policy.DefaultTier
-	if previousTier != "" {
-		fallback = previousTier
-	}
-	if decision.TaskType == "" || decision.TaskType == TaskTypeUnknown ||
-		decision.TaskTypeProbability < policy.MinTaskTypeProbability || decision.Difficulty == 0 {
-		return fallback, true
-	}
-
-	level := 0
-	switch {
-	case decision.Difficulty >= 3:
-		level = 2
-	case decision.Difficulty == 2:
-		level = 1
-	}
-	if decision.LargerModelBenefit != nil && *decision.LargerModelBenefit >= policy.UpgradeBenefit {
-		level = min(level+1, len(tierOrder)-1)
-	}
-	if previousLevel := slices.Index(tierOrder, previousTier); previousLevel > level &&
-		decision.TaskChange != nil && *decision.TaskChange < policy.ContinuationTaskChange {
-		level = previousLevel
-	}
-	return tierOrder[level], false
+// Route is a routing choice before it is resolved to a usable model name.
+type Route struct {
+	// TaskType is the task type the model was chosen for, empty for defaults.
+	TaskType string `json:"task_type,omitempty"`
+	Model    string `json:"model"`
+	Effort   string `json:"effort"`
 }
 
-// Where a tier came from.
+// SelectRoute maps a jev decision to a route. decision is nil when jev failed;
+// previous is the route of the previous instruction, nil when unknown.
+// inherited reports that the decision was not used and the route came from
+// previous or the defaults. ok is false when no model is available at all.
+func SelectRoute(decision *Decision, previous *Route, policy Policy, available func(model string) bool) (route Route, inherited, ok bool) {
+	trusted := decision != nil && decision.TaskType != "" && decision.TaskType != TaskTypeUnknown &&
+		decision.TaskTypeProbability >= policy.MinTaskTypeProbability && decision.Difficulty > 0
+	if !trusted {
+		if previous != nil && ModelAvailable(previous.Model, available) {
+			return *previous, true, true
+		}
+		model, found := firstAvailable(policy.DefaultModels, available)
+		return Route{Model: model, Effort: policy.DefaultEffort}, true, found
+	}
+
+	effort := policy.DefaultEffort
+	if len(policy.DifficultyEfforts) > 0 {
+		effort = policy.DifficultyEfforts[min(decision.Difficulty, len(policy.DifficultyEfforts))-1]
+	}
+	if decision.LargerModelBenefit != nil && *decision.LargerModelBenefit >= policy.UpgradeBenefit {
+		if rank := slices.Index(effortLadder, effort); rank >= 0 && rank < len(effortLadder)-1 {
+			effort = effortLadder[rank+1]
+		}
+	}
+
+	if previous != nil && decision.TaskChange != nil && *decision.TaskChange < policy.ContinuationTaskChange &&
+		ModelAvailable(previous.Model, available) {
+		if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
+			effort = previous.Effort
+		}
+		return Route{TaskType: previous.TaskType, Model: previous.Model, Effort: effort}, false, true
+	}
+
+	if model, found := firstAvailable(policy.TaskModels[decision.TaskType], available); found {
+		return Route{TaskType: decision.TaskType, Model: model, Effort: effort}, false, true
+	}
+	model, found := firstAvailable(policy.DefaultModels, available)
+	return Route{Model: model, Effort: effort}, false, found
+}
+
+func firstAvailable(models []string, available func(model string) bool) (string, bool) {
+	for _, model := range models {
+		if ModelAvailable(model, available) {
+			return model, true
+		}
+	}
+	return "", false
+}
+
+// ModelAvailable reports whether model is usable bare or in any effort variant.
+func ModelAvailable(model string, available func(model string) bool) bool {
+	_, ok := ResolveVariant(model, "", available)
+	return ok
+}
+
+// ResolveVariant returns the usable name of model at effort: the exact
+// effort-suffixed name, else the bare name (the provider's default effort),
+// else the nearest supported effort, preferring the stronger one on a tie so a
+// missing variant never silently weakens reasoning. An effort outside the
+// ladder searches from medium.
+func ResolveVariant(model, effort string, available func(model string) bool) (string, bool) {
+	if model == "" {
+		return "", false
+	}
+	if effort != "" && available(model+"-"+effort) {
+		return model + "-" + effort, true
+	}
+	if available(model) {
+		return model, true
+	}
+	start := slices.Index(effortLadder, effort)
+	if start < 0 {
+		start = slices.Index(effortLadder, "medium")
+	}
+	for distance := 1; distance < len(effortLadder); distance++ {
+		for _, rank := range []int{start + distance, start - distance} {
+			if rank >= 0 && rank < len(effortLadder) && available(model+"-"+effortLadder[rank]) {
+				return model + "-" + effortLadder[rank], true
+			}
+		}
+	}
+	return "", false
+}
+
+// Where a route came from.
 const (
 	SourceJev     = "jev"     // jev ran and its decision was trusted
 	SourceCache   = "cache"   // the same instruction was routed before
-	SourceInherit = "inherit" // jev was untrusted or failed; previous tier kept
-	SourceDefault = "default" // no usable signal and no previous tier
+	SourceInherit = "inherit" // jev was untrusted or failed; previous route kept
+	SourceDefault = "default" // no usable signal and no previous route
 )
 
 // Result is the routing outcome of one request.
 type Result struct {
-	ResolvedModel string    `json:"resolved_model"`
-	Tier          string    `json:"tier"`
-	Source        string    `json:"source"`
-	Decision      *Decision `json:"decision,omitempty"`
+	ResolvedModel string `json:"resolved_model"`
+	Route
+	Source   string    `json:"source"`
+	Decision *Decision `json:"decision,omitempty"`
 	// Jev is set only when this request called jev, cache hits leave it nil.
 	Jev *JevCall `json:"jev,omitempty"`
 }
@@ -88,31 +150,4 @@ type JevCall struct {
 	Error     string `json:"error,omitempty"`
 	// Response is the raw jev response body.
 	Response []byte `json:"-"`
-}
-
-// PickModel returns the first available model of tier. When the tier has none,
-// it walks to the nearest tier, preferring the higher one on a tie so an empty
-// tier never silently degrades quality. It returns the tier actually used.
-func PickModel(tier string, tiers map[string][]string, available func(model string) bool) (model, usedTier string, ok bool) {
-	start := slices.Index(tierOrder, tier)
-	if start < 0 {
-		start = 1
-	}
-	for distance := 0; distance < len(tierOrder); distance++ {
-		levels := []int{start + distance}
-		if distance > 0 {
-			levels = append(levels, start-distance)
-		}
-		for _, level := range levels {
-			if level < 0 || level >= len(tierOrder) {
-				continue
-			}
-			for _, candidate := range tiers[tierOrder[level]] {
-				if available(candidate) {
-					return candidate, tierOrder[level], true
-				}
-			}
-		}
-	}
-	return "", "", false
 }

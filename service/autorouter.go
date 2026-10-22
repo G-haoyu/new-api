@@ -23,14 +23,14 @@ import (
 )
 
 const (
-	autoRouterCacheNamespace = "new-api:autorouter:v1"
+	autoRouterCacheNamespace = "new-api:autorouter:v2"
 	ginKeyAutoRouterResult   = "autorouter_result"
 )
 
 // autoRouterEntry is cached per instruction so every call of one agent loop
-// resolves to the same tier without calling jev again.
+// resolves to the same route without calling jev again.
 type autoRouterEntry struct {
-	Tier     string               `json:"tier"`
+	Route    autorouter.Route     `json:"route"`
 	Decision *autorouter.Decision `json:"decision,omitempty"`
 }
 
@@ -80,11 +80,13 @@ func AutoRouterListed(visible []string) bool {
 	if !setting.Enabled || slices.Contains(visible, autorouter.AutoModel) {
 		return false
 	}
-	for _, models := range setting.Tiers {
-		for _, m := range models {
-			if slices.Contains(visible, m) {
-				return true
-			}
+	isVisible := func(model string) bool { return slices.Contains(visible, model) }
+	if slices.ContainsFunc(setting.DefaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
+		return true
+	}
+	for _, models := range setting.TaskModels {
+		if slices.ContainsFunc(models, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
+			return true
 		}
 	}
 	return false
@@ -98,14 +100,15 @@ func autoRouterCacheKey(kind string, tokenID int, parts ...string) string {
 	return kind + ":" + hex.EncodeToString(sum[:])
 }
 
-// ResolveAutoModel picks the model for an "auto" request. available reports
-// whether a model is usable by this request (token whitelist, group abilities,
-// request path). A jev failure never fails the request: the tier falls back to
-// the previous instruction's tier or the default.
+// ResolveAutoModel picks the model and reasoning effort for an "auto" request.
+// available reports whether a model name is usable by this request (token
+// whitelist, group abilities, request path). A jev failure never fails the
+// request: the route falls back to the previous instruction's route or the
+// defaults.
 func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autorouter.Result, error) {
 	setting := autorouter_setting.GetAutoRouterSetting()
 	policy := setting.Policy()
-	result := &autorouter.Result{Tier: policy.DefaultTier, Source: autorouter.SourceDefault}
+	result := &autorouter.Result{Source: autorouter.SourceDefault}
 
 	var instruction autorouter.Instruction
 	if storage, err := common.GetBodyStorage(c); err == nil {
@@ -114,21 +117,24 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		}
 	}
 
+	ok := false
 	if !instruction.Auxiliary && instruction.Text != "" {
 		tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
 		cache := getAutoRouterCache()
 		ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
 		decisionKey := autoRouterCacheKey("d", tokenID, autorouter.QuestionsVersion, state["current_task"], state["previous_task"])
-		tierKey := autoRouterCacheKey("t", tokenID, instruction.Text)
+		routeKey := autoRouterCacheKey("r", tokenID, instruction.Text)
 
-		if entry, found, _ := cache.Get(decisionKey); found {
-			result.Tier, result.Decision, result.Source = entry.Tier, entry.Decision, autorouter.SourceCache
+		// A cached route whose model is no longer usable is routed again.
+		if entry, found, _ := cache.Get(decisionKey); found && autorouter.ModelAvailable(entry.Route.Model, available) {
+			result.Route, result.Decision, result.Source = entry.Route, entry.Decision, autorouter.SourceCache
+			ok = true
 		} else {
-			previousTier := ""
+			var previous *autorouter.Route
 			if instruction.Previous != "" {
-				if previous, found, _ := cache.Get(autoRouterCacheKey("t", tokenID, instruction.Previous)); found {
-					previousTier = previous.Tier
+				if entry, found, _ := cache.Get(autoRouterCacheKey("r", tokenID, instruction.Previous)); found {
+					previous = &entry.Route
 				}
 			}
 
@@ -138,39 +144,41 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 			response, err := client.Classify(ctx, state)
 			cancel()
 			result.Jev = &autorouter.JevCall{Endpoint: setting.JevEndpoint, LatencyMs: time.Since(started).Milliseconds()}
-
-			inherited := true
 			if err != nil {
 				result.Jev.Error = err.Error()
-				if previousTier != "" {
-					result.Tier = previousTier
-				}
 			} else {
 				result.Jev.Response = response.ResponseBody
 				decision := response.Decision(instruction.Previous != "")
 				result.Decision = &decision
-				result.Tier, inherited = autorouter.SelectTier(decision, previousTier, policy)
 			}
+
+			var inherited bool
+			result.Route, inherited, ok = autorouter.SelectRoute(result.Decision, previous, policy, available)
 			switch {
 			case !inherited:
 				result.Source = autorouter.SourceJev
-			case previousTier != "":
+			case previous != nil && result.Route == *previous:
 				result.Source = autorouter.SourceInherit
 			}
 			// A fallback is cached too, so a jev outage costs one timeout per
 			// instruction rather than one per agent-loop call, and the loop
 			// keeps one model.
-			entry := autoRouterEntry{Tier: result.Tier, Decision: result.Decision}
-			_ = cache.SetWithTTL(decisionKey, entry, ttl)
-			_ = cache.SetWithTTL(tierKey, entry, ttl)
+			if ok {
+				entry := autoRouterEntry{Route: result.Route, Decision: result.Decision}
+				_ = cache.SetWithTTL(decisionKey, entry, ttl)
+				_ = cache.SetWithTTL(routeKey, entry, ttl)
+			}
 		}
+	} else {
+		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available)
 	}
 
-	model, usedTier, ok := autorouter.PickModel(result.Tier, policy.Tiers, available)
+	if ok {
+		result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, available)
+	}
 	if !ok {
 		return result, errors.New("auto router found no available model for this token and group")
 	}
-	result.ResolvedModel, result.Tier = model, usedTier
 	c.Set(ginKeyAutoRouterResult, result)
 	if result.Decision != nil && result.Decision.TaskType != autorouter.TaskTypeUnknown &&
 		common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload) == "" {

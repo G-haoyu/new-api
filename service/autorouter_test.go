@@ -17,8 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeJev answers by the current task: "hard" is a difficult coding task,
-// "ok" is unclassifiable, anything else is a simple question.
+// fakeJev answers by the current task: "hard" is a very difficult coding task,
+// "ok" is unclassifiable, anything else is a simple question. Every answer
+// continues the previous task.
 func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -51,11 +52,13 @@ func useAutoRouterSetting(t *testing.T, endpoint string, timeoutMs int) {
 	setting.Enabled = true
 	setting.JevEndpoint = endpoint
 	setting.JevTimeoutMs = timeoutMs
-	setting.Tiers = map[string][]string{
-		autorouter.TierLow:  {"small"},
-		autorouter.TierMid:  {"medium"},
-		autorouter.TierHigh: {"large"},
+	setting.TaskModels = map[string][]string{
+		"coding":    {"coder"},
+		"direct_qa": {"chat"},
 	}
+	setting.DefaultModels = []string{"general"}
+	setting.DifficultyEfforts = []string{"low", "medium", "high", "xhigh"}
+	setting.DefaultEffort = "medium"
 }
 
 func newAutoRouterContext(tokenID int, body string) *gin.Context {
@@ -74,7 +77,8 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 
 	first, err := ResolveAutoModel(newAutoRouterContext(9101, body), allModelsAvailable)
 	require.NoError(t, err)
-	assert.Equal(t, "large", first.ResolvedModel)
+	assert.Equal(t, "coder-xhigh", first.ResolvedModel)
+	assert.Equal(t, autorouter.Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, first.Route)
 	assert.Equal(t, autorouter.SourceJev, first.Source)
 	require.NotNil(t, first.Jev)
 	assert.NotEmpty(t, first.Jev.Response)
@@ -82,7 +86,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	c := newAutoRouterContext(9101, body)
 	second, err := ResolveAutoModel(c, allModelsAvailable)
 	require.NoError(t, err)
-	assert.Equal(t, "large", second.ResolvedModel)
+	assert.Equal(t, "coder-xhigh", second.ResolvedModel)
 	assert.Equal(t, autorouter.SourceCache, second.Source)
 	assert.Nil(t, second.Jev, "a cache hit must not carry jev output")
 	assert.Equal(t, int32(1), calls.Load())
@@ -93,20 +97,27 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	assert.Equal(t, int32(2), calls.Load(), "another token must not share the decision")
 }
 
-func TestResolveAutoModelUnknownInheritsPreviousTier(t *testing.T) {
+func TestResolveAutoModelFollowsPreviousRoute(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
 
 	_, err := ResolveAutoModel(newAutoRouterContext(9201, `{"messages":[{"role":"user","content":"hard"}]}`), allModelsAvailable)
 	require.NoError(t, err)
 
-	result, err := ResolveAutoModel(newAutoRouterContext(9201, `{"messages":[
+	unknown, err := ResolveAutoModel(newAutoRouterContext(9201, `{"messages":[
 		{"role":"user","content":"hard"},{"role":"assistant","content":"done"},{"role":"user","content":"ok"}]}`), allModelsAvailable)
 	require.NoError(t, err)
-	assert.Equal(t, "large", result.ResolvedModel)
-	assert.Equal(t, autorouter.SourceInherit, result.Source)
-	require.NotNil(t, result.Decision)
-	assert.Equal(t, autorouter.TaskTypeUnknown, result.Decision.TaskType)
+	assert.Equal(t, "coder-xhigh", unknown.ResolvedModel)
+	assert.Equal(t, autorouter.SourceInherit, unknown.Source)
+	require.NotNil(t, unknown.Decision)
+	assert.Equal(t, autorouter.TaskTypeUnknown, unknown.Decision.TaskType)
+
+	continued, err := ResolveAutoModel(newAutoRouterContext(9201, `{"messages":[
+		{"role":"user","content":"hard"},{"role":"assistant","content":"done"},{"role":"user","content":"rename it"}]}`), allModelsAvailable)
+	require.NoError(t, err)
+	assert.Equal(t, "coder-xhigh", continued.ResolvedModel, "a continuation keeps the model and never lowers the effort")
+	assert.Equal(t, autorouter.SourceJev, continued.Source)
+	assert.Equal(t, "direct_qa", continued.Decision.TaskType)
 }
 
 func TestResolveAutoModelJevTimeoutFallsBackToDefault(t *testing.T) {
@@ -115,7 +126,7 @@ func TestResolveAutoModelJevTimeoutFallsBackToDefault(t *testing.T) {
 
 	result, err := ResolveAutoModel(newAutoRouterContext(9301, `{"messages":[{"role":"user","content":"hard"}]}`), allModelsAvailable)
 	require.NoError(t, err, "a jev failure must not fail the request")
-	assert.Equal(t, "medium", result.ResolvedModel)
+	assert.Equal(t, "general-medium", result.ResolvedModel)
 	assert.Equal(t, autorouter.SourceDefault, result.Source)
 	require.NotNil(t, result.Jev)
 	assert.NotEmpty(t, result.Jev.Error)
@@ -127,10 +138,15 @@ func TestResolveAutoModelOnlyPicksAvailableModels(t *testing.T) {
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
 	body := `{"messages":[{"role":"user","content":"hard"}]}`
 
-	result, err := ResolveAutoModel(newAutoRouterContext(9401, body), func(model string) bool { return model == "small" })
+	result, err := ResolveAutoModel(newAutoRouterContext(9401, body), func(model string) bool { return model == "coder-high" })
 	require.NoError(t, err)
-	assert.Equal(t, "small", result.ResolvedModel)
-	assert.Equal(t, autorouter.TierLow, result.Tier)
+	assert.Equal(t, "coder-high", result.ResolvedModel, "a missing effort variant falls to the nearest one")
+
+	result, err = ResolveAutoModel(newAutoRouterContext(9401, body), func(model string) bool { return model == "general" })
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "a cached route whose model is gone is routed again")
+	assert.Equal(t, "general", result.ResolvedModel, "the bare model runs at the provider default effort")
+	assert.Equal(t, "xhigh", result.Effort)
 
 	_, err = ResolveAutoModel(newAutoRouterContext(9401, body), func(string) bool { return false })
 	require.Error(t, err)
@@ -142,7 +158,7 @@ func TestResolveAutoModelAuxiliarySkipsJev(t *testing.T) {
 
 	result, err := ResolveAutoModel(newAutoRouterContext(9501, `{"messages":[{"role":"user","content":"[SUGGESTION MODE: next prompt]"}]}`), allModelsAvailable)
 	require.NoError(t, err)
-	assert.Equal(t, "medium", result.ResolvedModel)
+	assert.Equal(t, "general-medium", result.ResolvedModel)
 	assert.Equal(t, autorouter.SourceDefault, result.Source)
 	assert.Equal(t, int32(0), calls.Load())
 }
@@ -150,10 +166,11 @@ func TestResolveAutoModelAuxiliarySkipsJev(t *testing.T) {
 func TestAutoRouterListedOnlyWhenResolvable(t *testing.T) {
 	useAutoRouterSetting(t, "", 1000)
 
-	assert.True(t, AutoRouterListed([]string{"other", "medium"}))
-	assert.False(t, AutoRouterListed([]string{"other"}))
-	assert.False(t, AutoRouterListed([]string{"auto", "medium"}), "a real auto model is listed already")
+	assert.True(t, AutoRouterListed([]string{"other", "coder-high"}), "an effort variant makes its model resolvable")
+	assert.True(t, AutoRouterListed([]string{"general"}))
+	assert.False(t, AutoRouterListed([]string{"other", "coder-turbo"}))
+	assert.False(t, AutoRouterListed([]string{"auto", "chat"}), "a real auto model is listed already")
 
 	autorouter_setting.GetAutoRouterSetting().Enabled = false
-	assert.False(t, AutoRouterListed([]string{"medium"}))
+	assert.False(t, AutoRouterListed([]string{"chat"}))
 }

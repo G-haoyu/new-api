@@ -1117,7 +1117,7 @@ func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
 		runtime, exporter := newRuntime(t)
 		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
 		runtime.RecordAutoRouter(ctx, &autorouter.Result{
-			ResolvedModel: "large", Tier: autorouter.TierHigh, Source: autorouter.SourceJev, Decision: decision,
+			ResolvedModel: "large-high", Route: autorouter.Route{TaskType: "coding", Model: "large", Effort: "high"}, Source: autorouter.SourceJev, Decision: decision,
 			Jev: &autorouter.JevCall{Endpoint: "http://jev.test", LatencyMs: 180, Response: []byte(`{"answers":{}}`)},
 		})
 		runtime.FinishLLM(ctx, span, nil, info)
@@ -1127,8 +1127,9 @@ func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
 		attrs := spans[0].Attributes
 		require.Equal(t, autorouter.QuestionsVersion, attributeValue(attrs, prefix+"version").AsString())
 		require.Equal(t, "auto", attributeValue(attrs, prefix+"requested_model").AsString())
-		require.Equal(t, "large", attributeValue(attrs, prefix+"resolved_model").AsString())
-		require.Equal(t, "high", attributeValue(attrs, prefix+"tier").AsString())
+		require.Equal(t, "large-high", attributeValue(attrs, prefix+"resolved_model").AsString())
+		require.Equal(t, "large", attributeValue(attrs, prefix+"route_model").AsString())
+		require.Equal(t, "high", attributeValue(attrs, prefix+"route_effort").AsString())
 		require.Equal(t, "coding", attributeValue(attrs, prefix+"task_type").AsString())
 		require.Equal(t, "3", attributeValue(attrs, prefix+"difficulty").AsString())
 		require.Equal(t, "0.2500", attributeValue(attrs, prefix+"task_change").AsString())
@@ -1141,7 +1142,7 @@ func TestRecordAutoRouterWritesJevMetadataOnlyWhenJevRan(t *testing.T) {
 	t.Run("cache hit", func(t *testing.T) {
 		runtime, exporter := newRuntime(t)
 		ctx, span := runtime.StartLLMRequest(context.Background(), info, request)
-		runtime.RecordAutoRouter(ctx, &autorouter.Result{ResolvedModel: "large", Tier: autorouter.TierHigh, Source: autorouter.SourceCache, Decision: decision})
+		runtime.RecordAutoRouter(ctx, &autorouter.Result{ResolvedModel: "large-high", Route: autorouter.Route{TaskType: "coding", Model: "large", Effort: "high"}, Source: autorouter.SourceCache, Decision: decision})
 		runtime.FinishLLM(ctx, span, nil, info)
 
 		spans := exporter.GetSpans()

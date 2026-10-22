@@ -1,75 +1,90 @@
 package autorouter
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestSelectTier(t *testing.T) {
-	policy := Policy{DefaultTier: TierMid, UpgradeBenefit: 0.5, MinTaskTypeProbability: 0.5, ContinuationTaskChange: 0.5}
+func TestSelectRoute(t *testing.T) {
+	policy := Policy{
+		TaskModels: map[string][]string{
+			"coding":    {"coder", "coder-b"},
+			"direct_qa": {"chat"},
+			"review":    {"gone"},
+		},
+		DefaultModels:          []string{"general"},
+		DifficultyEfforts:      []string{"low", "medium", "high", "xhigh"},
+		DefaultEffort:          "medium",
+		UpgradeBenefit:         0.5,
+		MinTaskTypeProbability: 0.5,
+		ContinuationTaskChange: 0.5,
+	}
 	p := func(v float64) *float64 { return &v }
+	decide := func(taskType string, difficulty int, taskChange, benefit float64) *Decision {
+		return &Decision{TaskType: taskType, TaskTypeProbability: 0.9, Difficulty: difficulty, TaskChange: p(taskChange), LargerModelBenefit: p(benefit)}
+	}
+	coderHigh := &Route{TaskType: "coding", Model: "coder", Effort: "high"}
 	tests := []struct {
 		name          string
-		decision      Decision
-		previousTier  string
-		wantTier      string
+		decision      *Decision
+		previous      *Route
+		available     []string
+		want          Route
 		wantInherited bool
+		wantOK        bool
 	}{
-		{"simple task", Decision{TaskType: "direct_qa", TaskTypeProbability: 0.9, Difficulty: 1, TaskChange: p(1), LargerModelBenefit: p(0.1)}, "", TierLow, false},
-		{"medium task", Decision{TaskType: "coding", TaskTypeProbability: 0.9, Difficulty: 2, TaskChange: p(1), LargerModelBenefit: p(0.1)}, "", TierMid, false},
-		{"very hard task", Decision{TaskType: "operations", TaskTypeProbability: 0.9, Difficulty: 4, TaskChange: p(1), LargerModelBenefit: p(0.1)}, "", TierHigh, false},
-		{"larger model benefit upgrades", Decision{TaskType: "debugging", TaskTypeProbability: 0.9, Difficulty: 1, TaskChange: p(1), LargerModelBenefit: p(0.7)}, "", TierMid, false},
-		{"upgrade caps at high", Decision{TaskType: "debugging", TaskTypeProbability: 0.9, Difficulty: 3, TaskChange: p(1), LargerModelBenefit: p(0.9)}, "", TierHigh, false},
-		{"continuation never downgrades", Decision{TaskType: "review", TaskTypeProbability: 0.9, Difficulty: 1, TaskChange: p(0.1), LargerModelBenefit: p(0.1)}, TierHigh, TierHigh, false},
-		{"new task may downgrade", Decision{TaskType: "direct_qa", TaskTypeProbability: 0.9, Difficulty: 1, TaskChange: p(0.9), LargerModelBenefit: p(0.1)}, TierHigh, TierLow, false},
-		{"continuation may upgrade", Decision{TaskType: "debugging", TaskTypeProbability: 0.9, Difficulty: 4, TaskChange: p(0.1), LargerModelBenefit: p(0.1)}, TierLow, TierHigh, false},
-		{"unknown inherits previous", Decision{TaskType: TaskTypeUnknown, TaskTypeProbability: 0.9, Difficulty: 1}, TierHigh, TierHigh, true},
-		{"unknown without previous uses default", Decision{TaskType: TaskTypeUnknown, TaskTypeProbability: 0.9, Difficulty: 1}, "", TierMid, true},
-		{"low confidence inherits previous", Decision{TaskType: "coding", TaskTypeProbability: 0.3, Difficulty: 4}, TierLow, TierLow, true},
+		{"task picks model, difficulty picks effort", decide("coding", 2, 1, 0.1), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "medium"}, false, true},
+		{"simple question", decide("direct_qa", 1, 1, 0.1), nil, nil, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
+		{"larger model benefit raises effort", decide("coding", 3, 1, 0.7), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
+		{"rung past the table uses the last effort", decide("coding", 6, 1, 0.1), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
+		{"skips unavailable task model", decide("coding", 1, 1, 0.1), nil, []string{"coder-b-low", "general"}, Route{TaskType: "coding", Model: "coder-b", Effort: "low"}, false, true},
+		{"unconfigured task type uses defaults", decide("research", 4, 1, 0.1), nil, nil, Route{Model: "general", Effort: "xhigh"}, false, true},
+		{"unavailable task models use defaults", decide("review", 1, 1, 0.1), nil, []string{"general"}, Route{Model: "general", Effort: "low"}, false, true},
+		{"continuation keeps model and effort", decide("direct_qa", 1, 0.1, 0.1), coderHigh, nil, *coderHigh, false, true},
+		{"continuation may raise effort", decide("debugging", 4, 0.1, 0.1), coderHigh, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
+		{"new task switches model", decide("direct_qa", 1, 0.9, 0.1), coderHigh, nil, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
+		{"continuation leaves an unavailable model", decide("direct_qa", 1, 0.1, 0.1), coderHigh, []string{"chat"}, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
+		{"unknown inherits previous", decide(TaskTypeUnknown, 1, 0.1, 0.1), coderHigh, nil, *coderHigh, true, true},
+		{"low probability inherits previous", &Decision{TaskType: "direct_qa", TaskTypeProbability: 0.3, Difficulty: 1}, coderHigh, nil, *coderHigh, true, true},
+		{"jev failure without previous uses defaults", nil, nil, nil, Route{Model: "general", Effort: "medium"}, true, true},
+		{"unavailable previous uses defaults", nil, coderHigh, []string{"general"}, Route{Model: "general", Effort: "medium"}, true, true},
+		{"nothing available", decide("coding", 1, 1, 0.1), nil, []string{}, Route{}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tier, inherited := SelectTier(tt.decision, tt.previousTier, policy)
-			assert.Equal(t, tt.wantTier, tier)
+			available := func(model string) bool { return tt.available == nil || slices.Contains(tt.available, model) }
+			route, inherited, ok := SelectRoute(tt.decision, tt.previous, policy, available)
+			assert.Equal(t, tt.wantOK, ok)
+			if ok {
+				assert.Equal(t, tt.want, route)
+			}
 			assert.Equal(t, tt.wantInherited, inherited)
 		})
 	}
 }
 
-func TestPickModel(t *testing.T) {
-	tiers := map[string][]string{
-		TierLow:  {"low-a", "low-b"},
-		TierMid:  {"mid-a"},
-		TierHigh: {"high-a"},
-	}
+func TestResolveVariant(t *testing.T) {
 	tests := []struct {
 		name      string
-		tier      string
+		effort    string
 		available []string
-		wantModel string
-		wantTier  string
+		want      string
 		wantOK    bool
 	}{
-		{"first available in tier", TierLow, []string{"low-b", "low-a", "mid-a"}, "low-a", TierLow, true},
-		{"skips unavailable", TierLow, []string{"low-b", "mid-a"}, "low-b", TierLow, true},
-		{"empty tier prefers higher on tie", TierMid, []string{"low-a", "high-a"}, "high-a", TierHigh, true},
-		{"empty tier falls to nearest", TierHigh, []string{"low-a", "mid-a"}, "mid-a", TierMid, true},
-		{"walks two rungs", TierLow, []string{"high-a"}, "high-a", TierHigh, true},
-		{"nothing available", TierMid, nil, "", "", false},
+		{"exact variant", "high", []string{"m", "m-high"}, "m-high", true},
+		{"bare model is the provider default effort", "high", []string{"m", "m-low"}, "m", true},
+		{"nearest variant", "xhigh", []string{"m-high", "m-low"}, "m-high", true},
+		{"tie prefers stronger", "medium", []string{"m-low", "m-high"}, "m-high", true},
+		{"walks several rungs", "none", []string{"m-max"}, "m-max", true},
+		{"unknown effort searches from medium", "", []string{"m-low", "m-xhigh"}, "m-low", true},
+		{"other models do not count", "high", []string{"other-high"}, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, tier, ok := PickModel(tt.tier, tiers, func(m string) bool {
-				for _, a := range tt.available {
-					if a == m {
-						return true
-					}
-				}
-				return false
-			})
-			assert.Equal(t, tt.wantModel, model)
-			assert.Equal(t, tt.wantTier, tier)
+			model, ok := ResolveVariant("m", tt.effort, func(name string) bool { return slices.Contains(tt.available, name) })
+			assert.Equal(t, tt.want, model)
 			assert.Equal(t, tt.wantOK, ok)
 		})
 	}
