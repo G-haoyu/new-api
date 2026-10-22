@@ -335,6 +335,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
+		IselfEmail:        common.GetContextKeyString(c, constant.ContextKeyIselfEmail),
 	}
 	err := createLog(log)
 	if err != nil {
@@ -358,6 +359,7 @@ type RecordConsumeLogParams struct {
 	IsStream           bool              `json:"is_stream"`
 	Group              string            `json:"group"`
 	Other              *LogOther         `json:"other"`
+	OutcomeTracked     bool              `json:"-"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -422,18 +424,73 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		if params.DashboardTokenUsed != nil {
 			tokenUsed = *params.DashboardTokenUsed
 		}
+		inputTokens := params.PromptTokens
+		if params.DashboardTokenUsed != nil {
+			inputTokens = *params.DashboardTokenUsed - params.CompletionTokens
+		}
+		cacheRead, cacheWrite := extractCacheTokens(params.Other)
+		isStreamError := isOtherStreamError(params.Other)
 		LogQuotaData(QuotaDataLogParams{
-			UserID:    userId,
-			Username:  username,
-			ModelName: params.ModelName,
-			Quota:     params.Quota,
-			CreatedAt: createdAt,
-			TokenUsed: tokenUsed,
-			UseGroup:  params.Group,
-			TokenID:   params.TokenId,
-			ChannelID: params.ChannelId,
-			NodeName:  common.NodeName,
+			UserID:              userId,
+			Username:            username,
+			ModelName:           params.ModelName,
+			Quota:               params.Quota,
+			CreatedAt:           createdAt,
+			TokenUsed:           tokenUsed,
+			UseGroup:            params.Group,
+			TokenID:             params.TokenId,
+			ChannelID:           params.ChannelId,
+			NodeName:            common.NodeName,
+			InputTokens:         inputTokens,
+			CompletionTokens:    params.CompletionTokens,
+			CacheReadTokens:     int64(cacheRead),
+			CacheCreationTokens: int64(cacheWrite),
+			CacheWriteTokens:    cacheWrite,
+			UseTimeSeconds:      params.UseTimeSeconds,
+			IsStreamError:       isStreamError,
+			OutcomeTracked:      params.OutcomeTracked,
 		})
+	}
+}
+
+func otherIntValue(other map[string]interface{}, key string) int {
+	switch v := other[key].(type) {
+	case int:
+		return max(v, 0)
+	case int64:
+		return max(int(v), 0)
+	case float64:
+		return max(int(v), 0)
+	default:
+		return 0
+	}
+}
+
+// Prefer normalized cache writes, falling back to legacy cache_creation_tokens.
+func extractCacheTokens(other *LogOther) (cacheRead, cacheWrite int) {
+	if other == nil {
+		return 0, 0
+	}
+	cacheRead = otherIntValue(other.public, "cache_tokens")
+	cacheWrite = otherIntValue(other.public, "cache_write_tokens")
+	if cacheWrite == 0 {
+		cacheWrite = otherIntValue(other.public, "cache_creation_tokens")
+	}
+	return cacheRead, cacheWrite
+}
+
+func isOtherStreamError(other *LogOther) bool {
+	if other == nil {
+		return false
+	}
+	switch status := other.public["stream_status"].(type) {
+	case map[string]interface{}:
+		value, _ := status["status"].(string)
+		return value == "error"
+	case map[string]string:
+		return status["status"] == "error"
+	default:
+		return false
 	}
 }
 
@@ -631,37 +688,33 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 
 const logSearchCountLimit = 10000
 
+// logStreamStatusExpr extracts Other.stream_status.status for the log dialect.
+func logStreamStatusExpr(column string) (string, bool) {
+	switch common.LogDatabaseType() {
+	case common.DatabaseTypeSQLite:
+		return "json_extract(CASE WHEN json_valid(" + column + ") THEN " + column + " ELSE '{}' END, '$.stream_status.status')", true
+	case common.DatabaseTypeMySQL:
+		return "JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID(" + column + ") THEN " + column + " ELSE '{}' END, '$.stream_status.status'))", true
+	case common.DatabaseTypePostgreSQL:
+		return "CASE WHEN " + column + " ~ '^\\s*\\{.*\\}\\s*$' THEN (" + column + "::jsonb -> 'stream_status' ->> 'status') ELSE NULL END", true
+	case common.DatabaseTypeClickHouse:
+		return "JSONExtractString(" + column + ", 'stream_status', 'status')", true
+	default:
+		return "", false
+	}
+}
+
 // applyStreamErrorFilter restricts logs to records whose generated stream
-// status object reports an error. The Other column is text on all supported
-// databases, so each dialect uses its native JSON extractor while guarding
-// against legacy rows with an empty or invalid Other value.
 func applyStreamErrorFilter(tx *gorm.DB, column string, enabled bool) *gorm.DB {
 	if !enabled {
 		return tx
 	}
-
-	switch common.LogDatabaseType() {
-	case common.DatabaseTypeSQLite:
-		return tx.Where(
-			"json_extract(CASE WHEN json_valid("+column+") THEN "+column+" ELSE '{}' END, '$.stream_status.status') = ?",
-			"error",
-		)
-	case common.DatabaseTypeMySQL:
-		return tx.Where(
-			"JSON_UNQUOTE(JSON_EXTRACT(CASE WHEN JSON_VALID("+column+") THEN "+column+" ELSE '{}' END, '$.stream_status.status')) = ?",
-			"error",
-		)
-	case common.DatabaseTypePostgreSQL:
-		return tx.Where(
-			"CASE WHEN "+column+" ~ '^\\s*\\{.*\\}\\s*$' THEN ("+column+"::jsonb -> 'stream_status' ->> 'status') ELSE NULL END = ?",
-			"error",
-		)
-	case common.DatabaseTypeClickHouse:
-		return tx.Where("JSONExtractString("+column+", 'stream_status', 'status') = ?", "error")
-	default:
+	statusExpr, ok := logStreamStatusExpr(column)
+	if !ok {
 		common.SysError("stream error filter unsupported on log database type: " + string(common.LogDatabaseType()))
 		return tx.Where("1 = 0")
 	}
+	return tx.Where(statusExpr+" = ?", "error")
 }
 
 // applyRetryFilter restricts logs to requests that attempted more than one

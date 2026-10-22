@@ -558,6 +558,22 @@ export function useCommonLogsColumns(
 
             if (!log.username) return null
 
+            const other = parseLogOther(log.other)
+            const adminInfo = other?.admin_info
+            const affinity = adminInfo?.channel_affinity
+
+            const isExternalPlatform = affinity?.key_source === 'request_header'
+            // 邮箱展示独立于亲和命中，历史日志仍使用请求头亲和信息回退。
+            const externalUser =
+              log.iself_email ||
+              (isExternalPlatform
+                ? affinity?.key_hint || affinity?.key_fp || ''
+                : '')
+
+            const externalUserTooltip = affinity?.key_fp
+              ? `${externalUser}\n${t('Key Fingerprint')}: ${affinity.key_fp}`
+              : externalUser
+
             return (
               <button
                 type='button'
@@ -585,20 +601,50 @@ export function useCommonLogsColumns(
                       : '•'}
                   </AvatarFallback>
                 </Avatar>
-                <TooltipProvider delay={300}>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <span className='text-muted-foreground max-w-[100px] truncate text-sm hover:underline' />
-                      }
-                    >
-                      {sensitiveVisible ? log.username : '••••'}
-                    </TooltipTrigger>
-                    {sensitiveVisible && log.username.length > 12 && (
-                      <TooltipContent side='top'>{log.username}</TooltipContent>
-                    )}
-                  </Tooltip>
-                </TooltipProvider>
+                <span className='flex max-w-[160px] min-w-0 flex-col gap-0.5'>
+                  <TooltipProvider delay={300}>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span className='text-muted-foreground max-w-[100px] truncate text-sm hover:underline' />
+                        }
+                      >
+                        {sensitiveVisible ? log.username : '••••'}
+                      </TooltipTrigger>
+                      {sensitiveVisible && log.username.length > 12 && (
+                        <TooltipContent side='top'>
+                          {log.username}
+                        </TooltipContent>
+                      )}
+                    </Tooltip>
+                  </TooltipProvider>
+                  {externalUser && (
+                    <TooltipProvider delay={300}>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <span className='block max-w-full truncate font-mono text-xs text-amber-600 dark:text-amber-400' />
+                          }
+                        >
+                          {sensitiveVisible ? externalUser : '••••••'}
+                        </TooltipTrigger>
+
+                        {sensitiveVisible && (
+                          <TooltipContent side='top' className='max-w-xs'>
+                            <div className='space-y-1'>
+                              <p className='font-medium'>
+                                {t('External User')}
+                              </p>
+                              <p className='font-mono break-all whitespace-pre-line'>
+                                {externalUserTooltip}
+                              </p>
+                            </div>
+                          </TooltipContent>
+                        )}
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                </span>
               </button>
             )
           },

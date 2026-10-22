@@ -154,17 +154,35 @@ export function formatDateTimeObject(date: Date): string {
 }
 
 /**
+ * Local-time bucket start in Unix seconds; weeks start Monday.
+ */
+export function getChartBucketStart(
+  timestamp: number,
+  granularity: TimeGranularity = 'day'
+): number {
+  const d = dayjs(timestamp * 1000)
+  if (granularity === 'week') {
+    const daysSinceMonday = (d.day() + 6) % 7
+    // Subtract before startOf('day') to avoid carrying a DST midnight offset.
+    return d.subtract(daysSinceMonday, 'day').startOf('day').unix()
+  }
+  return d.startOf(granularity).unix()
+}
+
+/**
  * Format timestamp for chart display based on time granularity
- * @param timestamp Unix timestamp in seconds
+ * @param timestamp Unix seconds; week labels start on Monday
  * @param granularity Time granularity: 'hour', 'day', or 'week'
+ * @param options.includeYear Prefix the year, for axes spanning several years
  * @returns Formatted string suitable for chart axis
  */
 export function formatChartTime(
   timestamp: number,
-  granularity: TimeGranularity = 'day'
+  granularity: TimeGranularity = 'day',
+  options?: { includeYear?: boolean }
 ): string {
-  const d = dayjs(timestamp * 1000)
-  let result = d.format('MM-DD')
+  const d = dayjs(getChartBucketStart(timestamp, granularity) * 1000)
+  let result = d.format(options?.includeYear ? 'YYYY-MM-DD' : 'MM-DD')
 
   if (granularity === 'hour') {
     result += ` ${d.format('HH')}:00`

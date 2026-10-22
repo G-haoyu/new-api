@@ -48,6 +48,7 @@ func SetApiRouter(router *gin.Engine) {
 		perfMetricsRoute.Use(middleware.HeaderNavModulePublicOrUserAuth("pricing"))
 		{
 			perfMetricsRoute.GET("/summary", controller.GetPerfMetricsSummary)
+			perfMetricsRoute.GET("/availability", middleware.UserAuth(), controller.GetModelAvailability)
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)
@@ -376,6 +377,11 @@ func SetApiRouter(router *gin.Engine) {
 
 		dataRoute := apiRouter.Group("/data")
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)
+		dataRoute.GET("/analytics", middleware.AdminAuth(), controller.GetAdminUsageAnalytics)
+		dataRoute.GET("/analytics/self", middleware.UserAuth(), controller.GetSelfUsageAnalytics)
+		dataRoute.GET("/iself", middleware.AdminAuth(), controller.GetAdminIselfUsageAnalytics)
+		dataRoute.GET("/iself/self", middleware.UserAuth(), controller.GetSelfIselfUsageAnalytics)
+		dataRoute.GET("/peak-tpm", middleware.AdminAuth(), controller.GetPeakTPM)
 		dataRoute.GET("/users", middleware.AdminAuth(), controller.GetQuotaDatesByUser)
 		dataRoute.GET("/self", middleware.UserAuth(), controller.GetUserQuotaDates)
 		dataRoute.GET("/flow", middleware.AdminAuth(), controller.GetAllFlowQuotaDates)

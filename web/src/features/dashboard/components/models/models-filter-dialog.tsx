@@ -35,18 +35,27 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
+  ADMIN_MAX_RANGE_DAYS,
+  ADMIN_TIME_RANGE_PRESETS,
+  SELF_MAX_RANGE_DAYS,
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
 } from '@/features/dashboard/constants'
 import {
   buildDefaultDashboardFilters,
   cleanFilters,
+  getDefaultDays,
 } from '@/features/dashboard/lib'
 import type {
   DashboardChartPreferences,
   DashboardFilters,
 } from '@/features/dashboard/types'
-import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
+import { ROLE } from '@/lib/roles'
+import {
+  computeTimeRange,
+  getRollingDateRange,
+  type TimeGranularity,
+} from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -73,13 +82,14 @@ function granularityForRangeDays(days: number): TimeGranularity {
 // Highlights the matching quick-range button when the applied range spans an
 // exact preset; custom ranges leave every quick button unselected.
 function detectQuickRangeDays(
-  filters: DashboardFilters | undefined
+  filters: DashboardFilters | undefined,
+  presets: ReadonlyArray<{ days: number }>
 ): number | null {
   const start = filters?.start_timestamp
   const end = filters?.end_timestamp
   if (!start || !end) return null
   const days = Math.round((end.getTime() - start.getTime()) / 86_400_000)
-  return TIME_RANGE_PRESETS.some((preset) => preset.days === days) ? days : null
+  return presets.some((preset) => preset.days === days) ? days : null
 }
 
 /**
@@ -100,7 +110,9 @@ export function ModelsFilter(props: ModelsFilterProps) {
   const { t } = useTranslation()
   // 使用已缓存的用户数据，避免重复调用 API
   const user = useAuthStore((state) => state.auth.user)
-  const isAdmin = user?.role && user.role >= 10
+  const isAdmin = Boolean(user?.role && user.role >= ROLE.ADMIN)
+  const rangePresets = isAdmin ? ADMIN_TIME_RANGE_PRESETS : TIME_RANGE_PRESETS
+  const maxRangeDays = isAdmin ? ADMIN_MAX_RANGE_DAYS : SELF_MAX_RANGE_DAYS
 
   const [open, setOpen] = useState(false)
   const [filters, setFilters] = useState<DashboardFilters>(
@@ -108,8 +120,18 @@ export function ModelsFilter(props: ModelsFilterProps) {
       props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
   )
   const [selectedRange, setSelectedRange] = useState<number | null>(() =>
-    detectQuickRangeDays(props.currentFilters)
+    detectQuickRangeDays(props.currentFilters, rangePresets)
   )
+
+  // Validate the resolved range, including defaults for cleared dates.
+  const resolvedRange = computeTimeRange(
+    getDefaultDays(filters.time_granularity),
+    filters.start_timestamp,
+    filters.end_timestamp
+  )
+  const rangeTooLong =
+    resolvedRange.end_timestamp - resolvedRange.start_timestamp >
+    maxRangeDays * 86_400
 
   const handleOpenChange = (nextOpen: boolean) => {
     // Sync the editing state from the applied filters every time the dialog
@@ -118,7 +140,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
       const applied =
         props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
       setFilters(applied)
-      setSelectedRange(detectQuickRangeDays(applied))
+      setSelectedRange(detectQuickRangeDays(applied, rangePresets))
     }
     setOpen(nextOpen)
   }
@@ -150,8 +172,9 @@ export function ModelsFilter(props: ModelsFilterProps) {
     value: Date | string | undefined
   ) => {
     setFilters((prev) => ({ ...prev, [field]: value }))
-    if (field === 'start_timestamp' || field === 'end_timestamp')
+    if (field === 'start_timestamp' || field === 'end_timestamp') {
       setSelectedRange(null)
+    }
   }
 
   const handleQuickRange = (days: number) => {
@@ -190,7 +213,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
             <RotateCcw className='mr-2 h-4 w-4' />
             {t('Reset')}
           </Button>
-          <Button onClick={handleApply} type='submit'>
+          <Button onClick={handleApply} type='submit' disabled={rangeTooLong}>
             <Search className='mr-2 h-4 w-4' />
             {t('Apply Filters')}
           </Button>
@@ -206,7 +229,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
               {t('Quick Range')}
             </Label>
             <div className='grid grid-cols-2 gap-2 sm:flex'>
-              {TIME_RANGE_PRESETS.map((range) => (
+              {rangePresets.map((range) => (
                 <Button
                   key={range.days}
                   type='button'
@@ -250,6 +273,14 @@ export function ModelsFilter(props: ModelsFilterProps) {
                 placeholder={t('Select end time')}
               />
             </div>
+
+            {rangeTooLong && (
+              <p role='alert' className='text-destructive text-sm'>
+                {t('Time range cannot exceed {{days}} days', {
+                  days: maxRangeDays,
+                })}
+              </p>
+            )}
           </div>
 
           <SectionDivider label={t('Chart Settings')} />
@@ -257,12 +288,10 @@ export function ModelsFilter(props: ModelsFilterProps) {
           <div className='grid gap-2'>
             <Label htmlFor='time_granularity'>{t('Time Granularity')}</Label>
             <Select
-              items={[
-                ...TIME_GRANULARITY_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.label),
-                })),
-              ]}
+              items={TIME_GRANULARITY_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
               value={filters.time_granularity}
               onValueChange={(value) =>
                 handleChange('time_granularity', value as TimeGranularity)
