@@ -127,10 +127,17 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 	}
 
 	ok := false
-	if !instruction.Auxiliary && instruction.Text != "" {
-		tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
-		cache := getAutoRouterCache()
-		ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
+	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
+	cache := getAutoRouterCache()
+	ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
+	switch {
+	case instruction.Auxiliary:
+	case instruction.Text == "" && instruction.Session != "":
+		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found && autorouter.ModelAvailable(entry.Route.Model, available) {
+			result.Route, result.Source = entry.Route, autorouter.SourceInherit
+			ok = true
+		}
+	case instruction.Text != "":
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
 		if otelRuntime.RecordsContent(nil) {
 			for key, value := range state {
@@ -203,7 +210,13 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 				_ = cache.SetWithTTL(routeKey, entry, ttl)
 			}
 		}
-	} else {
+		// The session remembers its latest human instruction's route for the
+		// sub-agents whose task arrives without readable text.
+		if ok && instruction.Session != "" && !instruction.Agent {
+			_ = cache.SetWithTTL(autoRouterCacheKey("s", tokenID, instruction.Session), autoRouterEntry{Route: result.Route}, ttl)
+		}
+	}
+	if !ok {
 		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available)
 	}
 

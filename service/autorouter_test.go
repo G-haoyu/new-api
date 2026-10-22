@@ -125,6 +125,32 @@ func TestResolveAutoModelFollowsPreviousRoute(t *testing.T) {
 	assert.Equal(t, "direct_qa", continued.Decision.TaskType)
 }
 
+func TestResolveAutoModelEncryptedSubAgentInheritsSessionRoute(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	subAgent := func(session string) string {
+		return `{"client_metadata":{"session_id":"` + session + `"},"input":[{"type":"agent_message","content":[
+			{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/scan\nSender: /root\nPayload:"},
+			{"type":"encrypted_content","encrypted_content":"gAAA"}]}]}`
+	}
+
+	_, err := ResolveAutoModel(newAutoRouterContext(9251, `{"client_metadata":{"session_id":"sess-a"},"input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hard"}]}]}`), allModelsAvailable)
+	require.NoError(t, err)
+
+	result, err := ResolveAutoModel(newAutoRouterContext(9251, subAgent("sess-a")), allModelsAvailable)
+	require.NoError(t, err)
+	assert.Equal(t, "coder-xhigh", result.ResolvedModel)
+	assert.Equal(t, autorouter.SourceInherit, result.Source)
+	assert.Nil(t, result.Jev)
+	assert.Equal(t, int32(1), calls.Load())
+
+	result, err = ResolveAutoModel(newAutoRouterContext(9251, subAgent("sess-b")), allModelsAvailable)
+	require.NoError(t, err)
+	assert.Equal(t, "general-medium", result.ResolvedModel, "an unknown session falls back to the default route")
+	assert.Equal(t, autorouter.SourceDefault, result.Source)
+}
+
 func TestResolveAutoModelJevTimeoutFallsBackToDefault(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 200*time.Millisecond).URL, 50)
