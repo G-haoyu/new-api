@@ -226,7 +226,7 @@ func (ssoUserSyncHandler) Enabled() bool {
 		common.SsoUserListSecret != ""
 }
 
-func (ssoUserSyncHandler) Interval() time.Duration { return 5 * time.Minute }
+func (ssoUserSyncHandler) Interval() time.Duration { return time.Hour }
 
 func (ssoUserSyncHandler) NewPayload() any { return nil }
 
