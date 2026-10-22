@@ -77,9 +77,9 @@ var selfTrafficMarkers = []string{
 func main() {
 	in := flag.String("in", "", "Langfuse observations JSONL")
 	out := flag.String("out", "jevexp_results.jsonl", "result JSONL")
-	endpoint := flag.String("endpoint", "http://hybrid-scheduling-llm-test.intsig.net/startlux-decision-27b/v1/systemone", "jev decisions endpoint")
+	endpoint := flag.String("endpoint", os.Getenv("JEV_ENDPOINT"), "jev decisions endpoint, defaults to JEV_ENDPOINT")
 	label := flag.String("label", "", "run label recorded on every result row")
-	model := flag.String("model", "", "jev model id, required by OpenRouter (e.g. typesafe/jev-1.13)")
+	model := flag.String("model", os.Getenv("JEV_MODEL"), "jev model id, required by OpenRouter (e.g. typesafe/jev-1.13), defaults to JEV_MODEL")
 	apiKeyEnv := flag.String("api-key-env", "JEV_API_KEY", "env var holding the bearer token, empty value sends none")
 	maxRunes := flag.Int("max-runes", 2000, "content budget of current + previous instruction in runes")
 	previousMaxRunes := flag.Int("previous-max-runes", 500, "cap of the previous instruction in runes")

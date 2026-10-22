@@ -16,14 +16,15 @@ import (
 var taskModelsJSON []byte
 
 // AutoRouterSetting configures resolution of the "auto" model. Option keys are
-// autorouter_setting.<json name>; map and list values are stored as JSON.
+// autorouter_setting.<json name>; map and list values are stored as JSON. The
+// jev endpoint, key and model come from the JEV_ENDPOINT, JEV_API_KEY and
+// JEV_MODEL environment variables.
 type AutoRouterSetting struct {
-	Enabled          bool   `json:"enabled"`
-	JevEndpoint      string `json:"jev_endpoint"`
-	JevTimeoutMs     int    `json:"jev_timeout_ms"`
-	MaxRunes         int    `json:"max_runes"`
-	PreviousMaxRunes int    `json:"previous_max_runes"`
-	CacheTTLSeconds  int    `json:"cache_ttl_seconds"`
+	Enabled          bool `json:"enabled"`
+	JevTimeoutMs     int  `json:"jev_timeout_ms"`
+	MaxRunes         int  `json:"max_runes"`
+	PreviousMaxRunes int  `json:"previous_max_runes"`
+	CacheTTLSeconds  int  `json:"cache_ttl_seconds"`
 	// TaskModels maps a jev task type to base model names in preference order.
 	// A model supports an effort when the effort-suffixed name (e.g.
 	// gpt-5-high) is usable; the bare name is its provider default effort.
@@ -47,8 +48,7 @@ type AutoRouterSetting struct {
 }
 
 var autoRouterSetting = AutoRouterSetting{
-	JevEndpoint:              "http://hybrid-scheduling-llm-test.intsig.net/startlux-decision-27b/v1/systemone",
-	JevTimeoutMs:             1000,
+	JevTimeoutMs:             5000,
 	MaxRunes:                 2000,
 	PreviousMaxRunes:         500,
 	CacheTTLSeconds:          7200,

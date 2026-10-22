@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -160,13 +161,18 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 			}
 			routeInput["previous_route"] = previous
 
-			client := autorouter.JevClient{Endpoint: setting.JevEndpoint, HTTPClient: autoRouterClient}
+			client := autorouter.JevClient{
+				Endpoint:   os.Getenv("JEV_ENDPOINT"),
+				Model:      os.Getenv("JEV_MODEL"),
+				APIKey:     os.Getenv("JEV_API_KEY"),
+				HTTPClient: autoRouterClient,
+			}
 			jevCtx, jevSpan := otelRuntime.StartJevClassify(routeCtx)
 			ctx, cancel := context.WithTimeout(jevCtx, time.Duration(setting.JevTimeoutMs)*time.Millisecond)
 			started := time.Now()
 			response, err := client.Classify(ctx, state)
 			cancel()
-			result.Jev = &autorouter.JevCall{Endpoint: setting.JevEndpoint, LatencyMs: time.Since(started).Milliseconds()}
+			result.Jev = &autorouter.JevCall{Endpoint: client.Endpoint, LatencyMs: time.Since(started).Milliseconds()}
 			jev := observability.Observation{Err: err}
 			jevInput := map[string]any{"questions_version": autorouter.QuestionsVersion}
 			if otelRuntime.RecordsContent(err) {

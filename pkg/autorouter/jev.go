@@ -3,6 +3,7 @@ package autorouter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -192,6 +193,9 @@ func (r *JevResponse) Decision(hasPrevious bool) Decision {
 }
 
 func (c *JevClient) Classify(ctx context.Context, state map[string]string) (*JevResponse, error) {
+	if c.Endpoint == "" {
+		return nil, errors.New("jev endpoint is not configured")
+	}
 	payload := map[string]any{"state": state, "questions": questions}
 	if c.Model != "" {
 		payload["model"] = c.Model

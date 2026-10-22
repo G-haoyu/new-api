@@ -22,17 +22,26 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+const (
+	testJevAPIKey = "test-jev-key"
+	testJevModel  = "test/jev"
+)
+
 // fakeJev answers by the current task: "hard" is a very difficult coding task,
 // "ok" is unclassifiable, anything else is a simple question. Every answer
-// continues the previous task.
+// continues the previous task. It expects the key and model that
+// useAutoRouterSetting configures.
 func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		time.Sleep(delay)
 		var payload struct {
+			Model string            `json:"model"`
 			State map[string]string `json:"state"`
 		}
 		require.NoError(t, common.DecodeJson(r.Body, &payload))
+		assert.Equal(t, "Bearer "+testJevAPIKey, r.Header.Get("Authorization"))
+		assert.Equal(t, testJevModel, payload.Model)
 		taskType, difficulty := "direct_qa", "0"
 		switch payload.State["current_task"] {
 		case "hard":
@@ -54,8 +63,10 @@ func useAutoRouterSetting(t *testing.T, endpoint string, timeoutMs int) {
 	setting := autorouter_setting.GetAutoRouterSetting()
 	saved := *setting
 	t.Cleanup(func() { *setting = saved })
+	t.Setenv("JEV_ENDPOINT", endpoint)
+	t.Setenv("JEV_API_KEY", testJevAPIKey)
+	t.Setenv("JEV_MODEL", testJevModel)
 	setting.Enabled = true
-	setting.JevEndpoint = endpoint
 	setting.JevTimeoutMs = timeoutMs
 	setting.TaskModels = map[string][]string{
 		"coding":    {"coder"},
