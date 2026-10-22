@@ -30,5 +30,5 @@ function SsoCallback() {
       })
   }, [navigate, redirect])
 
-  return <OAuthCallbackScreen />
+  return <OAuthCallbackScreen provider='sso' mode='login' />
 }

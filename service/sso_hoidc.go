@@ -109,8 +109,8 @@ func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSi
 		updates := map[string]any{
 			"updated_at": time.Now().Unix(),
 		}
-		if name != "" && truncate(name, 20) != user.DisplayName {
-			updates["display_name"] = truncate(name, 20)
+		if name != "" && truncateStr(name, 20) != user.DisplayName {
+			updates["display_name"] = truncateStr(name, 20)
 		}
 		if avatar != "" && avatar != user.Avatar {
 			updates["avatar"] = avatar
@@ -145,7 +145,7 @@ func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSi
 	newUser := &model.User{
 		Email:                 email,
 		Username:              username,
-		DisplayName:           truncate(name, 20),
+		DisplayName:           truncateStr(name, 20),
 		Avatar:                avatar,
 		Password:              "",
 		Role:                  common.RoleCommonUser,
@@ -179,7 +179,7 @@ func generateSsoUsername(email string) string {
 	return username
 }
 
-func truncate(s string, maxLen int) string {
+func truncateStr(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
 		return string(runes[:maxLen])
