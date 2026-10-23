@@ -60,6 +60,9 @@ export default defineConfig(({ envMode }) => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
+        '@lobehub/ui/icons': false,
+        '@lobehub/ui': false,
+        antd: false,
       },
     },
     html: {
