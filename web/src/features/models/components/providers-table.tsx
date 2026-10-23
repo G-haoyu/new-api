@@ -41,6 +41,56 @@ import { useModels } from './models-provider'
 
 const EMPTY_PROVIDER_MODEL_RELATIONS: ProviderModelRelation[] = []
 
+function ProviderPriceValue(props: {
+  price: number | null | undefined
+  listPrice?: number | null
+}) {
+  const hasListPrice =
+    props.listPrice != null &&
+    Number.isFinite(props.listPrice) &&
+    props.listPrice > (props.price ?? Number.POSITIVE_INFINITY)
+  if (!hasListPrice) {
+    return props.price == null ? '—' : formatBillingCurrencyFromUSD(props.price)
+  }
+  return (
+    <span className='inline-flex flex-wrap items-baseline justify-end gap-1'>
+      <span className='text-muted-foreground/70 text-[11px] line-through'>
+        {formatBillingCurrencyFromUSD(props.listPrice)}
+      </span>
+      <span className='text-emerald-600 dark:text-emerald-400'>
+        {formatBillingCurrencyFromUSD(props.price)}
+      </span>
+    </span>
+  )
+}
+
+function ProviderDiscountValue(props: { price?: ProviderModelRelation['price'] }) {
+  const { t } = useTranslation()
+  const rate = props.price?.discount_rate
+  if (
+    rate == null ||
+    !Number.isFinite(rate) ||
+    rate < 0 ||
+    rate >= 100
+  ) {
+    return <span className='text-muted-foreground'>—</span>
+  }
+  const hasListPrice = [
+    [props.price?.input_list_price, props.price?.input_price],
+    [props.price?.output_list_price, props.price?.output_price],
+    [props.price?.cache_read_list_price, props.price?.cache_read_price],
+    [props.price?.cache_write_list_price, props.price?.cache_write_price],
+  ].some(([listPrice, price]) => listPrice != null && price != null && listPrice > price)
+  if (!hasListPrice) return <span className='text-muted-foreground'>—</span>
+  return (
+    <span className='bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded px-1.5 py-0.5 text-xs font-medium'>
+      {t('{{rate}} fold', {
+        rate: (rate / 10).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      })}
+    </span>
+  )
+}
+
 function ProviderModelsPanel(props: { provider: Provider }) {
   const { t } = useTranslation()
   const [page, setPage] = useState(1)
@@ -97,15 +147,27 @@ function ProviderModelsPanel(props: { provider: Provider }) {
   } else {
     modelsContent = (
       <div className='overflow-x-auto rounded-md border'>
-        <table className='w-full min-w-[700px] text-sm'>
+        <table className='w-max min-w-[920px] table-fixed text-xs'>
+          <colgroup>
+            <col className='w-[180px]' />
+            <col className='w-[96px]' />
+            <col className='w-[180px]' />
+            <col className='w-[120px]' />
+            <col className='w-[120px]' />
+            <col className='w-[100px]' />
+            <col className='w-[70px]' />
+            <col className='w-[96px]' />
+          </colgroup>
           <thead className='bg-background text-muted-foreground text-xs'>
             <tr>
-              <th className='px-3 py-2 text-left font-medium'>{t('Model')}</th>
-              <th className='px-3 py-2 text-left font-medium'>{t('Model vendor')}</th>
-              <th className='px-3 py-2 text-left font-medium'>{t('Status')}</th>
-              <th className='px-3 py-2 text-right font-medium'>{t('Input')}</th>
-              <th className='px-3 py-2 text-right font-medium'>{t('Output')}</th>
-              <th className='px-3 py-2 text-right font-medium'>{t('Actions')}</th>
+              <th className='w-[180px] px-2 py-1.5 text-left font-medium'>{t('Model')}</th>
+              <th className='w-[96px] px-2 py-1.5 text-left font-medium'>{t('Status')}</th>
+              <th className='w-[180px] px-2 py-1.5 text-left font-medium'>{t('Provider model name')}</th>
+              <th className='w-[120px] px-2 py-1.5 text-right font-medium'>{t('Input')}</th>
+              <th className='w-[120px] px-2 py-1.5 text-right font-medium'>{t('Output')}</th>
+              <th className='w-[100px] px-2 py-1.5 text-right font-medium'>{t('Cache')}</th>
+              <th className='w-[70px] px-2 py-1.5 text-right font-medium'>{t('Discount')}</th>
+              <th className='w-[96px] px-2 py-1.5 text-right font-medium'>{t('Actions')}</th>
             </tr>
           </thead>
           <tbody className='divide-y'>
@@ -126,9 +188,9 @@ function ProviderModelsPanel(props: { provider: Provider }) {
   }
 
   return (
-    <div className='bg-muted/20 space-y-3 p-3 sm:p-4'>
+    <div className='bg-muted/20 space-y-2 p-2 sm:p-3'>
       <div className='flex items-center justify-between gap-2'>
-        <div>
+        <div className='min-w-0'>
           <div className='text-sm font-semibold'>{t('Provider models')}</div>
           <div className='text-muted-foreground text-xs'>
             {t('{{count}} models', { count: total })}
@@ -229,47 +291,65 @@ function ProviderModelRow(props: {
   const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 18) : null
   return (
     <tr>
-      <td className='px-3 py-2'>
+      <td className='px-2 py-1.5'>
         <div className='flex items-center gap-2'>
-          <div className='bg-muted flex size-7 shrink-0 items-center justify-center rounded-md'>
+          <div className='bg-muted flex size-6 shrink-0 items-center justify-center rounded-md'>
             {modelIcon || (
               <span className='text-muted-foreground text-xs font-semibold'>
                 {props.item.model_name.charAt(0).toUpperCase()}
               </span>
             )}
           </div>
-          <span className='font-mono'>{props.item.model_name}</span>
+          <div className='min-w-0'>
+            <span className='block font-mono break-all'>{props.item.model_name}</span>
+            {props.item.vendor_name && (
+              <span className='text-muted-foreground block text-xs'>
+                {props.item.vendor_name}
+              </span>
+            )}
+          </div>
         </div>
       </td>
-      <td className='text-muted-foreground px-3 py-2'>
-        {props.item.vendor_name || t('Not configured')}
-      </td>
-      <td className='px-3 py-2'>
-        <div className='flex flex-wrap gap-1'>
-          <span className='bg-muted rounded px-1.5 py-0.5 text-xs'>
+      <td className='px-2 py-1.5'>
+        <div className='flex flex-wrap gap-0.5'>
+          <span className='bg-muted rounded px-1 py-0.5 text-[11px]'>
             {props.item.available ? t('Available') : t('Unavailable')}
           </span>
-          <span className='bg-muted rounded px-1.5 py-0.5 text-xs'>
+          <span className='bg-muted rounded px-1 py-0.5 text-[11px]'>
             {props.item.configured ? t('Configured') : t('Not configured')}
           </span>
         </div>
       </td>
-      <td className='px-3 py-2 text-right font-mono tabular-nums'>
-        {props.item.price
-          ? formatBillingCurrencyFromUSD(props.item.price.input_price)
-          : '—'}
+      <td className='max-w-44 px-2 py-1.5 font-mono text-[11px] leading-snug break-all whitespace-normal'>
+        {props.item.price?.model_name || '—'}
       </td>
-      <td className='px-3 py-2 text-right font-mono tabular-nums'>
-        {props.item.price
-          ? formatBillingCurrencyFromUSD(props.item.price.output_price)
-          : '—'}
+      <td className='px-2 py-1.5 text-right font-mono tabular-nums'>
+        <ProviderPriceValue
+          price={props.item.price?.input_price}
+          listPrice={props.item.price?.input_list_price}
+        />
       </td>
-      <td className='px-3 py-2 text-right'>
+      <td className='px-2 py-1.5 text-right font-mono tabular-nums'>
+        <ProviderPriceValue
+          price={props.item.price?.output_price}
+          listPrice={props.item.price?.output_list_price}
+        />
+      </td>
+      <td className='px-2 py-1.5 text-right font-mono tabular-nums'>
+        <ProviderPriceValue
+          price={props.item.price?.cache_read_price}
+          listPrice={props.item.price?.cache_read_list_price}
+        />
+      </td>
+      <td className='px-2 py-1.5 text-right'>
+        <ProviderDiscountValue price={props.item.price} />
+      </td>
+      <td className='px-2 py-1.5 text-right'>
         <Button
           type='button'
           variant='ghost'
           size='sm'
-          className='gap-1'
+          className='h-7 gap-1 px-1.5 text-[11px]'
           onClick={props.onConfigure}
         >
           <Pencil className='size-3.5' />

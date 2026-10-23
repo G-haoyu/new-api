@@ -50,6 +50,8 @@ var accessTokenExemptRoutes = []string{
 	"GET /api/oauth/wechat",
 	"GET /api/oauth/telegram/login",
 	"GET /api/oauth/telegram/bind/:flow_token",
+	"GET /api/sso/hoidc/login",
+	"GET /api/sso/hoidc/callback",
 
 	// Browser session cookie endpoints.
 	"POST /api/user/auth/refresh",

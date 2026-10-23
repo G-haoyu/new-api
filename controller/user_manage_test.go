@@ -626,6 +626,9 @@ func TestManageUserQuotaCacheUsesCommittedIntegerDifference(t *testing.T) {
 				}))
 			}
 			recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":%q,"value":%d}`, user.Id, tc.mode, tc.value))
+			if tc.failCache {
+				server.SetError("")
+			}
 			assert.Contains(t, recorder.Body.String(), fmt.Sprintf(`"success":%t`, !tc.failUpdate))
 			require.NoError(t, db.First(&user, user.Id).Error)
 			assert.Equal(t, tc.after, user.Quota)

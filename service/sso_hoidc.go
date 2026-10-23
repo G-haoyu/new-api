@@ -1,0 +1,188 @@
+package service
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"gorm.io/gorm"
+)
+
+type SsoUserInfo struct {
+	Email                 string `json:"email"`
+	Name                  string `json:"name"`
+	Avatar                string `json:"avatar"`
+	DepartmentTreePathStr string `json:"department_tree_path_str"`
+}
+
+func parseOrgInfo(departmentTreePathStr string) (secondary, tertiary, team string) {
+	departmentTreePathStr = strings.TrimSpace(departmentTreePathStr)
+	if departmentTreePathStr == "" {
+		return
+	}
+	parts := strings.Split(departmentTreePathStr, "/")
+	switch len(parts) {
+	case 1:
+		secondary = parts[0]
+		tertiary = parts[0]
+		team = parts[0]
+	case 2:
+		secondary = parts[0]
+		tertiary = parts[1]
+		team = parts[1]
+	default:
+		secondary = parts[0]
+		tertiary = parts[1]
+		team = parts[len(parts)-1]
+	}
+	// CC is a sub-division marker: merge it into secondary for clarity
+	if tertiary == "CC" {
+		secondary = secondary + "-CC"
+	}
+	return
+}
+
+func VerifySsoToken(token string) (*SsoUserInfo, error) {
+	if common.HoidcSsoApi == "" {
+		return nil, errors.New("HOIDC SSO API not configured")
+	}
+	verifyUrl := strings.TrimRight(common.HoidcSsoApi, "/") +
+		"/auth/verify-access-token?token=" + url.QueryEscape(token)
+	body := []byte(`{"platform_id":"` + common.HoidcPlatformId + `"}`)
+
+	req, err := http.NewRequest(http.MethodPost, verifyUrl, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Token", token)
+
+	client := GetHttpClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("SSO token verification request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("SSO token verification failed: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Code int         `json:"code"`
+		Msg  string      `json:"msg"`
+		Data SsoUserInfo `json:"data"`
+	}
+	if err := common.DecodeJson(resp.Body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse SSO response: %w", err)
+	}
+	if result.Code != 0 {
+		return nil, fmt.Errorf("SSO token verification failed: %s", result.Msg)
+	}
+	if result.Data.Email == "" {
+		return nil, errors.New("SSO returned empty email")
+	}
+	return &result.Data, nil
+}
+
+func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSignup bool) (*model.User, error) {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return nil, errors.New("email is empty")
+	}
+
+	secondary, tertiary, team := parseOrgInfo(departmentTreePathStr)
+
+	var user model.User
+	err := model.DB.Where("email = ?", email).First(&user).Error
+	if err == nil {
+		if user.DeletedAt.Valid {
+			return nil, errors.New("account has been disabled")
+		}
+		updates := map[string]any{
+			"updated_at": time.Now().Unix(),
+		}
+		if name != "" && truncateStr(name, 20) != user.DisplayName {
+			updates["display_name"] = truncateStr(name, 20)
+		}
+		if avatar != "" && avatar != user.Avatar {
+			updates["avatar"] = avatar
+		}
+		if secondary != "" && secondary != user.SecondaryOrganization {
+			updates["secondary_organization"] = secondary
+		}
+		if tertiary != "" && tertiary != user.TertiaryOrganization {
+			updates["tertiary_organization"] = tertiary
+		}
+		if team != "" && team != user.Team {
+			updates["team"] = team
+		}
+		if departmentTreePathStr != "" && departmentTreePathStr != user.OrgStr {
+			updates["org_str"] = departmentTreePathStr
+		}
+		if len(updates) > 0 {
+			model.DB.Model(&user).Updates(updates)
+		}
+		return &user, nil
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	if !allowSignup {
+		return nil, errors.New("account not found and signup is disabled")
+	}
+
+	username := generateSsoUsername(email)
+	newUser := &model.User{
+		Email:                 email,
+		Username:              username,
+		DisplayName:           truncateStr(name, 20),
+		Avatar:                avatar,
+		Password:              "",
+		Role:                  common.RoleCommonUser,
+		Status:                common.UserStatusEnabled,
+		SecondaryOrganization: secondary,
+		TertiaryOrganization:  tertiary,
+		Team:                  team,
+		OrgStr:                departmentTreePathStr,
+	}
+	if err := newUser.Insert(0); err != nil {
+		return nil, fmt.Errorf("failed to create SSO user: %w", err)
+	}
+	return newUser, nil
+}
+
+func generateSsoUsername(email string) string {
+	prefix := strings.Split(email, "@")[0]
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	username := prefix
+	for i := range 10 {
+		var count int64
+		model.DB.Model(&model.User{}).Where("username = ?", username).Count(&count)
+		if count == 0 {
+			return username
+		}
+		username = fmt.Sprintf("%s%04d", prefix, rand.IntN(10000))
+		_ = i
+	}
+	return username
+}
+
+func truncateStr(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen])
+	}
+	return s
+}

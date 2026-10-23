@@ -579,6 +579,29 @@ export function UsersMutateDrawer({
                   </div>
                 </SideDrawerSection>
               )}
+
+              {/* Organization Information (Read-only) */}
+              {isUpdate && currentRow?.orgStr && (
+                <SideDrawerSection>
+                  <h3 className='text-sm font-medium'>
+                    {t('Organization Information')}
+                  </h3>
+                  <p className='text-muted-foreground text-xs'>
+                    {t('Organization info from SSO (read-only)')}
+                  </p>
+
+                  <div>
+                    <Label className='text-muted-foreground text-xs'>
+                      {t('Full Path')}
+                    </Label>
+                    <Input
+                      value={currentRow?.orgStr || '-'}
+                      disabled
+                      className='mt-1'
+                    />
+                  </div>
+                </SideDrawerSection>
+              )}
             </form>
           </Form>
           <SheetFooter className={sideDrawerFooterClassName()}>

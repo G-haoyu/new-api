@@ -35,6 +35,7 @@ export const isUserDeleted = (user: UserType): boolean => {
 export const USER_STATUS = {
   ENABLED: 1,
   DISABLED: 2,
+  RESIGNED: 3,
   DELETED: -1,
 } as const
 
@@ -49,6 +50,11 @@ export const USER_STATUSES = {
     variant: 'neutral' as const,
     value: USER_STATUS.DISABLED,
   },
+  [USER_STATUS.RESIGNED]: {
+    labelKey: 'Resigned',
+    variant: 'warning' as const,
+    value: USER_STATUS.RESIGNED,
+  },
   [USER_STATUS.DELETED]: {
     labelKey: 'Deleted',
     variant: 'danger' as const,
@@ -59,6 +65,7 @@ export const USER_STATUSES = {
 export const getUserStatusOptions = (t: (key: string) => string) => [
   { label: t('Enabled'), value: String(USER_STATUS.ENABLED) },
   { label: t('Disabled'), value: String(USER_STATUS.DISABLED) },
+  { label: t('Resigned'), value: String(USER_STATUS.RESIGNED) },
   { label: t('Deleted'), value: String(USER_STATUS.DELETED) },
 ]
 

@@ -2,6 +2,13 @@ package controller
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +29,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(ssoUserSyncHandler{})
 }
 
 type channelModelRecoveryHandler struct{}
@@ -203,4 +211,123 @@ func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status mod
 	if err := model.FinishSystemTask(task.TaskID, runnerID, status, result, errorMessage); err != nil {
 		common.SysLog(common.LogText("system task %s failed to persist result: %v", task.TaskID, err))
 	}
+}
+
+// ssoUserSyncHandler periodically pulls the full user list from the SSO system
+// and provisions local accounts via email matching.
+type ssoUserSyncHandler struct{}
+
+func (ssoUserSyncHandler) Type() string { return model.SystemTaskTypeSSOUserSync }
+
+func (ssoUserSyncHandler) Enabled() bool {
+	return common.SsoSyncEnabled &&
+		common.SsoUserListApiUrl != "" &&
+		common.SsoUserListPlatformId != "" &&
+		common.SsoUserListSecret != ""
+}
+
+func (ssoUserSyncHandler) Interval() time.Duration { return time.Hour }
+
+func (ssoUserSyncHandler) NewPayload() any { return nil }
+
+func (ssoUserSyncHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	result, err := runSsoUserSync(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, result, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, result, nil)
+}
+
+type ssoSyncResult struct {
+	Fetched int `json:"fetched"`
+	Synced  int `json:"synced"`
+	Skipped int `json:"skipped"`
+	Failed  int `json:"failed"`
+}
+
+func runSsoUserSync(_ context.Context) (*ssoSyncResult, error) {
+	users, err := fetchAllSsoUsers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch SSO users: %w", err)
+	}
+
+	result := &ssoSyncResult{Fetched: len(users)}
+	for _, u := range users {
+		email := strings.TrimSpace(u.Email)
+		if email == "" {
+			result.Skipped++
+			continue
+		}
+		_, err := service.ProvisionSsoUser(email, u.Name, u.Avatar, u.DepartmentTreePathStr, common.HoidcAllowSignup)
+		if err != nil {
+			result.Failed++
+			common.SysError(fmt.Sprintf("SSO sync failed for %s: %v", email, err))
+			continue
+		}
+		result.Synced++
+	}
+	common.SysLog(fmt.Sprintf("SSO user sync completed: fetched=%d synced=%d skipped=%d failed=%d",
+		result.Fetched, result.Synced, result.Skipped, result.Failed))
+
+	cutoff := time.Now().Unix() - 24*3600
+	disabled, err := model.DisableStaleSsoUsers(cutoff)
+	if err != nil {
+		common.SysError(fmt.Sprintf("SSO sync: failed to disable stale users: %v", err))
+	} else if disabled > 0 {
+		common.SysLog(fmt.Sprintf("SSO sync: disabled %d stale users (cutoff=%d)", disabled, cutoff))
+	}
+
+	return result, nil
+}
+
+type ssoUserListItem struct {
+	Email                 string `json:"email"`
+	Name                  string `json:"name"`
+	Avatar                string `json:"avatar"`
+	DepartmentTreePathStr string `json:"department_tree_path_str"`
+}
+
+func fetchAllSsoUsers() ([]ssoUserListItem, error) {
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	hash := md5.Sum([]byte(timestamp + "_" + common.SsoUserListSecret))
+	signature := hex.EncodeToString(hash[:])
+
+	params := url.Values{
+		"signature":   {signature},
+		"timestamp":   {timestamp},
+		"platform_id": {common.SsoUserListPlatformId},
+	}
+	apiUrl := strings.TrimRight(common.SsoUserListApiUrl, "/") +
+		"/open-api/user/get-all?" + params.Encode()
+
+	req, err := http.NewRequest(http.MethodPost, apiUrl, strings.NewReader(""))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := service.GetHttpClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("SSO user list request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("SSO user list failed: HTTP %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Code int               `json:"code"`
+		Msg  string            `json:"msg"`
+		Data []ssoUserListItem `json:"data"`
+	}
+	if err := common.DecodeJson(resp.Body, &body); err != nil {
+		return nil, fmt.Errorf("failed to parse SSO user list response: %w", err)
+	}
+	if body.Code != 0 {
+		return nil, fmt.Errorf("SSO user list failed: %s", body.Msg)
+	}
+	return body.Data, nil
 }

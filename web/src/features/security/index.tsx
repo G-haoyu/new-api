@@ -82,12 +82,14 @@ export function Security() {
             <h3 id='security-authentication' className='text-sm font-semibold'>
               {t('Login & Authentication')}
             </h3>
-            <AccountActionCard
-              action='password'
-              username={profile.username}
-              hasPassword={profile.has_password}
-              onUpdate={refreshProfile}
-            />
+            {profile.has_password !== false && (
+              <AccountActionCard
+                action='password'
+                username={profile.username}
+                hasPassword={profile.has_password}
+                onUpdate={refreshProfile}
+              />
+            )}
             <TitledCard
               title={t('Account Bindings')}
               icon={<Link2 className='size-4' />}
