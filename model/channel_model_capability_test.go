@@ -70,6 +70,7 @@ func TestCapabilitySchemaSQLiteIdempotent(t *testing.T) {
 func TestCapabilityResolutionFollowsNameRulePrecedence(t *testing.T) {
 	db := setupCapabilityModelTest(t)
 	require.NoError(t, db.Create(&Model{ModelName: "gpt-", NameRule: NameRulePrefix, Capabilities: `{"context":{"max_output_tokens":1000}}`}).Error)
+	require.NoError(t, db.Create(&Model{ModelName: "gpt-4o-", NameRule: NameRulePrefix, Capabilities: `{"context":{"max_output_tokens":1500}}`}).Error)
 	require.NoError(t, db.Create(&Model{ModelName: "gpt-4o", NameRule: NameRuleExact, Capabilities: `{"context":{"max_output_tokens":2000}}`}).Error)
 	require.NoError(t, InitCapabilityCache())
 
@@ -79,7 +80,11 @@ func TestCapabilityResolutionFollowsNameRulePrecedence(t *testing.T) {
 
 	prefix, ok := ResolveModelCapability("gpt-4o-mini")
 	require.True(t, ok)
-	assert.Equal(t, int64(1000), *prefix.Context.MaxOutputTokens)
+	assert.Equal(t, int64(1500), *prefix.Context.MaxOutputTokens, "longer prefix must win over the family default")
+
+	family, ok := ResolveModelCapability("gpt-5")
+	require.True(t, ok)
+	assert.Equal(t, int64(1000), *family.Context.MaxOutputTokens)
 
 	_, ok = ResolveModelCapability("claude-3")
 	assert.False(t, ok)

@@ -127,6 +127,8 @@ func HasCapabilityDeclarations() bool {
 }
 
 // ResolveModelCapability 按 name_rule 的优先级（精确、前缀、后缀、包含）取模型级声明。
+// 同一规则内以更长的匹配键优先，这样 claude-sonnet-4-5 的具体声明不会被
+// claude-sonnet-4 的家族默认声明先命中。
 func ResolveModelCapability(modelName string) (capability.Spec, bool) {
 	capabilityCache.RLock()
 	defer capabilityCache.RUnlock()
@@ -137,10 +139,17 @@ func ResolveModelCapability(modelName string) (capability.Spec, bool) {
 		return spec, true
 	}
 	for _, records := range [][]modelCapabilityRecord{capabilityCache.prefix, capabilityCache.suffix, capabilityCache.contains} {
-		for _, record := range records {
-			if metadataMatchesName(record.name, record.rule, modelName) {
-				return record.spec, true
+		var matched *modelCapabilityRecord
+		for i := range records {
+			if !metadataMatchesName(records[i].name, records[i].rule, modelName) {
+				continue
 			}
+			if matched == nil || len(records[i].name) > len(matched.name) {
+				matched = &records[i]
+			}
+		}
+		if matched != nil {
+			return matched.spec, true
 		}
 	}
 	return capability.Spec{}, false
