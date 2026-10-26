@@ -64,6 +64,18 @@ services:
 #      - GOOGLE_ANALYTICS_ID=G-XXXXXXXXXX  # Google Analytics 的测量 ID (Google Analytics Measurement ID)
 #      - UMAMI_WEBSITE_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  # Umami 网站 ID (Umami Website ID)
 #      - UMAMI_SCRIPT_URL=https://analytics.umami.is/script.js  # Umami 脚本 URL，默认为官方地址 (Umami Script URL, defaults to official URL)
+      # HOIDC SSO configuration
+      - HOIDC_ENABLED=${HOIDC_ENABLED:-}
+      - HOIDC_LOGIN_PAGE=${HOIDC_LOGIN_PAGE:-}
+      - HOIDC_SSO_API=${HOIDC_SSO_API:-}
+      - HOIDC_PLATFORM_ID=${HOIDC_PLATFORM_ID:-}
+      - HOIDC_ALLOW_SIGNUP=${HOIDC_ALLOW_SIGNUP:-}
+      - HOIDC_ENFORCE_SSO=${HOIDC_ENFORCE_SSO:-}
+      # SSO user sync configuration
+      - SSO_SYNC_ENABLED=${SSO_SYNC_ENABLED:-}
+      - SSO_USER_LIST_API_URL=${SSO_USER_LIST_API_URL:-}
+      - SSO_USER_LIST_PLATFORM_ID=${SSO_USER_LIST_PLATFORM_ID:-}
+      - SSO_USER_LIST_SECRET=${SSO_USER_LIST_SECRET:-}
 
     depends_on:
       - redis
