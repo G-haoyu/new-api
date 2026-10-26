@@ -91,8 +91,19 @@ export interface CapabilityTargetChannel {
 export interface CapabilityTarget {
   id: number
   model_name: string
+  /** 命中的模型级声明行名称；精确模型时与 model_name 相同。 */
+  declaration_name: string
+  /** 声明行的匹配规则：0 精确、1 前缀、2 包含、3 后缀。 */
+  name_rule: number
   capabilities?: string
   channels: CapabilityTargetChannel[]
+}
+
+export interface CapabilityTargetsPage {
+  items: CapabilityTarget[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface ChannelModelCapabilityDetail {

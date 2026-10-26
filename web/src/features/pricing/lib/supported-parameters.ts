@@ -21,7 +21,6 @@ import type { ModelParameter, PricingModel } from '../types'
 export type SupportedParameter = {
   name: string
   type: ModelParameter['type']
-  defaultValue?: string | number | boolean
   range?: string
   maxItems?: number
   enumValues?: string[]
@@ -30,19 +29,17 @@ export type SupportedParameter = {
 }
 
 type ProtocolParameterMeta = {
-  defaultValue?: string | number | boolean
   descriptionKey: string
   required?: boolean
 }
 
-// 默认值属于协议事实，不是模型事实；模型只声明"这个参数存在、值域多大"。
+// 模型只声明"这个参数存在、值域多大"。默认值不在公开页面展示：
+// 它取决于渠道与上游实现，不属于模型事实。
 const PROTOCOL_PARAMETERS: Record<string, ProtocolParameterMeta> = {
   temperature: {
-    defaultValue: 1,
     descriptionKey: 'Sampling temperature; lower is more deterministic',
   },
   top_p: {
-    defaultValue: 1,
     descriptionKey: 'Nucleus sampling probability mass',
   },
   top_k: {
@@ -52,11 +49,9 @@ const PROTOCOL_PARAMETERS: Record<string, ProtocolParameterMeta> = {
     descriptionKey: 'Maximum number of tokens in the response',
   },
   frequency_penalty: {
-    defaultValue: 0,
     descriptionKey: 'Penalises repetition of frequent tokens',
   },
   presence_penalty: {
-    defaultValue: 0,
     descriptionKey: 'Encourages introducing new topics',
   },
   stop: {
@@ -66,11 +61,9 @@ const PROTOCOL_PARAMETERS: Record<string, ProtocolParameterMeta> = {
     descriptionKey: 'Deterministic sampling seed (best-effort)',
   },
   n: {
-    defaultValue: 1,
     descriptionKey: 'Number of completions to generate',
   },
   stream: {
-    defaultValue: false,
     descriptionKey: 'Stream tokens via Server-Sent Events',
   },
   response_format: {
@@ -83,7 +76,6 @@ const PROTOCOL_PARAMETERS: Record<string, ProtocolParameterMeta> = {
     descriptionKey: 'Tool-choice policy or specific tool name',
   },
   logprobs: {
-    defaultValue: false,
     descriptionKey: 'Return per-token log probabilities',
   },
   reasoning_effort: {
@@ -102,7 +94,6 @@ export function buildSupportedParameters(
     return {
       name: parameter.name,
       type: parameter.type,
-      defaultValue: meta?.defaultValue,
       range: parameter.range,
       maxItems: parameter.max_items,
       enumValues: parameter.enum_values,

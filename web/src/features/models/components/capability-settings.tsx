@@ -17,10 +17,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { getRouteApi } from '@tanstack/react-router'
+import type { ColumnDef } from '@tanstack/react-table'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import {
+  DataTableDetailRow,
+  DataTableExpansionToggle,
+  DataTablePage,
+  useDataTable,
+} from '@/components/data-table'
 import {
   SideDrawerSection,
   SideDrawerSectionHeader,
@@ -28,19 +36,20 @@ import {
   sideDrawerFooterClassName,
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
+import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { JsonEditor } from '@/components/json-editor'
 import { LoadingState } from '@/components/loading-state'
+import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { Input } from '@/components/ui/input'
 import {
   Sheet,
   SheetContent,
@@ -49,14 +58,9 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { getChannelTypeLabel } from '@/features/channels/lib/channel-utils'
+import { useDebounce } from '@/hooks'
+import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { getServerErrorMessage } from '@/lib/server-error-message'
 
 import {
@@ -65,21 +69,71 @@ import {
   getChannelModelCapability,
   saveChannelModelCapability,
 } from '../api'
+import { getNameRuleConfig } from '../constants'
 import { capabilityTargetsQueryKeys } from '../lib'
 import type { CapabilityTarget, CapabilityTargetChannel } from '../types'
+
+const route = getRouteApi('/_authenticated/models/$section')
 
 type Selection = {
   target: CapabilityTarget
   channel: CapabilityTargetChannel
 }
 
+const EMPTY_TARGETS: CapabilityTarget[] = []
+
+/**
+ * 一行一个模型，行内展开该模型的全部服务渠道。模型名可能由前缀/后缀/包含声明
+ * 展开而来，此时在名称下面标出声明来源。
+ */
 export function CapabilitySettings() {
   const { t } = useTranslation()
   const [selection, setSelection] = useState<Selection | null>(null)
+  const state = useTableUrlState({
+    search: route.useSearch(),
+    navigate: route.useNavigate(),
+    pagination: {
+      pageKey: 'cPage',
+      pageSizeKey: 'cPageSize',
+      defaultPageSize: 20,
+    },
+    globalFilter: { enabled: true, key: 'cFilter' },
+    columnFilters: [
+      { columnId: 'channel_id', searchKey: 'cChannel', type: 'string' },
+    ],
+  })
+  const { onColumnFiltersChange } = state
+  const channelFilter =
+    (state.columnFilters.find((filter) => filter.id === 'channel_id')?.value as
+      | string
+      | undefined) ?? ''
+  const channelID = Number.parseInt(channelFilter, 10) || 0
+  const keyword = state.globalFilter?.trim() ?? ''
+
+  const [channelDraft, setChannelDraft] = useState(channelFilter)
+  useEffect(() => setChannelDraft(channelFilter), [channelFilter])
+  const debouncedChannel = useDebounce(channelDraft, 400)
+  useEffect(() => {
+    const next = debouncedChannel.replaceAll(/\D/g, '')
+    if (next === channelFilter) {
+      return
+    }
+    onColumnFiltersChange((current) => {
+      const rest = current.filter((filter) => filter.id !== 'channel_id')
+      return next ? [...rest, { id: 'channel_id', value: next }] : rest
+    })
+  }, [debouncedChannel, channelFilter, onColumnFiltersChange])
+
+  const params = {
+    keyword: keyword || undefined,
+    channel_id: channelID || undefined,
+    p: state.pagination.pageIndex + 1,
+    page_size: state.pagination.pageSize,
+  }
   const targetsQuery = useQuery({
-    queryKey: capabilityTargetsQueryKeys.list(),
+    queryKey: capabilityTargetsQueryKeys.list(params),
     queryFn: async () => {
-      const response = await getCapabilityTargets()
+      const response = await getCapabilityTargets(params)
       if (!response.success || !response.data) {
         throw new Error(
           response.message || t('Failed to load capability targets')
@@ -89,7 +143,103 @@ export function CapabilitySettings() {
     },
   })
 
-  const targets = targetsQuery.data ?? []
+  const targets = targetsQuery.data?.items ?? EMPTY_TARGETS
+
+  const columns = useMemo<ColumnDef<CapabilityTarget>[]>(() => {
+    const rules = getNameRuleConfig(t)
+    return [
+      {
+        accessorKey: 'model_name',
+        header: t('Model'),
+        enableSorting: false,
+        enableHiding: false,
+        meta: { mobileTitle: true },
+        cell: ({ row }) => {
+          const target = row.original
+          const rule =
+            target.name_rule === 0
+              ? null
+              : rules[target.name_rule as 0 | 1 | 2 | 3]
+          return (
+            <div className='flex min-w-0 items-start gap-1.5'>
+              {target.channels.length > 0 ? (
+                <DataTableExpansionToggle row={row} className='mt-0.5' />
+              ) : (
+                <span className='size-6 shrink-0' aria-hidden />
+              )}
+              <div className='min-w-0'>
+                <div
+                  className='truncate font-mono text-sm'
+                  title={target.model_name}
+                >
+                  {target.model_name}
+                </div>
+                <div className='text-muted-foreground mt-0.5 truncate text-xs'>
+                  {rule
+                    ? `${rule.label} · ${target.declaration_name}`
+                    : t('Exact model')}
+                </div>
+              </div>
+            </div>
+          )
+        },
+      },
+      {
+        id: 'channels',
+        header: t('Serving channels'),
+        size: 150,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className='tabular-nums'>{row.original.channels.length}</span>
+        ),
+      },
+      {
+        id: 'narrowed',
+        header: t('Narrowed'),
+        size: 140,
+        enableSorting: false,
+        cell: ({ row }) => {
+          const total = row.original.channels.length
+          const configured = row.original.channels.filter(
+            (channel) => channel.configured
+          ).length
+          return (
+            <Badge
+              variant={configured > 0 ? 'default' : 'outline'}
+              className='tabular-nums'
+            >
+              {configured} / {total}
+            </Badge>
+          )
+        },
+      },
+    ]
+  }, [t])
+
+  const { table } = useDataTable({
+    data: targets,
+    columns,
+    totalCount: targetsQuery.data?.total ?? 0,
+    getRowId: (target) => target.model_name,
+    columnFilters: state.columnFilters,
+    pagination: state.pagination,
+    globalFilter: state.globalFilter,
+    onColumnFiltersChange: state.onColumnFiltersChange,
+    onPaginationChange: state.onPaginationChange,
+    onGlobalFilterChange: state.onGlobalFilterChange,
+    manualPagination: true,
+    manualFiltering: true,
+    withExpandedRowModel: true,
+    ensurePageInRange: state.ensurePageInRange,
+  })
+
+  const handleSelect = (target: CapabilityTarget) => {
+    return (channel: CapabilityTargetChannel) =>
+      setSelection({ target, channel })
+  }
+  const hierarchyHint = t(
+    'Model-level declarations live in the model editor. Narrow them per channel here; a channel can only reduce the model-level declaration.'
+  )
 
   let content: ReactNode
   if (targetsQuery.isError) {
@@ -99,123 +249,170 @@ export function CapabilitySettings() {
         onRetry={() => void targetsQuery.refetch()}
       />
     )
-  } else if (targetsQuery.isPending) {
-    content = <LoadingState />
   } else {
     content = (
-      <div className='overflow-x-auto rounded-lg border'>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t('Model')}</TableHead>
-              <TableHead>{t('Serving channels')}</TableHead>
-              <TableHead>{t('Narrowed')}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {targets.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={3}
-                  className='text-muted-foreground py-8 text-center text-sm'
-                >
-                  {t('No exact model declarations found.')}
-                </TableCell>
-              </TableRow>
-            ) : (
-              targets.map((target) => {
-                const configured = target.channels.filter(
-                  (channel) => channel.configured
-                ).length
-                const hasBaseline = Boolean(target.capabilities?.trim())
-
-                let channelCell: ReactNode
-                if (target.channels.length === 0) {
-                  channelCell = (
-                    <span className='text-muted-foreground text-sm'>
-                      {t('No enabled channel serves this model.')}
-                    </span>
-                  )
-                } else if (!hasBaseline) {
-                  channelCell = (
-                    <span className='text-muted-foreground text-sm'>
-                      {t('Configure model-level capabilities first.')}
-                    </span>
-                  )
-                } else {
-                  channelCell = (
-                    <ChannelSelector
-                      key={`${target.id}-${configured}`}
-                      target={target}
-                      onSelect={(channel) => setSelection({ target, channel })}
-                    />
-                  )
-                }
-
-                return (
-                  <TableRow key={target.model_name}>
-                    <TableCell className='font-medium'>
-                      {target.model_name}
-                    </TableCell>
-                    <TableCell>{channelCell}</TableCell>
-                    <TableCell>
-                      <Badge variant={configured > 0 ? 'default' : 'outline'}>
-                        {configured} / {target.channels.length}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-          </TableBody>
-        </Table>
-      </div>
+      <DataTablePage
+        table={table}
+        columns={columns}
+        isLoading={targetsQuery.isPending}
+        isFetching={targetsQuery.isFetching}
+        emptyTitle={t('No model declarations found')}
+        emptyDescription={t('Try adjusting your search')}
+        mobile={
+          <CapabilityMobileList
+            targets={targets}
+            loading={targetsQuery.isPending}
+            onSelect={setSelection}
+          />
+        }
+        renderRowDetail={(row) => (
+          <DataTableDetailRow row={row}>
+            <div className='px-4 py-3'>
+              <CapabilityChannelList
+                target={row.original}
+                onSelect={handleSelect(row.original)}
+              />
+            </div>
+          </DataTableDetailRow>
+        )}
+        afterTable={
+          <p className='text-muted-foreground shrink-0 px-1 text-xs'>
+            {hierarchyHint}
+          </p>
+        }
+        toolbarProps={{
+          searchPlaceholder: t('Filter by model name...'),
+          searchDebounceMs: 400,
+          hideViewOptions: true,
+          additionalSearch: (
+            <Input
+              className='w-[150px]'
+              inputMode='numeric'
+              placeholder={t('Channel ID')}
+              aria-label={t('Filter by channel ID')}
+              value={channelDraft}
+              onChange={(event) =>
+                setChannelDraft(event.target.value.replaceAll(/\D/g, ''))
+              }
+            />
+          ),
+          hasAdditionalFilters: channelID > 0,
+          onReset: () => setChannelDraft(''),
+        }}
+      />
     )
   }
 
   return (
-    <div className='space-y-4'>
-      <p className='text-muted-foreground text-sm'>
-        {t(
-          'Model-level declarations live in the model editor. Narrow them per channel here; a channel can only reduce the model-level declaration.'
-        )}
-      </p>
+    <>
       {content}
       <CapabilityEditor
         selection={selection}
         onClose={() => setSelection(null)}
       />
-    </div>
+    </>
   )
 }
 
-function ChannelSelector(props: {
+function CapabilityChannelList(props: {
   target: CapabilityTarget
   onSelect: (channel: CapabilityTargetChannel) => void
 }) {
   const { t } = useTranslation()
+  if (props.target.channels.length === 0) {
+    return (
+      <p className='text-muted-foreground text-sm'>
+        {t('No enabled channel serves this model.')}
+      </p>
+    )
+  }
   return (
-    <Select
-      value=''
-      onValueChange={(value) => {
-        const channel = props.target.channels.find(
-          (item) => String(item.id) === value
+    <ul className='grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3'>
+      {props.target.channels.map((channel) => (
+        <li
+          key={channel.id}
+          className='bg-background flex min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 py-1.5'
+        >
+          <div className='min-w-0'>
+            <div className='truncate text-sm' title={channel.name}>
+              #{channel.id} · {channel.name}
+            </div>
+            <div className='text-muted-foreground text-xs'>
+              {t(getChannelTypeLabel(channel.type))}
+            </div>
+          </div>
+          <div className='flex shrink-0 items-center gap-1.5'>
+            <StatusBadge
+              label={channel.configured ? t('Narrowed') : t('Inherited')}
+              variant={channel.configured ? 'blue' : 'neutral'}
+              size='sm'
+            />
+            <Button
+              size='sm'
+              variant='outline'
+              className='h-7'
+              onClick={() => props.onSelect(channel)}
+            >
+              {channel.configured ? t('Edit narrowing') : t('Narrow')}
+            </Button>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function CapabilityMobileList(props: {
+  targets: CapabilityTarget[]
+  loading: boolean
+  onSelect: (selection: Selection) => void
+}) {
+  const { t } = useTranslation()
+  const rules = getNameRuleConfig(t)
+  if (props.loading) {
+    return <LoadingState />
+  }
+  if (props.targets.length === 0) {
+    return <EmptyState title={t('No model declarations found')} />
+  }
+  return (
+    <div className='space-y-2'>
+      {props.targets.map((target) => {
+        const total = target.channels.length
+        const configured = target.channels.filter(
+          (channel) => channel.configured
+        ).length
+        const rule =
+          target.name_rule === 0
+            ? null
+            : rules[target.name_rule as 0 | 1 | 2 | 3]
+        return (
+          <Collapsible key={target.model_name} className='rounded-lg border'>
+            <CollapsibleTrigger className='flex w-full items-center justify-between gap-2 px-3 py-2 text-left'>
+              <span className='min-w-0'>
+                <span className='block truncate font-mono text-sm'>
+                  {target.model_name}
+                </span>
+                <span className='text-muted-foreground block truncate text-xs'>
+                  {rule
+                    ? `${rule.label} · ${target.declaration_name}`
+                    : t('Exact model')}
+                </span>
+              </span>
+              <Badge variant={configured > 0 ? 'default' : 'outline'}>
+                {configured} / {total}
+              </Badge>
+            </CollapsibleTrigger>
+            <CollapsibleContent className='border-t px-3 py-2'>
+              <CapabilityChannelList
+                target={target}
+                onSelect={(channel) => props.onSelect({ target, channel })}
+              />
+            </CollapsibleContent>
+          </Collapsible>
         )
-        if (channel) props.onSelect(channel)
-      }}
-    >
-      <SelectTrigger className='w-[320px]'>
-        <SelectValue placeholder={t('Select a channel to narrow')} />
-      </SelectTrigger>
-      <SelectContent>
-        {props.target.channels.map((channel) => (
-          <SelectItem key={channel.id} value={String(channel.id)}>
-            #{channel.id} · {channel.name} · {t('Type')} {channel.type}
-            {channel.configured ? ' ✓' : ''}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+      })}
+    </div>
   )
 }
 

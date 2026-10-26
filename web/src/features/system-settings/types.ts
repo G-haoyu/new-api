@@ -21,6 +21,55 @@ export type SystemOption = {
   value: string
 }
 
+export type CapabilityGateEventAction =
+  | 'passed'
+  | 'soft'
+  | 'filtered'
+  | 'rejected'
+  | 'would_filter'
+  | 'would_reject'
+
+export type CapabilityGateEventDimension = {
+  dimension: string
+  required?: unknown
+  supported?: unknown
+  severity: 'hard' | 'soft'
+}
+
+export type CapabilityGateEvent = {
+  id: number
+  mode: 'off' | 'shadow' | 'enforce'
+  model: string
+  action: CapabilityGateEventAction
+  /** 本次判定评估的渠道数。 */
+  channels_evaluated: number
+  /** 逗号分隔的被淘汰渠道 ID；通过/soft 事件为空。 */
+  rejected_channels: string
+  /** JSON 字符串：CapabilityGateEventDimension[] */
+  dimensions: string
+  created_at: number
+}
+
+export type CapabilityGateEventQuery = {
+  p: number
+  page_size: number
+  model?: string
+  action?: CapabilityGateEventAction
+  start_time?: number
+  end_time?: number
+}
+
+export type CapabilityGateEventsResponse = {
+  success: boolean
+  message?: string
+  data?: {
+    page: number
+    page_size: number
+    total: number
+    items: CapabilityGateEvent[]
+  }
+}
+
 export type ChannelModelEventType =
   | 'disabled'
   | 'probe_success'
@@ -345,6 +394,11 @@ export type ModelSettings = {
   'monitor_setting.channel_model_wecom_bot_url': string
   'monitor_setting.channel_model_wecom_bot_webhook_key_configured': boolean
   'monitor_setting.channel_model_wecom_bot_contact': string
+  'capability_gate_setting.mode': 'off' | 'shadow' | 'enforce'
+  'capability_gate_setting.max_body_bytes': number
+  'capability_gate_setting.event_retention_days': number
+  'capability_gate_setting.record_only_dimensions': string
+  'capability_gate_setting.record_passed': boolean
   'channel_affinity_setting.enabled': boolean
   'channel_affinity_setting.switch_on_success': boolean
   'channel_affinity_setting.keep_on_channel_disabled': boolean

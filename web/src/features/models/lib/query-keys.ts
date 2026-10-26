@@ -43,7 +43,8 @@ export const vendorsQueryKeys = {
 
 export const capabilityTargetsQueryKeys = {
   all: ['capability-targets'] as const,
-  list: () => [...capabilityTargetsQueryKeys.all, 'list'] as const,
+  list: (filters?: Record<string, unknown>) =>
+    [...capabilityTargetsQueryKeys.all, 'list', filters] as const,
 }
 
 export const channelModelCapabilityQueryKeys = {

@@ -298,6 +298,39 @@ it('keeps channel rows individually selectable and disables metadata mutations f
   ).toBeEnabled()
 })
 
+it('lists models matched by a rule under that rule instead of as separate rows', async () => {
+  const rule: Model = {
+    ...metadata,
+    id: 12,
+    model_name: 'family-',
+    name_rule: 1,
+    matched_count: 2,
+    matched_models: ['family-a', 'family-b'],
+    configured_channel_count: 2,
+    square_state: 'visible',
+  }
+  await renderList([rule])
+  // 命中规则的具体模型不再单独成行，所以没有“缺元数据”行。
+  expect(screen.queryByText('Missing metadata')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'family-a' })
+  ).not.toBeInTheDocument()
+
+  const user = userEvent.setup()
+  const toggle = screen.getByRole('button', { name: 'Expand' })
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await user.click(toggle)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByRole('button', { name: 'family-a' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'family-b' })).toBeVisible()
+
+  await user.click(screen.getByRole('button', { name: 'family-b' }))
+  expect(screen.getByRole('textbox', { name: 'Model Name *' })).toHaveValue(
+    'family-b'
+  )
+})
+
 it('keeps long model names and translated channel labels truncated inside their existing cells', async () => {
   const longName =
     'provider/very-long-channel-model-with-detailed-version-and-context-window'

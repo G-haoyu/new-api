@@ -42,6 +42,8 @@ type EditorRow = {
   id: string
   key: string
   value: string
+  /** 值原本是对象/数组（而非字符串），回到 JSON 时必须按 JSON 还原。 */
+  structured: boolean
 }
 
 function parseJsonRows(json: string): EditorRow[] {
@@ -55,6 +57,7 @@ function parseJsonRows(json: string): EditorRow[] {
       id: `${Date.now()}-${index}`,
       key,
       value: typeof val === 'object' ? JSON.stringify(val) : String(val),
+      structured: typeof val === 'object',
     }))
   } catch {
     return []
@@ -107,8 +110,14 @@ export function JsonEditor({
       if (row.key.trim()) {
         let parsedValue: unknown = row.value.trim()
 
-        // Try to parse value based on type
-        if (valueType === 'number') {
+        if (row.structured) {
+          // 嵌套对象/数组按 JSON 还原，绝不能退化成字符串。
+          try {
+            parsedValue = JSON.parse(row.value)
+          } catch {
+            parsedValue = row.value.trim()
+          }
+        } else if (valueType === 'number') {
           parsedValue = Number(parsedValue) || 0
         } else if (valueType === 'any') {
           // Try to parse as JSON first
@@ -131,6 +140,7 @@ export function JsonEditor({
       id: `${Date.now()}`,
       key: '',
       value: '',
+      structured: false,
     }
     const updatedRows = [...rows, newRow]
     setRows(updatedRows)

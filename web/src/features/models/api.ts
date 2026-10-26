@@ -36,7 +36,7 @@ import type {
   MetadataSyncRequest,
   DeploymentSettingsResponse,
   ListDeploymentsResponse,
-  CapabilityTarget,
+  CapabilityTargetsPage,
   ChannelModelCapabilityDetail,
 } from './types'
 
@@ -80,10 +80,7 @@ export async function getAllModels(
   if (failedPage) {
     throw new Error(failedPage.message || 'Failed to load models')
   }
-  return [
-    ...firstItems,
-    ...pages.flatMap((page) => page.data?.items ?? []),
-  ]
+  return [...firstItems, ...pages.flatMap((page) => page.data?.items ?? [])]
 }
 
 /**
@@ -230,12 +227,19 @@ export async function deleteVendor(
 // Capability settings
 // ============================================================================
 
-export async function getCapabilityTargets(): Promise<{
+export async function getCapabilityTargets(
+  params: {
+    keyword?: string
+    channel_id?: number
+    p?: number
+    page_size?: number
+  } = {}
+): Promise<{
   success: boolean
-  data?: CapabilityTarget[]
+  data?: CapabilityTargetsPage
   message?: string
 }> {
-  const res = await api.get('/api/models/capability-targets')
+  const res = await api.get('/api/models/capability-targets', { params })
   return res.data
 }
 
