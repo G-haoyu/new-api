@@ -28,15 +28,17 @@ func (ChannelModelCapability) TableName() string {
 }
 
 type modelCapabilityRecord struct {
+	id   int
 	name string
 	rule int
+	raw  string
 	spec capability.Spec
 }
 
 var capabilityCache struct {
 	sync.RWMutex
 	initialized bool
-	exact       map[string]capability.Spec
+	exact       map[string]modelCapabilityRecord
 	prefix      []modelCapabilityRecord
 	suffix      []modelCapabilityRecord
 	contains    []modelCapabilityRecord
@@ -52,7 +54,7 @@ func InitCapabilityCache() error {
 	if err := DB.Select("id", "model_name", "name_rule", "capabilities").Order("id").Find(&models).Error; err != nil {
 		return err
 	}
-	exact := make(map[string]capability.Spec)
+	exact := make(map[string]modelCapabilityRecord)
 	var prefix, suffix, contains []modelCapabilityRecord
 	for _, metadata := range models {
 		spec, problems := capability.Parse(metadata.Capabilities)
@@ -63,7 +65,13 @@ func InitCapabilityCache() error {
 		if strings.TrimSpace(metadata.Capabilities) == "" {
 			continue
 		}
-		record := modelCapabilityRecord{name: metadata.ModelName, rule: metadata.NameRule, spec: spec}
+		record := modelCapabilityRecord{
+			id:   metadata.Id,
+			name: metadata.ModelName,
+			rule: metadata.NameRule,
+			raw:  metadata.Capabilities,
+			spec: spec,
+		}
 		switch metadata.NameRule {
 		case NameRulePrefix:
 			prefix = append(prefix, record)
@@ -72,7 +80,7 @@ func InitCapabilityCache() error {
 		case NameRuleContains:
 			contains = append(contains, record)
 		default:
-			exact[metadata.ModelName] = spec
+			exact[metadata.ModelName] = record
 		}
 	}
 
@@ -130,13 +138,24 @@ func HasCapabilityDeclarations() bool {
 // 同一规则内以更长的匹配键优先，这样 claude-sonnet-4-5 的具体声明不会被
 // claude-sonnet-4 的家族默认声明先命中。
 func ResolveModelCapability(modelName string) (capability.Spec, bool) {
+	record, ok := resolveModelCapabilityRecord(modelName)
+	return record.spec, ok
+}
+
+// ResolveModelCapabilityDeclaration 返回命中的声明来源（模型行 ID 与原始 JSON）。
+func ResolveModelCapabilityDeclaration(modelName string) (int, string, bool) {
+	record, ok := resolveModelCapabilityRecord(modelName)
+	return record.id, record.raw, ok
+}
+
+func resolveModelCapabilityRecord(modelName string) (modelCapabilityRecord, bool) {
 	capabilityCache.RLock()
 	defer capabilityCache.RUnlock()
 	if !capabilityCache.initialized {
-		return capability.Spec{}, false
+		return modelCapabilityRecord{}, false
 	}
-	if spec, ok := capabilityCache.exact[modelName]; ok {
-		return spec, true
+	if record, ok := capabilityCache.exact[modelName]; ok {
+		return record, true
 	}
 	for _, records := range [][]modelCapabilityRecord{capabilityCache.prefix, capabilityCache.suffix, capabilityCache.contains} {
 		var matched *modelCapabilityRecord
@@ -149,10 +168,10 @@ func ResolveModelCapability(modelName string) (capability.Spec, bool) {
 			}
 		}
 		if matched != nil {
-			return matched.spec, true
+			return *matched, true
 		}
 	}
-	return capability.Spec{}, false
+	return modelCapabilityRecord{}, false
 }
 
 func metadataMatchesName(name string, rule int, modelName string) bool {
@@ -273,14 +292,13 @@ type CapabilityTarget struct {
 	Channels     []CapabilityTargetChannel `json:"channels"`
 }
 
-// GetCapabilityTargets 返回精确规则模型及其服务渠道。
+// GetCapabilityTargets 返回所有能解析到模型级声明的渠道模型及其服务渠道。
+// 精确行即使暂无渠道也会列出；前缀/通配行则通过渠道声明的具体模型名展开，
+// 这样管理员可以直接给 deepseek-v4-pro 这类具体模型配置渠道收窄。
 func GetCapabilityTargets() ([]CapabilityTarget, error) {
-	var models []Model
-	if err := DB.Where("name_rule = ?", NameRuleExact).Order("model_name").Find(&models).Error; err != nil {
+	var exactNames []string
+	if err := DB.Model(&Model{}).Where("name_rule = ?", NameRuleExact).Pluck("model_name", &exactNames).Error; err != nil {
 		return nil, err
-	}
-	if len(models) == 0 {
-		return []CapabilityTarget{}, nil
 	}
 
 	var rows []struct {
@@ -300,7 +318,12 @@ func GetCapabilityTargets() ([]CapabilityTarget, error) {
 		return nil, err
 	}
 	channelsByModel := make(map[string][]CapabilityTargetChannel)
+	names := make(map[string]struct{}, len(exactNames)+len(rows))
+	for _, name := range exactNames {
+		names[name] = struct{}{}
+	}
 	for _, row := range rows {
+		names[row.Model] = struct{}{}
 		channelsByModel[row.Model] = append(channelsByModel[row.Model], CapabilityTargetChannel{
 			ID:   row.ID,
 			Name: row.Name,
@@ -312,19 +335,28 @@ func GetCapabilityTargets() ([]CapabilityTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	targets := make([]CapabilityTarget, 0, len(models))
-	for _, metadata := range models {
-		channels := channelsByModel[metadata.ModelName]
+	modelNames := make([]string, 0, len(names))
+	for name := range names {
+		if _, _, ok := ResolveModelCapabilityDeclaration(name); ok {
+			modelNames = append(modelNames, name)
+		}
+	}
+	sort.Strings(modelNames)
+
+	targets := make([]CapabilityTarget, 0, len(modelNames))
+	for _, name := range modelNames {
+		declarationID, declaration, _ := ResolveModelCapabilityDeclaration(name)
+		channels := channelsByModel[name]
 		for i := range channels {
-			channels[i].Configured = configuredRows[ChannelModelCapabilityKey{ChannelId: channels[i].ID, Model: metadata.ModelName}]
+			channels[i].Configured = configuredRows[ChannelModelCapabilityKey{ChannelId: channels[i].ID, Model: name}]
 		}
 		if channels == nil {
 			channels = []CapabilityTargetChannel{}
 		}
 		targets = append(targets, CapabilityTarget{
-			ID:           metadata.Id,
-			ModelName:    metadata.ModelName,
-			Capabilities: metadata.Capabilities,
+			ID:           declarationID,
+			ModelName:    name,
+			Capabilities: declaration,
 			Channels:     channels,
 		})
 	}

@@ -153,7 +153,7 @@ export function CapabilitySettings() {
                 }
 
                 return (
-                  <TableRow key={target.id}>
+                  <TableRow key={target.model_name}>
                     <TableCell className='font-medium'>
                       {target.model_name}
                     </TableCell>

@@ -31,6 +31,22 @@ func setupCapabilityModelTest(t *testing.T) *gorm.DB {
 	return db
 }
 
+func TestCapabilityTargetsExpandPrefixDeclarations(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	require.NoError(t, db.Create(&Model{ModelName: "deepseek-v4-pro", NameRule: NameRulePrefix, Capabilities: `{"context":{"max_output_tokens":100}}`}).Error)
+	require.NoError(t, db.Create(&Channel{Id: 1, Name: "ds", Group: "default", Models: "deepseek-v4-pro", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&Ability{Group: "default", Model: "deepseek-v4-pro", ChannelId: 1, Enabled: true}).Error)
+	require.NoError(t, InitCapabilityCache())
+
+	targets, err := GetCapabilityTargets()
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	assert.Equal(t, "deepseek-v4-pro", targets[0].ModelName)
+	assert.Contains(t, targets[0].Capabilities, "max_output_tokens")
+	require.Len(t, targets[0].Channels, 1)
+	assert.Equal(t, 1, targets[0].Channels[0].ID)
+}
+
 func TestCapabilityTargetsListServingChannelsOnce(t *testing.T) {
 	db := setupCapabilityModelTest(t)
 	require.NoError(t, db.Create(&Model{ModelName: "target-model", NameRule: NameRuleExact, Capabilities: `{"context":{"max_output_tokens":100}}`}).Error)
