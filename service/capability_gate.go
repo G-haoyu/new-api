@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -47,14 +48,21 @@ type CapabilityGate struct {
 	mode  CapabilityGateMode
 	needs *capability.Needs
 
-	modelVerdicts map[string]capabilityVerdict
-	evaluated     int
-	wouldReject   []string
-	rejected      []string
+	modelVerdicts   map[string]capabilityVerdict
+	modelRejections map[string]capabilityRejection
+	evaluated       int
+	wouldReject     []string
+	rejected        []string
 
 	channelModel      string
 	channelsEvaluated int
 	channelsRejected  []int
+	channelRejections map[int]capabilityRejection
+}
+
+type capabilityRejection struct {
+	undeclared bool
+	violations []capability.Violation
 }
 
 type capabilityVerdict struct {
@@ -125,12 +133,23 @@ func (g *CapabilityGate) Allows(modelName string) bool {
 	}
 	verdict, seen := g.modelVerdicts[baseModel]
 	if !seen {
+		if g.modelVerdicts == nil {
+			g.modelVerdicts = make(map[string]capabilityVerdict)
+		}
+		if g.modelRejections == nil {
+			g.modelRejections = make(map[string]capabilityRejection)
+		}
 		spec, declared := model.ResolveModelCapability(baseModel)
-		satisfied := declared && capability.Satisfied(capability.Evaluate(spec, g.needs))
+		var violations []capability.Violation
+		if declared {
+			violations = capability.Evaluate(spec, g.needs)
+		}
+		satisfied := declared && capability.Satisfied(violations)
 		verdict = capabilityVerdict{declared: declared, satisfied: satisfied}
 		g.modelVerdicts[baseModel] = verdict
 		g.evaluated++
 		if !satisfied {
+			g.modelRejections[baseModel] = capabilityRejection{undeclared: !declared, violations: violations}
 			g.wouldReject = append(g.wouldReject, baseModel)
 		}
 	}
@@ -173,10 +192,152 @@ func (g *CapabilityGate) FilterChannels(c *gin.Context, modelName string, channe
 	g.channelModel = baseModel
 	g.channelsEvaluated = len(channelIDs)
 	g.channelsRejected = rejected
+	g.channelRejections = make(map[int]capabilityRejection, len(rejected))
+	for _, channelID := range rejected {
+		if !declared {
+			g.channelRejections[channelID] = capabilityRejection{undeclared: true}
+			continue
+		}
+		effective, ok := model.EffectiveChannelCapability(channelID, baseModel)
+		if !ok {
+			g.channelRejections[channelID] = capabilityRejection{undeclared: true}
+			continue
+		}
+		g.channelRejections[channelID] = capabilityRejection{
+			violations: capability.Evaluate(effective, g.needs),
+		}
+	}
 	if g.mode != CapabilityGateEnforce {
 		return channelIDs
 	}
 	return kept
+}
+
+// ExplainChannelRejection 把本次请求的渠道级淘汰原因整理成面向调用方的错误。
+// 只描述 hard 违规维度；未声明模型会明确提示缺少模型级声明。
+func (g *CapabilityGate) ExplainChannelRejection(modelName string) string {
+	if g == nil || len(g.channelRejections) == 0 {
+		return fmt.Sprintf("no available channel for model %q satisfies the request capabilities", modelName)
+	}
+	undeclared := 0
+	dimensions := make(map[string]string)
+	for _, rejection := range g.channelRejections {
+		if rejection.undeclared {
+			undeclared++
+			continue
+		}
+		for _, violation := range rejection.violations {
+			if violation.Severity != capability.SeverityHard {
+				continue
+			}
+			if _, exists := dimensions[violation.Dimension]; exists {
+				continue
+			}
+			dimensions[violation.Dimension] = describeCapabilityViolation(violation)
+		}
+	}
+	if len(dimensions) == 0 {
+		if undeclared > 0 {
+			return fmt.Sprintf("model %q has no model-level capability declaration, so no available channel can be validated", modelName)
+		}
+		return fmt.Sprintf("no available channel for model %q satisfies the request capabilities", modelName)
+	}
+	names := make([]string, 0, len(dimensions))
+	for dimension := range dimensions {
+		names = append(names, dimension)
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		names = append(names[:8], fmt.Sprintf("and %d more", len(names)-8))
+	}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, dimensions[name])
+	}
+	return fmt.Sprintf("no available channel for model %q satisfies the request: %s", modelName, strings.Join(parts, "; "))
+}
+
+func describeCapabilityViolation(violation capability.Violation) string {
+	if violation.Required == nil {
+		return violation.Dimension
+	}
+	if violation.Supported == nil {
+		return fmt.Sprintf("%s (requested %s)", violation.Dimension, formatCapabilityValue(violation.Required))
+	}
+	return fmt.Sprintf("%s (requested %s, supported %s)",
+		violation.Dimension, formatCapabilityValue(violation.Required), formatCapabilityValue(violation.Supported))
+}
+
+func formatCapabilityValue(value any) string {
+	switch typed := value.(type) {
+	case []string:
+		if len(typed) == 0 {
+			return "not declared"
+		}
+		return strings.Join(typed, ", ")
+	case *capability.IntRange:
+		if typed == nil {
+			return "not declared"
+		}
+		return fmt.Sprintf("[%d,%d]", typed.Min, typed.Max)
+	case *capability.FloatRange:
+		if typed == nil {
+			return "not declared"
+		}
+		return fmt.Sprintf("[%g,%g]", typed.Min, typed.Max)
+	case *capability.Limit:
+		if typed == nil {
+			return "not declared"
+		}
+		return fmt.Sprintf("max %d", typed.Max)
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
+// AllEvaluatedRejected 报告 auto 候选里所有已评估模型都被模型级能力淘汰。
+func (g *CapabilityGate) AllEvaluatedRejected() bool {
+	return g != nil && g.mode == CapabilityGateEnforce && g.evaluated > 0 && len(g.wouldReject) >= g.evaluated
+}
+
+// ExplainModelRejection 把 auto 模型级淘汰原因整理成面向调用方的错误。
+func (g *CapabilityGate) ExplainModelRejection() string {
+	undeclared := 0
+	dimensions := make(map[string]string)
+	for _, rejection := range g.modelRejections {
+		if rejection.undeclared {
+			undeclared++
+			continue
+		}
+		for _, violation := range rejection.violations {
+			if violation.Severity != capability.SeverityHard {
+				continue
+			}
+			if _, exists := dimensions[violation.Dimension]; exists {
+				continue
+			}
+			dimensions[violation.Dimension] = describeCapabilityViolation(violation)
+		}
+	}
+	if len(dimensions) == 0 {
+		if undeclared > 0 {
+			return "no auto candidate model has a model-level capability declaration, so none can be validated"
+		}
+		return "no auto candidate model satisfies the request capabilities"
+	}
+	names := make([]string, 0, len(dimensions))
+	for dimension := range dimensions {
+		names = append(names, dimension)
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		names = append(names[:8], fmt.Sprintf("and %d more", len(names)-8))
+	}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, dimensions[name])
+	}
+	return fmt.Sprintf("no auto candidate model satisfies the request: %s", strings.Join(parts, "; "))
 }
 
 // Summary 返回可写进日志的摘要；没有结论时返回 nil。

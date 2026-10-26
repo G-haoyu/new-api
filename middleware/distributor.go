@@ -146,6 +146,10 @@ func Distribute() func(c *gin.Context) {
 						capabilityGate.LogSummary(c)
 					}
 					if err != nil {
+						if capabilityGate != nil && capabilityGate.AllEvaluatedRejected() {
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, capabilityGate.ExplainModelRejection(), types.ErrorCodeModelNotFound)
+							return
+						}
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, err.Error(), types.ErrorCodeModelNotFound)
 						return
 					}
@@ -159,6 +163,11 @@ func Distribute() func(c *gin.Context) {
 			allowedChannels := usableChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path)
 			if capabilityGate != nil {
 				narrowed := capabilityGate.FilterChannels(c, modelRequest.Model, allowedChannels)
+				if len(allowedChannels) > 0 && len(narrowed) == 0 {
+					capabilityGate.LogSummary(c)
+					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, capabilityGate.ExplainChannelRejection(modelRequest.Model), types.ErrorCodeModelNotFound)
+					return
+				}
 				if len(narrowed) != len(allowedChannels) {
 					constraints.AddFilter(taskdto.ChannelFilter{
 						Kind:              taskdto.FilterCapability,

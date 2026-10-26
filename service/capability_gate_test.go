@@ -71,6 +71,36 @@ func TestCapabilityGateChannelFilter(t *testing.T) {
 	assert.Equal(t, []int{2}, enforce.FilterChannels(&gin.Context{}, "gated-model", channelIDs))
 }
 
+func TestCapabilityGateExplainsModelRejection(t *testing.T) {
+	setupCapabilityGateTest(t)
+	needs := &capability.Needs{BuiltinTools: []string{"web_search"}}
+	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
+	assert.False(t, enforce.Allows("gated-model"))
+	assert.True(t, enforce.AllEvaluatedRejected())
+	message := enforce.ExplainModelRejection()
+	assert.Contains(t, message, "tools.builtin")
+	assert.Contains(t, message, "web_search")
+}
+
+func TestCapabilityGateExplainsChannelRejection(t *testing.T) {
+	setupCapabilityGateTest(t)
+	needs := &capability.Needs{ToolsCount: 1}
+	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
+	assert.Empty(t, enforce.FilterChannels(&gin.Context{}, "gated-model", []int{1}))
+	message := enforce.ExplainChannelRejection("gated-model")
+	assert.Contains(t, message, "tools.supported")
+	assert.Contains(t, message, "requested 1")
+}
+
+func TestCapabilityGateExplainsMissingDeclaration(t *testing.T) {
+	setupCapabilityGateTest(t)
+	needs := &capability.Needs{ToolsCount: 1}
+	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
+	assert.Empty(t, enforce.FilterChannels(&gin.Context{}, "unknown-model", []int{1}))
+	message := enforce.ExplainChannelRejection("unknown-model")
+	assert.Contains(t, message, "no model-level capability declaration")
+}
+
 func TestCapabilityGateRejectsUndeclaredModelChannels(t *testing.T) {
 	setupCapabilityGateTest(t)
 	needs := &capability.Needs{ToolsCount: 1}
