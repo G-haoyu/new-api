@@ -154,10 +154,16 @@ func resolveModelCapabilityRecord(modelName string) (modelCapabilityRecord, bool
 	if !capabilityCache.initialized {
 		return modelCapabilityRecord{}, false
 	}
-	if record, ok := capabilityCache.exact[modelName]; ok {
+	return resolveCapabilityRecordIn(capabilityCache.exact, capabilityCache.prefix, capabilityCache.suffix, capabilityCache.contains, modelName)
+}
+
+// resolveCapabilityRecordIn 是纯解析：精确 → 前缀 → 后缀 → 包含，同一规则内最长键优先。
+// 缓存解析和"保存前校验"共用它，避免两处规则漂移。
+func resolveCapabilityRecordIn(exact map[string]modelCapabilityRecord, prefix, suffix, contains []modelCapabilityRecord, modelName string) (modelCapabilityRecord, bool) {
+	if record, ok := exact[modelName]; ok {
 		return record, true
 	}
-	for _, records := range [][]modelCapabilityRecord{capabilityCache.prefix, capabilityCache.suffix, capabilityCache.contains} {
+	for _, records := range [][]modelCapabilityRecord{prefix, suffix, contains} {
 		var matched *modelCapabilityRecord
 		for i := range records {
 			if !metadataMatchesName(records[i].name, records[i].rule, modelName) {
@@ -237,6 +243,84 @@ func ValidateChannelModelCapabilities(modelName string, raw string) error {
 	return nil
 }
 
+// ValidateModelCapabilityNarrowings 校验"保存这条模型级声明之后"，所有以它为
+// 声明来源的渠道收窄仍然落在它的值域内。
+//
+// 收窄只在保存收窄时校验一次子集关系；模型级后来被收紧时，存量收窄可能已经越界。
+// 这里在保存模型级之前按"保存后"的声明归属重新解析，一旦越界就拒绝保存并列出
+// 冲突的渠道与维度，避免运行期出现"渠道比模型级更宽"的配置。
+func ValidateModelCapabilityNarrowings(pending Model) error {
+	if strings.TrimSpace(pending.Capabilities) == "" {
+		return nil
+	}
+	spec, problems := capability.Parse(pending.Capabilities)
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+
+	var narrowings []ChannelModelCapability
+	if err := DB.Select("channel_id", "model", "capabilities").Order("channel_id, model").Find(&narrowings).Error; err != nil {
+		return err
+	}
+	if len(narrowings) == 0 {
+		return nil
+	}
+
+	var declarations []Model
+	if err := DB.Select("id", "model_name", "name_rule", "capabilities").Order("id").Find(&declarations).Error; err != nil {
+		return err
+	}
+	exact := make(map[string]modelCapabilityRecord)
+	var prefix, suffix, contains []modelCapabilityRecord
+	collect := func(record Model, parsed capability.Spec) {
+		item := modelCapabilityRecord{id: record.Id, name: record.ModelName, rule: record.NameRule, raw: record.Capabilities, spec: parsed}
+		switch record.NameRule {
+		case NameRulePrefix:
+			prefix = append(prefix, item)
+		case NameRuleSuffix:
+			suffix = append(suffix, item)
+		case NameRuleContains:
+			contains = append(contains, item)
+		default:
+			exact[record.ModelName] = item
+		}
+	}
+	for _, declaration := range declarations {
+		if declaration.Id == pending.Id || strings.TrimSpace(declaration.Capabilities) == "" {
+			continue
+		}
+		parsed, declarationProblems := capability.Parse(declaration.Capabilities)
+		if len(declarationProblems) > 0 {
+			continue
+		}
+		collect(declaration, parsed)
+	}
+	collect(pending, spec)
+
+	conflicts := make([]string, 0)
+	for _, narrowing := range narrowings {
+		record, ok := resolveCapabilityRecordIn(exact, prefix, suffix, contains, narrowing.Model)
+		if !ok || record.id != pending.Id {
+			continue
+		}
+		over, narrowingProblems := capability.Parse(narrowing.Capabilities)
+		if len(narrowingProblems) > 0 {
+			conflicts = append(conflicts, fmt.Sprintf("channel #%d / %s: stored narrowing is invalid: %s", narrowing.ChannelId, narrowing.Model, strings.Join(narrowingProblems, "; ")))
+			continue
+		}
+		if violations := capability.CheckSubset(spec, over); len(violations) > 0 {
+			conflicts = append(conflicts, fmt.Sprintf("channel #%d / %s: %s", narrowing.ChannelId, narrowing.Model, strings.Join(violations, "; ")))
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	if len(conflicts) > 8 {
+		conflicts = append(conflicts[:8], fmt.Sprintf("and %d more", len(conflicts)-8))
+	}
+	return fmt.Errorf("model-level declaration would no longer cover existing channel narrowings: %s", strings.Join(conflicts, "; "))
+}
+
 // SetChannelModelCapability 保存一条渠道收窄并刷新缓存。
 func SetChannelModelCapability(channelID int, modelName string, raw string) error {
 	if channelID <= 0 || strings.TrimSpace(modelName) == "" {
@@ -286,19 +370,30 @@ type CapabilityTargetChannel struct {
 
 // CapabilityTarget 是"模型 → 服务渠道"清单的一行。
 type CapabilityTarget struct {
-	ID           int                       `json:"id"`
-	ModelName    string                    `json:"model_name"`
-	Capabilities string                    `json:"capabilities,omitempty"`
-	Channels     []CapabilityTargetChannel `json:"channels"`
+	ID              int                       `json:"id"`
+	ModelName       string                    `json:"model_name"`
+	DeclarationName string                    `json:"declaration_name"`
+	NameRule        int                       `json:"name_rule"`
+	Capabilities    string                    `json:"capabilities,omitempty"`
+	Channels        []CapabilityTargetChannel `json:"channels"`
+}
+
+// CapabilityTargetQuery 是能力设置页的筛选与分页参数。Limit<=0 表示不分页。
+type CapabilityTargetQuery struct {
+	Keyword   string
+	ChannelID int
+	Offset    int
+	Limit     int
 }
 
 // GetCapabilityTargets 返回所有能解析到模型级声明的渠道模型及其服务渠道。
 // 精确行即使暂无渠道也会列出；前缀/通配行则通过渠道声明的具体模型名展开，
 // 这样管理员可以直接给 deepseek-v4-pro 这类具体模型配置渠道收窄。
-func GetCapabilityTargets() ([]CapabilityTarget, error) {
+// 第二个返回值是筛选后、分页前的总数。
+func GetCapabilityTargets(query CapabilityTargetQuery) ([]CapabilityTarget, int, error) {
 	var exactNames []string
 	if err := DB.Model(&Model{}).Where("name_rule = ?", NameRuleExact).Pluck("model_name", &exactNames).Error; err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var rows []struct {
@@ -315,7 +410,7 @@ func GetCapabilityTargets() ([]CapabilityTarget, error) {
 		Order("abilities.model, channels.id").
 		Scan(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	channelsByModel := make(map[string][]CapabilityTargetChannel)
 	names := make(map[string]struct{}, len(exactNames)+len(rows))
@@ -333,34 +428,58 @@ func GetCapabilityTargets() ([]CapabilityTarget, error) {
 
 	configuredRows, err := GetConfiguredModelCapabilityKeys()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	modelNames := make([]string, 0, len(names))
 	for name := range names {
-		if _, _, ok := ResolveModelCapabilityDeclaration(name); ok {
-			modelNames = append(modelNames, name)
-		}
+		modelNames = append(modelNames, name)
 	}
 	sort.Strings(modelNames)
 
+	keyword := strings.ToLower(strings.TrimSpace(query.Keyword))
 	targets := make([]CapabilityTarget, 0, len(modelNames))
 	for _, name := range modelNames {
-		declarationID, declaration, _ := ResolveModelCapabilityDeclaration(name)
+		record, ok := resolveModelCapabilityRecord(name)
+		if !ok {
+			continue
+		}
+		if keyword != "" && !strings.Contains(strings.ToLower(name), keyword) {
+			continue
+		}
 		channels := channelsByModel[name]
-		for i := range channels {
-			channels[i].Configured = configuredRows[ChannelModelCapabilityKey{ChannelId: channels[i].ID, Model: name}]
+		if query.ChannelID > 0 && !slices.ContainsFunc(channels, func(channel CapabilityTargetChannel) bool {
+			return channel.ID == query.ChannelID
+		}) {
+			continue
 		}
 		if channels == nil {
 			channels = []CapabilityTargetChannel{}
 		}
+		for i := range channels {
+			channels[i].Configured = configuredRows[ChannelModelCapabilityKey{ChannelId: channels[i].ID, Model: name}]
+		}
 		targets = append(targets, CapabilityTarget{
-			ID:           declarationID,
-			ModelName:    name,
-			Capabilities: declaration,
-			Channels:     channels,
+			ID:              record.id,
+			ModelName:       name,
+			DeclarationName: record.name,
+			NameRule:        record.rule,
+			Capabilities:    record.raw,
+			Channels:        channels,
 		})
 	}
-	return targets, nil
+
+	total := len(targets)
+	if query.Offset > 0 {
+		if query.Offset >= len(targets) {
+			targets = []CapabilityTarget{}
+		} else {
+			targets = targets[query.Offset:]
+		}
+	}
+	if query.Limit > 0 && query.Limit < len(targets) {
+		targets = targets[:query.Limit]
+	}
+	return targets, total, nil
 }
 
 // ChannelModelCapabilityKey 标识一条渠道收窄记录。

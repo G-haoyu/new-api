@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/capability"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
 
 	"github.com/gin-gonic/gin"
@@ -26,12 +26,13 @@ const (
 	CapabilityGateEnforce CapabilityGateMode = "enforce"
 )
 
-// CurrentCapabilityGateMode 读取 AUTO_CAPABILITY_GATE_MODE，默认 shadow。
+// CurrentCapabilityGateMode 读取系统设置里的门控模式（默认 shadow）。
+// 环境变量 AUTO_CAPABILITY_GATE_MODE 只在启动时作为初始默认值。
 func CurrentCapabilityGateMode() CapabilityGateMode {
-	switch CapabilityGateMode(strings.ToLower(strings.TrimSpace(os.Getenv("AUTO_CAPABILITY_GATE_MODE")))) {
-	case CapabilityGateOff:
+	switch operation_setting.GetCapabilityGateSetting().Mode {
+	case operation_setting.CapabilityGateModeOff:
 		return CapabilityGateOff
-	case CapabilityGateEnforce:
+	case operation_setting.CapabilityGateModeEnforce:
 		return CapabilityGateEnforce
 	default:
 		return CapabilityGateShadow
@@ -142,7 +143,7 @@ func (g *CapabilityGate) Allows(modelName string) bool {
 		spec, declared := model.ResolveModelCapability(baseModel)
 		var violations []capability.Violation
 		if declared {
-			violations = capability.Evaluate(spec, g.needs)
+			violations = normalizeGateViolations(capability.Evaluate(spec, g.needs))
 		}
 		satisfied := declared && capability.Satisfied(violations)
 		verdict = capabilityVerdict{declared: declared, satisfied: satisfied}
@@ -165,6 +166,7 @@ func (g *CapabilityGate) Allows(modelName string) bool {
 
 // FilterChannels 在选定模型后对候选渠道做一次能力合取。
 // shadow 模式只记录应被剔除的渠道，enforce 模式返回过滤后的集合。
+// 只有 soft 违规（采样参数越界）的渠道仍然保留，但会写进门控事件供排查。
 func (g *CapabilityGate) FilterChannels(c *gin.Context, modelName string, channelIDs []int) []int {
 	if g == nil || len(channelIDs) == 0 {
 		return channelIDs
@@ -177,40 +179,152 @@ func (g *CapabilityGate) FilterChannels(c *gin.Context, modelName string, channe
 
 	kept := make([]int, 0, len(channelIDs))
 	rejected := make([]int, 0)
+	rejections := make(map[int]capabilityRejection, len(channelIDs))
+	soft := make(map[string]capability.Violation)
 	for _, channelID := range channelIDs {
 		if !declared {
 			rejected = append(rejected, channelID)
+			rejections[channelID] = capabilityRejection{undeclared: true}
 			continue
 		}
 		effective, ok := model.EffectiveChannelCapability(channelID, baseModel)
-		if !ok || !capability.Satisfied(capability.Evaluate(effective, g.needs)) {
+		if !ok {
 			rejected = append(rejected, channelID)
+			rejections[channelID] = capabilityRejection{undeclared: true}
 			continue
+		}
+		violations := normalizeGateViolations(capability.Evaluate(effective, g.needs))
+		if !capability.Satisfied(violations) {
+			rejected = append(rejected, channelID)
+			rejections[channelID] = capabilityRejection{violations: violations}
+			continue
+		}
+		for _, violation := range violations {
+			soft[violation.Dimension] = violation
 		}
 		kept = append(kept, channelID)
 	}
 	g.channelModel = baseModel
 	g.channelsEvaluated = len(channelIDs)
 	g.channelsRejected = rejected
-	g.channelRejections = make(map[int]capabilityRejection, len(rejected))
-	for _, channelID := range rejected {
-		if !declared {
-			g.channelRejections[channelID] = capabilityRejection{undeclared: true}
-			continue
-		}
-		effective, ok := model.EffectiveChannelCapability(channelID, baseModel)
-		if !ok {
-			g.channelRejections[channelID] = capabilityRejection{undeclared: true}
-			continue
-		}
-		g.channelRejections[channelID] = capabilityRejection{
-			violations: capability.Evaluate(effective, g.needs),
-		}
-	}
+	g.channelRejections = rejections
+	recordCapabilityGateEvent(g, baseModel, len(channelIDs), rejected, rejections, soft)
 	if g.mode != CapabilityGateEnforce {
 		return channelIDs
 	}
 	return kept
+}
+
+// capabilityGateEventAction 把一次判定归类：
+// 只有"剩余可用渠道为 0"才是真正的拒绝；淘汰了部分渠道但仍有可用渠道时，
+// 请求是被过滤后成功的，不能标成 rejected。
+func capabilityGateEventAction(mode CapabilityGateMode, evaluated, rejected, soft int) string {
+	if rejected == 0 {
+		if soft > 0 {
+			return model.CapabilityGateEventSoft
+		}
+		return model.CapabilityGateEventPassed
+	}
+	kept := evaluated - rejected
+	if mode == CapabilityGateEnforce {
+		if kept == 0 {
+			return model.CapabilityGateEventRejected
+		}
+		return model.CapabilityGateEventFiltered
+	}
+	if kept == 0 {
+		return model.CapabilityGateEventWouldReject
+	}
+	return model.CapabilityGateEventWouldFilter
+}
+
+// normalizeGateViolations 按系统设置里的"仅记录维度"重算严重度。
+// 命中清单的维度（可以是组，也可以是单个维度）一律 soft，其余 hard。
+func normalizeGateViolations(violations []capability.Violation) []capability.Violation {
+	if len(violations) == 0 {
+		return nil
+	}
+	recordOnly := operation_setting.CapabilityGateRecordOnlyDimensions()
+	out := make([]capability.Violation, 0, len(violations))
+	for _, violation := range violations {
+		normalized := violation
+		normalized.Severity = capability.SeverityHard
+		for _, prefix := range recordOnly {
+			if violation.Dimension == prefix || strings.HasPrefix(violation.Dimension, prefix+".") {
+				normalized.Severity = capability.SeveritySoft
+				break
+			}
+		}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+// recordCapabilityGateEvent 把一次渠道级判定写进门控事件表。
+// 设置里允许记录通过时，每个请求都会留痕（含多渠道命中里部分渠道不满足的情况）；
+// 写入失败只记日志，绝不影响本次请求的选路。
+func recordCapabilityGateEvent(g *CapabilityGate, modelName string, evaluated int, rejected []int, rejections map[int]capabilityRejection, soft map[string]capability.Violation) {
+	action := capabilityGateEventAction(g.mode, evaluated, len(rejected), len(soft))
+	if action == model.CapabilityGateEventPassed && !operation_setting.GetCapabilityGateSetting().RecordPassed {
+		return
+	}
+
+	dimensions := make(map[string]capability.Violation, len(soft)+len(rejections))
+	for dimension, violation := range soft {
+		dimensions[dimension] = violation
+	}
+	undeclared := false
+	for _, rejection := range rejections {
+		if rejection.undeclared {
+			undeclared = true
+			continue
+		}
+		for _, violation := range rejection.violations {
+			if _, exists := dimensions[violation.Dimension]; !exists {
+				dimensions[violation.Dimension] = violation
+			}
+		}
+	}
+	if undeclared {
+		dimensions["model.declaration"] = capability.Violation{
+			Dimension: "model.declaration",
+			Required:  true,
+			Supported: false,
+			Severity:  capability.SeverityHard,
+		}
+	}
+	names := make([]string, 0, len(dimensions))
+	for dimension := range dimensions {
+		names = append(names, dimension)
+	}
+	sort.Strings(names)
+	list := make([]capability.Violation, 0, len(names))
+	for _, name := range names {
+		list = append(list, dimensions[name])
+	}
+	encoded, err := common.Marshal(list)
+	if err != nil {
+		common.SysError("failed to encode capability gate event: " + err.Error())
+		return
+	}
+	channelText := ""
+	if len(rejected) > 0 {
+		ids := make([]string, 0, len(rejected))
+		for _, channelID := range rejected {
+			ids = append(ids, strconv.Itoa(channelID))
+		}
+		channelText = strings.Join(ids, ",")
+	}
+	if err := model.RecordCapabilityGateEvent(&model.CapabilityGateEvent{
+		Mode:              string(g.mode),
+		Model:             modelName,
+		Action:            action,
+		ChannelsEvaluated: evaluated,
+		RejectedChannels:  channelText,
+		Dimensions:        string(encoded),
+	}); err != nil {
+		common.SysError("failed to record capability gate event: " + err.Error())
+	}
 }
 
 // ExplainChannelRejection 把本次请求的渠道级淘汰原因整理成面向调用方的错误。
@@ -407,15 +521,7 @@ func capabilityGateBody(c *gin.Context, maxBytes int64) ([]byte, bool) {
 }
 
 func capabilityGateMaxBodyBytes() int64 {
-	value := strings.TrimSpace(os.Getenv("AUTO_CAPABILITY_GATE_MAX_BODY_BYTES"))
-	if value == "" {
-		return 8 << 20
-	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || parsed <= 0 {
-		return 8 << 20
-	}
-	return parsed
+	return operation_setting.GetCapabilityGateSetting().MaxBodyBytes
 }
 
 func dedupeSorted(values []string) []string {

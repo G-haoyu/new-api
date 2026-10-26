@@ -438,6 +438,12 @@ func SetApiRouter(router *gin.Engine) {
 			channelModelCapabilityRoute.DELETE("/", controller.DeleteChannelModelCapability)
 		}
 
+		capabilityGateRoute := apiRouter.Group("/capability-gate")
+		capabilityGateRoute.Use(middleware.AdminAuth())
+		{
+			capabilityGateRoute.GET("/events", controller.GetCapabilityGateEvents)
+		}
+
 		// Deployments (model deployment management)
 		deploymentsRoute := apiRouter.Group("/deployments")
 		deploymentsRoute.Use(middleware.AdminAuth())

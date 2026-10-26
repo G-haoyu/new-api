@@ -14,12 +14,27 @@ import (
 
 // GetModelCapabilityTargets 返回"模型 → 服务渠道"清单，供渠道能力设置页使用。
 func GetModelCapabilityTargets(c *gin.Context) {
-	targets, err := model.GetCapabilityTargets()
+	pageInfo := common.GetPageQuery(c)
+	channelID, err := strconv.Atoi(c.Query("channel_id"))
+	if err != nil {
+		channelID = 0
+	}
+	targets, total, err := model.GetCapabilityTargets(model.CapabilityTargetQuery{
+		Keyword:   c.Query("keyword"),
+		ChannelID: channelID,
+		Offset:    pageInfo.GetStartIdx(),
+		Limit:     pageInfo.GetPageSize(),
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, targets)
+	common.ApiSuccess(c, gin.H{
+		"items":     targets,
+		"total":     total,
+		"page":      pageInfo.GetPage(),
+		"page_size": pageInfo.GetPageSize(),
+	})
 }
 
 type channelModelCapabilityRequest struct {

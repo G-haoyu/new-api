@@ -36,6 +36,17 @@ type Needs struct {
 	Temperature          *float64 `json:"temperature,omitempty"`
 	EstimatedInputTokens int64    `json:"estimated_input_tokens"`
 
+	// 采样参数。值是客户端显式给出的值；nil 表示请求没提这个参数，
+	// StopCount 为 0 表示请求没带停止序列。
+	TopP             *float64 `json:"top_p,omitempty"`
+	TopK             *int64   `json:"top_k,omitempty"`
+	StopCount        int      `json:"stop_count,omitempty"`
+	Completions      *int     `json:"completions,omitempty"`
+	Seed             *int64   `json:"seed,omitempty"`
+	Logprobs         *bool    `json:"logprobs,omitempty"`
+	PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+
 	InputModalities []string `json:"input_modalities,omitempty"` // text | image | audio | video | file
 	Mimes           []string `json:"mimes,omitempty"`
 	Sources         []string `json:"sources,omitempty"` // url | base64 | file_id
@@ -289,6 +300,22 @@ func isJSONNull(raw common.RawMessage) bool {
 	return trimmed == "" || trimmed == "null"
 }
 
+// stopSequenceCount 统计请求带的停止序列条数；OpenAI 允许单字符串或字符串数组。
+func stopSequenceCount(raw common.RawMessage) int {
+	if isJSONNull(raw) {
+		return 0
+	}
+	var values []string
+	if err := common.Unmarshal(raw, &values); err == nil {
+		return len(values)
+	}
+	var single string
+	if err := common.Unmarshal(raw, &single); err == nil && single != "" {
+		return 1
+	}
+	return 0
+}
+
 // mediaURL 从 URL 形态的媒体引用里推断 MIME、传入方式与体积。
 func (c *collector) mediaURL(modality, raw string) {
 	mime, source := mediaFromURL(raw)
@@ -323,6 +350,14 @@ type chatRequest struct {
 	MaxTokens           *int64              `json:"max_tokens"`
 	MaxCompletionTokens *int64              `json:"max_completion_tokens"`
 	Temperature         *float64            `json:"temperature"`
+	TopP                *float64            `json:"top_p"`
+	TopK                *int64              `json:"top_k"`
+	Stop                common.RawMessage   `json:"stop"`
+	N                   *int                `json:"n"`
+	Seed                *int64              `json:"seed"`
+	Logprobs            *bool               `json:"logprobs"`
+	PresencePenalty     *float64            `json:"presence_penalty"`
+	FrequencyPenalty    *float64            `json:"frequency_penalty"`
 	ParallelToolCalls   *bool               `json:"parallel_tool_calls"`
 	Tools               []chatTool          `json:"tools"`
 	Functions           []common.RawMessage `json:"functions"`
@@ -376,6 +411,14 @@ func parseChat(c *collector, body []byte) error {
 	c.maxOutput(req.MaxTokens)
 	c.maxOutput(req.MaxCompletionTokens)
 	c.needs.Temperature = req.Temperature
+	c.needs.TopP = req.TopP
+	c.needs.TopK = req.TopK
+	c.needs.StopCount = stopSequenceCount(req.Stop)
+	c.needs.Completions = req.N
+	c.needs.Seed = req.Seed
+	c.needs.Logprobs = req.Logprobs
+	c.needs.PresencePenalty = req.PresencePenalty
+	c.needs.FrequencyPenalty = req.FrequencyPenalty
 	c.needs.ParallelToolCalls = req.ParallelToolCalls
 
 	for _, tool := range req.Tools {
@@ -520,6 +563,7 @@ type responsesRequest struct {
 	Stream            *bool               `json:"stream"`
 	MaxOutputTokens   *int64              `json:"max_output_tokens"`
 	Temperature       *float64            `json:"temperature"`
+	TopP              *float64            `json:"top_p"`
 	ParallelToolCalls *bool               `json:"parallel_tool_calls"`
 	Instructions      *string             `json:"instructions"`
 	Tools             []responsesTool     `json:"tools"`
@@ -567,6 +611,7 @@ func parseResponses(c *collector, body []byte) error {
 	}
 	c.maxOutput(req.MaxOutputTokens)
 	c.needs.Temperature = req.Temperature
+	c.needs.TopP = req.TopP
 	c.needs.ParallelToolCalls = req.ParallelToolCalls
 
 	if req.Instructions != nil && *req.Instructions != "" {
@@ -676,15 +721,18 @@ func parseResponsesPart(c *collector, part responsesPart) {
 // ----------------------------------------------------------------------------
 
 type claudeRequest struct {
-	Stream       *bool             `json:"stream"`
-	MaxTokens    *int64            `json:"max_tokens"`
-	Temperature  *float64          `json:"temperature"`
-	System       common.RawMessage `json:"system"`
-	Messages     []claudeMessage   `json:"messages"`
-	Tools        []claudeTool      `json:"tools"`
-	ToolChoice   *claudeToolChoice `json:"tool_choice"`
-	Thinking     *claudeThinking   `json:"thinking"`
-	OutputConfig *struct {
+	Stream        *bool             `json:"stream"`
+	MaxTokens     *int64            `json:"max_tokens"`
+	Temperature   *float64          `json:"temperature"`
+	TopP          *float64          `json:"top_p"`
+	TopK          *int64            `json:"top_k"`
+	StopSequences []string          `json:"stop_sequences"`
+	System        common.RawMessage `json:"system"`
+	Messages      []claudeMessage   `json:"messages"`
+	Tools         []claudeTool      `json:"tools"`
+	ToolChoice    *claudeToolChoice `json:"tool_choice"`
+	Thinking      *claudeThinking   `json:"thinking"`
+	OutputConfig  *struct {
 		Effort string `json:"effort"`
 	} `json:"output_config"`
 	OutputFormat common.RawMessage `json:"output_format"`
@@ -735,6 +783,9 @@ func parseAnthropic(c *collector, body []byte) error {
 	}
 	c.maxOutput(req.MaxTokens)
 	c.needs.Temperature = req.Temperature
+	c.needs.TopP = req.TopP
+	c.needs.TopK = req.TopK
+	c.needs.StopCount = len(req.StopSequences)
 
 	if !isJSONNull(req.System) {
 		c.needs.SystemMessages++
@@ -916,6 +967,13 @@ type geminiRequest struct {
 type geminiGeneration struct {
 	MaxOutputTokens    *int64            `json:"maxOutputTokens"`
 	Temperature        *float64          `json:"temperature"`
+	TopP               *float64          `json:"topP"`
+	TopK               *int64            `json:"topK"`
+	StopSequences      []string          `json:"stopSequences"`
+	CandidateCount     *int              `json:"candidateCount"`
+	Seed               *int64            `json:"seed"`
+	PresencePenalty    *float64          `json:"presencePenalty"`
+	FrequencyPenalty   *float64          `json:"frequencyPenalty"`
 	ResponseMimeType   string            `json:"responseMimeType"`
 	ResponseSchema     common.RawMessage `json:"responseSchema"`
 	ResponseJsonSchema common.RawMessage `json:"responseJsonSchema"`
@@ -959,6 +1017,13 @@ func parseGemini(c *collector, body []byte) error {
 	if gen := req.GenerationConfig; gen != nil {
 		c.maxOutput(gen.MaxOutputTokens)
 		c.needs.Temperature = gen.Temperature
+		c.needs.TopP = gen.TopP
+		c.needs.TopK = gen.TopK
+		c.needs.StopCount = len(gen.StopSequences)
+		c.needs.Completions = gen.CandidateCount
+		c.needs.Seed = gen.Seed
+		c.needs.PresencePenalty = gen.PresencePenalty
+		c.needs.FrequencyPenalty = gen.FrequencyPenalty
 		switch gen.ResponseMimeType {
 		case "application/json":
 			if isJSONNull(gen.ResponseSchema) && isJSONNull(gen.ResponseJsonSchema) {

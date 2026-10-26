@@ -38,13 +38,66 @@ func TestCapabilityTargetsExpandPrefixDeclarations(t *testing.T) {
 	require.NoError(t, db.Create(&Ability{Group: "default", Model: "deepseek-v4-pro", ChannelId: 1, Enabled: true}).Error)
 	require.NoError(t, InitCapabilityCache())
 
-	targets, err := GetCapabilityTargets()
+	targets, _, err := GetCapabilityTargets(CapabilityTargetQuery{})
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
 	assert.Equal(t, "deepseek-v4-pro", targets[0].ModelName)
+	assert.Equal(t, "deepseek-v4-pro", targets[0].DeclarationName)
+	assert.Equal(t, NameRulePrefix, targets[0].NameRule)
 	assert.Contains(t, targets[0].Capabilities, "max_output_tokens")
 	require.Len(t, targets[0].Channels, 1)
 	assert.Equal(t, 1, targets[0].Channels[0].ID)
+}
+
+func TestCapabilityTargetsFilterAndPaginate(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	require.NoError(t, db.Create(&Model{ModelName: "family-", NameRule: NameRulePrefix, Capabilities: `{"context":{"max_output_tokens":100}}`}).Error)
+	require.NoError(t, db.Create(&Model{ModelName: "other-model", NameRule: NameRuleExact, Capabilities: `{"context":{"max_output_tokens":100}}`}).Error)
+	require.NoError(t, db.Create(&[]Channel{
+		{Id: 1, Name: "one", Group: "default", Models: "family-a,family-b", Status: common.ChannelStatusEnabled},
+		{Id: 2, Name: "two", Group: "default", Models: "family-a,other-model", Status: common.ChannelStatusEnabled},
+	}).Error)
+	require.NoError(t, db.Create(&[]Ability{
+		{Group: "default", Model: "family-a", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "family-b", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "family-a", ChannelId: 2, Enabled: true},
+		{Group: "default", Model: "other-model", ChannelId: 2, Enabled: true},
+	}).Error)
+	require.NoError(t, InitCapabilityCache())
+
+	targets, total, err := GetCapabilityTargets(CapabilityTargetQuery{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, targets, 3)
+	assert.Equal(t, []string{"family-a", "family-b", "other-model"}, []string{targets[0].ModelName, targets[1].ModelName, targets[2].ModelName})
+	assert.Equal(t, "family-", targets[0].DeclarationName)
+	assert.Equal(t, NameRuleExact, targets[2].NameRule)
+
+	targets, total, err = GetCapabilityTargets(CapabilityTargetQuery{Keyword: "FAMILY-B"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, targets, 1)
+	assert.Equal(t, "family-b", targets[0].ModelName)
+
+	// 渠道 2 只服务 family-a 与 other-model。
+	targets, total, err = GetCapabilityTargets(CapabilityTargetQuery{ChannelID: 2})
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, targets, 2)
+	assert.Equal(t, "family-a", targets[0].ModelName)
+	assert.Equal(t, "other-model", targets[1].ModelName)
+	require.Len(t, targets[0].Channels, 2)
+
+	page, total, err := GetCapabilityTargets(CapabilityTargetQuery{Offset: 1, Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, page, 1)
+	assert.Equal(t, "family-b", page[0].ModelName)
+
+	page, total, err = GetCapabilityTargets(CapabilityTargetQuery{Offset: 5, Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Empty(t, page)
 }
 
 func TestCapabilityTargetsListServingChannelsOnce(t *testing.T) {
@@ -57,7 +110,7 @@ func TestCapabilityTargetsListServingChannelsOnce(t *testing.T) {
 	}).Error)
 	require.NoError(t, InitCapabilityCache())
 
-	targets, err := GetCapabilityTargets()
+	targets, _, err := GetCapabilityTargets(CapabilityTargetQuery{})
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
 	assert.Equal(t, "target-model", targets[0].ModelName)
@@ -158,4 +211,24 @@ func TestChannelCapabilityRowsFollowChannelModelChanges(t *testing.T) {
 	require.NoError(t, channel.Delete())
 	require.NoError(t, db.Find(&rows).Error)
 	assert.Empty(t, rows)
+}
+
+func TestValidateModelCapabilityNarrowingsRejectsStaleChannel(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	declaration := Model{ModelName: "strict-model", NameRule: NameRuleExact, Capabilities: `{"params":{"temperature":{"min":0,"max":2}}}`}
+	require.NoError(t, db.Create(&declaration).Error)
+	require.NoError(t, db.Create(&Channel{Id: 3, Name: "c3", Group: "default", Models: "strict-model", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, InitCapabilityCache())
+	require.NoError(t, SetChannelModelCapability(3, "strict-model", `{"params":{"temperature":{"min":0,"max":2}}}`))
+
+	// 渠道收窄照抄了旧的模型级区间；模型级收紧后必须拒绝保存。
+	tightened := declaration
+	tightened.Capabilities = `{"params":{"temperature":{"min":0,"max":1}}}`
+	err := ValidateModelCapabilityNarrowings(tightened)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "channel #3")
+	assert.Contains(t, err.Error(), "params.temperature")
+
+	// 仍覆盖存量收窄时保存通过。
+	require.NoError(t, ValidateModelCapabilityNarrowings(declaration))
 }

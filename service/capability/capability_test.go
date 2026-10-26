@@ -85,6 +85,34 @@ func TestEvaluateReportsHardAndSoftViolations(t *testing.T) {
 	assert.False(t, Satisfied(violations))
 }
 
+func TestEvaluateReportsSamplingParamViolationsAsSoft(t *testing.T) {
+	spec := Spec{Params: ParamsSpec{
+		TopP: &FloatRange{Min: 0, Max: 0.5},
+		TopK: &IntRange{Min: 1, Max: 10},
+		Stop: &Limit{Max: 2},
+		N:    &Limit{Max: 1},
+		Seed: ptrBool(false),
+	}}
+	needs := &Needs{
+		TopP:        ptrFloat(0.7),
+		TopK:        ptrInt64(20),
+		StopCount:   3,
+		Completions: ptrInt(2),
+		Seed:        ptrInt64(7),
+	}
+	violations := Evaluate(spec, needs)
+	dimensions := make(map[string]Severity, len(violations))
+	for _, violation := range violations {
+		dimensions[violation.Dimension] = violation.Severity
+	}
+	assert.Equal(t, SeveritySoft, dimensions["params.top_p"])
+	assert.Equal(t, SeveritySoft, dimensions["params.top_k"])
+	assert.Equal(t, SeveritySoft, dimensions["params.stop"])
+	assert.Equal(t, SeveritySoft, dimensions["params.n"])
+	assert.Equal(t, SeveritySoft, dimensions["params.seed"])
+	assert.True(t, Satisfied(violations), "sampling parameters are recorded, never blocked")
+}
+
 func TestEvaluateRequiresDeclaredBuiltinTools(t *testing.T) {
 	needs := &Needs{BuiltinTools: []string{"web_search"}}
 	violations := Evaluate(Spec{}, needs)
@@ -96,6 +124,8 @@ func TestEvaluateRequiresDeclaredBuiltinTools(t *testing.T) {
 func TestExtractChatNeeds(t *testing.T) {
 	body := []byte(`{
 		"model":"m","stream":true,"max_tokens":512,"temperature":0.3,
+		"top_p":0.7,"top_k":5,"stop":["a","b"],"n":2,"seed":9,
+		"presence_penalty":0.4,"frequency_penalty":0.1,
 		"tools":[{"type":"function"},{"type":"web_search"}],
 		"tool_choice":"required","response_format":{"type":"json_schema"},
 		"messages":[
@@ -112,6 +142,13 @@ func TestExtractChatNeeds(t *testing.T) {
 	assert.Equal(t, "required", needs.ToolChoiceMode)
 	assert.True(t, needs.JSONSchema)
 	assert.Equal(t, 1, needs.SystemMessages)
+	assert.Equal(t, 0.7, *needs.TopP)
+	assert.Equal(t, int64(5), *needs.TopK)
+	assert.Equal(t, 2, needs.StopCount)
+	assert.Equal(t, 2, *needs.Completions)
+	assert.Equal(t, int64(9), *needs.Seed)
+	assert.Equal(t, 0.4, *needs.PresencePenalty)
+	assert.Equal(t, 0.1, *needs.FrequencyPenalty)
 	assert.Contains(t, needs.InputModalities, "image")
 	assert.Contains(t, needs.Mimes, "image/png")
 	assert.Greater(t, needs.EstimatedInputTokens, int64(0))

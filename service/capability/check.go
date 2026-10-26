@@ -134,6 +134,30 @@ func Evaluate(spec Spec, needs *Needs) []Violation {
 	if needs.Temperature != nil && !spec.Params.Temperature.Accepts(*needs.Temperature) {
 		add("params.temperature", *needs.Temperature, spec.Params.Temperature)
 	}
+	if needs.TopP != nil && !spec.Params.TopP.Accepts(*needs.TopP) {
+		add("params.top_p", *needs.TopP, spec.Params.TopP)
+	}
+	if needs.TopK != nil && !spec.Params.TopK.Accepts(*needs.TopK) {
+		add("params.top_k", *needs.TopK, spec.Params.TopK)
+	}
+	if needs.StopCount > 0 && spec.Params.Stop != nil && spec.Params.Stop.Max > 0 && needs.StopCount > spec.Params.Stop.Max {
+		add("params.stop", needs.StopCount, *spec.Params.Stop)
+	}
+	if needs.Completions != nil && spec.Params.N != nil && spec.Params.N.Max > 0 && *needs.Completions > spec.Params.N.Max {
+		add("params.n", *needs.Completions, *spec.Params.N)
+	}
+	if needs.Seed != nil && !Truthy(spec.Params.Seed) {
+		add("params.seed", *needs.Seed, false)
+	}
+	if needs.Logprobs != nil && *needs.Logprobs && !Truthy(spec.Params.Logprobs) {
+		add("params.logprobs", true, false)
+	}
+	if needs.PresencePenalty != nil && *needs.PresencePenalty != 0 && !Truthy(spec.Params.PresencePenalty) {
+		add("params.presence_penalty", *needs.PresencePenalty, false)
+	}
+	if needs.FrequencyPenalty != nil && *needs.FrequencyPenalty != 0 && !Truthy(spec.Params.FrequencyPenalty) {
+		add("params.frequency_penalty", *needs.FrequencyPenalty, false)
+	}
 
 	if needs.SystemMessages > 0 && spec.Messages.SystemRole == "none" {
 		add("messages.system_role", needs.SystemMessages, "none")

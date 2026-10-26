@@ -294,6 +294,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/channel-model-capabilities/":    accessTokenScopeRule("model:read"),
 	"PUT /api/channel-model-capabilities/":    accessTokenScopeRule("model:write"),
 	"DELETE /api/channel-model-capabilities/": accessTokenScopeRule("model:write"),
+	"GET /api/capability-gate/events":         accessTokenScopeRule("model:read"),
 
 	// router/api-router.go: /api/deployments
 	"GET /api/deployments/settings":                     accessTokenScopeRule("deployment:read"),

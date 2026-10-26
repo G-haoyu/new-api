@@ -79,8 +79,8 @@ func (mi *Model) MatchesName(name string) bool {
 	}
 }
 
-// resolveModelMetadata preserves catalog precedence: exact, prefix, suffix,
-// then contains. The first matching record within a rule type wins.
+// resolveModelMetadata 保持与能力解析相同的优先级：精确 → 前缀 → 后缀 → 包含，
+// 同一规则内以更长的匹配键优先。这样同一个模型名的元数据来源与能力声明来源一致。
 func resolveModelMetadata(records []Model, names []string) map[string]*Model {
 	resolved := make(map[string]*Model)
 	for i := range records {
@@ -89,15 +89,24 @@ func resolveModelMetadata(records []Model, names []string) map[string]*Model {
 		}
 	}
 	for _, rule := range []int{NameRulePrefix, NameRuleSuffix, NameRuleContains} {
+		matchedLength := make(map[string]int, len(names))
 		for i := range records {
 			metadata := &records[i]
 			if metadata.NameRule != rule {
 				continue
 			}
 			for _, name := range names {
-				if _, exists := resolved[name]; !exists && metadata.MatchesName(name) {
-					resolved[name] = metadata
+				if _, exists := resolved[name]; exists {
+					continue
 				}
+				if !metadata.MatchesName(name) {
+					continue
+				}
+				if length, ok := matchedLength[name]; ok && length >= len(metadata.ModelName) {
+					continue
+				}
+				matchedLength[name] = len(metadata.ModelName)
+				resolved[name] = metadata
 			}
 		}
 	}
@@ -105,7 +114,9 @@ func resolveModelMetadata(records []Model, names []string) map[string]*Model {
 }
 
 // FillModelSquareStates applies the same metadata policy as the public catalog
-// to live routes, then aggregates concrete models for metadata rule rows.
+// to live routes. A rule row only reports and aggregates the models it actually
+// governs (MatchedModels), so names with their own exact declaration are not
+// counted twice across rows.
 func FillModelSquareStates(rows []*Model, configured map[string][]int, connections []ModelConnection) error {
 	var metadata []Model
 	if err := DB.Find(&metadata).Error; err != nil {
@@ -148,10 +159,18 @@ func FillModelSquareStates(rows []*Model, configured map[string][]int, connectio
 			continue
 		}
 		total, visible, hidden := 0, 0, 0
+		governed := make([]string, 0)
 		for name := range configured {
-			if !row.MatchesName(name) {
-				continue
+			// 只认这条规则真正兜底的模型：已有精确行或更具体的规则命中时，
+			// 那个模型不归本行，渠道数也不再重复统计。
+			if policy := resolved[name]; policy != nil && policy.Id == row.Id {
+				governed = append(governed, name)
 			}
+		}
+		sort.Strings(governed)
+		row.MatchedModels = governed
+		row.MatchedCount = len(governed)
+		for _, name := range governed {
 			total++
 			switch states[name] {
 			case ModelSquareVisible:
@@ -202,26 +221,9 @@ func SearchModelsWithChannels(keyword, vendor, status, syncOfficial string, offs
 	_, filterStatus := parseModelStatusFilter(status)
 	_, filterSync := parseModelSyncFilter(syncOfficial)
 	if !filterStatus && !filterSync && (vendor == "" || vendor == "0") {
-		configured, err := GetConfiguredModelChannels()
+		records, err = appendChannelOnlyModels(records, keyword)
 		if err != nil {
 			return nil, 0, err
-		}
-		var exactNames []string
-		if err := DB.Model(&Model{}).Where("name_rule = ?", NameRuleExact).Pluck("model_name", &exactNames).Error; err != nil {
-			return nil, 0, err
-		}
-		for _, name := range exactNames {
-			delete(configured, name)
-		}
-		names := make([]string, 0, len(configured))
-		for name := range configured {
-			if keyword == "" || strings.Contains(strings.ToLower(name), strings.ToLower(keyword)) {
-				names = append(names, name)
-			}
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			records = append(records, &Model{ModelName: name, NameRule: NameRuleExact})
 		}
 	}
 	total := len(records)
@@ -236,6 +238,54 @@ func SearchModelsWithChannels(keyword, vendor, status, syncOfficial string, offs
 		end = offset + limit
 	}
 	return records[offset:end], int64(total), nil
+}
+
+// appendChannelOnlyModels adds one synthetic row per served model name that no
+// declaration covers. A name matched by a rule row belongs to that row (see
+// MatchedModels), so it never becomes a sibling row; when the keyword hits such
+// a name, its rule row is kept in the result instead of returning nothing.
+func appendChannelOnlyModels(records []*Model, keyword string) ([]*Model, error) {
+	configured, err := GetConfiguredModelChannels()
+	if err != nil {
+		return nil, err
+	}
+	if len(configured) == 0 {
+		return records, nil
+	}
+	var declarations []Model
+	if err := DB.Order("id").Find(&declarations).Error; err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	resolved := resolveModelMetadata(declarations, names)
+
+	listed := make(map[int]bool, len(records))
+	for _, record := range records {
+		if record != nil {
+			listed[record.Id] = true
+		}
+	}
+	lowerKeyword := strings.ToLower(keyword)
+	for _, name := range names {
+		if keyword != "" && !strings.Contains(strings.ToLower(name), lowerKeyword) {
+			continue
+		}
+		declaration := resolved[name]
+		if declaration == nil {
+			records = append(records, &Model{ModelName: name, NameRule: NameRuleExact})
+			continue
+		}
+		if listed[declaration.Id] {
+			continue
+		}
+		listed[declaration.Id] = true
+		records = append(records, declaration)
+	}
+	return records, nil
 }
 
 func (mi *Model) Insert() error {
