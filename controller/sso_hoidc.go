@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -70,7 +71,7 @@ func SsoHoidcCallback(c *gin.Context) {
 		return
 	}
 
-	user, err := service.ProvisionSsoUser(userInfo.Email, userInfo.Name, userInfo.Avatar, userInfo.DepartmentTreePathStr, common.HoidcAllowSignup)
+	user, err := service.ProvisionSsoUser(strconv.Itoa(userInfo.Uid), userInfo.Email, userInfo.Name, userInfo.Avatar, userInfo.DepartmentTreePathStr, common.HoidcAllowSignup)
 	if err != nil {
 		common.SysError("SSO user provision failed: " + err.Error())
 		common.ApiErrorT(c, "SSO login failed: "+err.Error())

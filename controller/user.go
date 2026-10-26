@@ -523,6 +523,7 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"aff_history_quota": user.AffHistoryQuota,
 		"inviter_id":        user.InviterId,
 		"linux_do_id":       user.LinuxDOId,
+		"hoidc_id":          user.HoidcId,
 		"setting":           user.Setting,
 		"stripe_customer":   user.StripeCustomer,
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
@@ -893,7 +894,7 @@ func UpdateSelf(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	isSsoUser := common.HoidcEnforceSso && currentUser.Password == ""
+	isSsoUser := currentUser.HoidcId != ""
 	if isSsoUser {
 		if passwordRequested {
 			common.ApiErrorT(c, "SSO users cannot change password")

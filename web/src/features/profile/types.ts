@@ -92,6 +92,8 @@ export interface UserProfile {
   telegram_id?: string
   /** LinuxDO ID (OAuth) */
   linux_do_id?: string
+  /** HOIDC SSO ID */
+  hoidc_id?: string
 }
 
 /**

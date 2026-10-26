@@ -259,7 +259,11 @@ func runSsoUserSync(_ context.Context) (*ssoSyncResult, error) {
 			result.Skipped++
 			continue
 		}
-		_, err := service.ProvisionSsoUser(email, u.Name, u.Avatar, u.DepartmentTreePathStr, common.HoidcAllowSignup)
+		hoidcId := strconv.Itoa(u.Uid)
+		if u.Uid == 0 {
+			hoidcId = "sso:" + email
+		}
+		_, err := service.ProvisionSsoUser(hoidcId, email, u.Name, u.Avatar, u.DepartmentTreePathStr, common.HoidcAllowSignup)
 		if err != nil {
 			result.Failed++
 			common.SysError(fmt.Sprintf("SSO sync failed for %s: %v", email, err))
@@ -282,6 +286,7 @@ func runSsoUserSync(_ context.Context) (*ssoSyncResult, error) {
 }
 
 type ssoUserListItem struct {
+	Uid                   int    `json:"uid"`
 	Email                 string `json:"email"`
 	Name                  string `json:"name"`
 	Avatar                string `json:"avatar"`
