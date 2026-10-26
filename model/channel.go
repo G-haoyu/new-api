@@ -28,7 +28,6 @@ type Channel struct {
 	TestModel          *string `json:"test_model"`
 	Status             int     `json:"status" gorm:"default:1"`
 	Name               string  `json:"name" gorm:"index"`
-	ProviderSlug       string  `json:"provider_slug" gorm:"size:64;index"`
 	Weight             *uint   `json:"weight" gorm:"default:0"`
 	CreatedTime        int64   `json:"created_time" gorm:"bigint"`
 	TestTime           int64   `json:"test_time" gorm:"bigint"`
@@ -340,27 +339,6 @@ func (channel *Channel) GetModels() []string {
 	return strings.Split(strings.Trim(channel.Models, ","), ",")
 }
 
-// GetProviderSlug returns the configured provider identifier or a stable
-// channel-type fallback for legacy channels without an explicit identifier.
-func (channel *Channel) GetProviderSlug() string {
-	if channel == nil {
-		return ""
-	}
-	if provider := strings.TrimSpace(channel.ProviderSlug); provider != "" {
-		return strings.ToLower(provider)
-	}
-	name := strings.ToLower(strings.TrimSpace(constant.GetChannelTypeName(channel.Type)))
-	var builder strings.Builder
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			builder.WriteRune(r)
-		} else if builder.Len() > 0 {
-			builder.WriteByte('-')
-		}
-	}
-	return strings.Trim(builder.String(), "-")
-}
-
 func (channel *Channel) GetGroups() []string {
 	if channel.Group == "" {
 		return []string{}
@@ -547,9 +525,6 @@ func BatchInsertChannels(channels []Channel) error {
 	}()
 
 	for _, chunk := range lo.Chunk(channels, 50) {
-		for i := range chunk {
-			chunk[i].ProviderSlug = normalizeProviderSlug(chunk[i].ProviderSlug)
-		}
 		if err := tx.Create(&chunk).Error; err != nil {
 			tx.Rollback()
 			return err
@@ -561,13 +536,7 @@ func BatchInsertChannels(channels []Channel) error {
 			}
 		}
 	}
-	if err := tx.Commit().Error; err != nil {
-		return err
-	}
-	if err := SeedProvidersFromChannels(); err != nil {
-		common.SysError("failed to seed providers after batch channel insert: " + err.Error())
-	}
-	return nil
+	return tx.Commit().Error
 }
 
 func BatchDeleteChannels(ids []int) (int64, error) {
@@ -582,6 +551,10 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	var deletedCount int64
 	for _, chunk := range lo.Chunk(ids, 200) {
 		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelModelStatus{}).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelModelCapability{}).Error; err != nil {
 			tx.Rollback()
 			return 0, err
 		}
@@ -602,6 +575,7 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	for _, channelID := range ids {
 		cacheClearChannelModelStatuses(channelID)
 	}
+	_ = InitCapabilityCache()
 	return deletedCount, nil
 }
 
@@ -645,23 +619,13 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
-	channel.ProviderSlug = normalizeProviderSlug(channel.ProviderSlug)
-	var err error
-	err = DB.Create(channel).Error
-	if err != nil {
+	if err := DB.Create(channel).Error; err != nil {
 		return err
 	}
-	if channel.ProviderSlug != "" {
-		if err := EnsureProviderBySlug(channel.ProviderSlug); err != nil {
-			common.SysError(fmt.Sprintf("failed to register provider %s: %v", channel.ProviderSlug, err))
-		}
-	}
-	err = channel.AddAbilities(nil)
-	return err
+	return channel.AddAbilities(nil)
 }
 
 func (channel *Channel) Update() error {
-	channel.ProviderSlug = normalizeProviderSlug(channel.ProviderSlug)
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -705,17 +669,6 @@ func (channel *Channel) Update() error {
 	if err != nil {
 		return err
 	}
-	// Updates with a struct skips empty values; explicitly persist an empty
-	// provider slug so administrators can clear a previous association.
-	if err := DB.Model(&Channel{}).Where("id = ?", channel.Id).
-		Update("provider_slug", channel.ProviderSlug).Error; err != nil {
-		return err
-	}
-	if channel.ProviderSlug != "" {
-		if err := EnsureProviderBySlug(channel.ProviderSlug); err != nil {
-			common.SysError(fmt.Sprintf("failed to register provider %s: %v", channel.ProviderSlug, err))
-		}
-	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
 	return err
@@ -750,6 +703,10 @@ func (channel *Channel) Delete() error {
 		tx.Rollback()
 		return err
 	}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&ChannelModelCapability{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error; err != nil {
 		tx.Rollback()
 		return err
@@ -762,6 +719,7 @@ func (channel *Channel) Delete() error {
 		return err
 	}
 	cacheClearChannelModelStatuses(channel.Id)
+	_ = InitCapabilityCache()
 	return nil
 }
 
@@ -1232,7 +1190,8 @@ func (channel *Channel) validateCostMultiplierModels(costMultiplier map[string]f
 	return nil
 }
 
-func (channel *Channel) GetSetting() dto.ChannelSettings {	setting := dto.ChannelSettings{}
+func (channel *Channel) GetSetting() dto.ChannelSettings {
+	setting := dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {

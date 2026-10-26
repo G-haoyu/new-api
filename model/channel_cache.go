@@ -27,6 +27,9 @@ var channel2disabledModels map[int]map[string]bool
 var channelSyncLock sync.RWMutex
 
 func InitChannelCache() {
+	if err := InitCapabilityCache(); err != nil {
+		common.SysError(fmt.Sprintf("failed to init capability cache: %v", err))
+	}
 	if !common.MemoryCacheEnabled {
 		InvalidatePricingCache()
 		return

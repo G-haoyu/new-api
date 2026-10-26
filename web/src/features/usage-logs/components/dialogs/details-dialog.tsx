@@ -694,14 +694,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           )}
 
-          {props.log.provider_slug && (
-            <DetailRow
-              label={t('Provider')}
-              value={props.log.provider_slug}
-              mono
-            />
-          )}
-
           {props.isAdmin && props.log.channel > 0 && (
             <DetailRow
               label={t('Channel')}

@@ -118,6 +118,10 @@ func CreateModelMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if err := model.ValidateModelCapabilities(m.Capabilities); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	// 名称冲突检查
 	if dup, err := model.IsModelNameDuplicated(0, m.ModelName); err != nil {
 		common.ApiError(c, err)
@@ -166,6 +170,10 @@ func UpdateModelMeta(c *gin.Context) {
 			return
 		}
 		if err := model.ValidateMetadataValues(model.MetadataValues{Endpoints: m.Endpoints, Status: m.Status, NameRule: m.NameRule}); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if err := model.ValidateModelCapabilities(m.Capabilities); err != nil {
 			common.ApiError(c, err)
 			return
 		}
@@ -290,7 +298,7 @@ func enrichModels(models []*model.Model) error {
 			}
 			names[name] = true
 			groups[connection.Group] = true
-			channels[connection.ChannelId] = model.BoundChannel{Name: connection.ChannelName, Type: connection.ChannelType}
+			channels[connection.ChannelId] = model.BoundChannel{ID: connection.ChannelId, Name: connection.ChannelName, Type: connection.ChannelType}
 			for _, endpoint := range model.GetModelSupportEndpointTypes(name) {
 				endpoints[string(endpoint)] = true
 			}

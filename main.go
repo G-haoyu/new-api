@@ -340,6 +340,11 @@ func InitResources() error {
 		common.FatalLog(common.LogText("failed to initialize authorization: %s", err.Error()))
 		return err
 	}
+	// 能力门控依赖模型级声明缓存；不开启内存渠道缓存时 InitChannelCache 不会被调用，
+	// 因此在启动时无条件加载一次。非主节点可能还没建表，失败只记录不阻断启动。
+	if err := model.InitCapabilityCache(); err != nil {
+		common.SysError(common.LogText("failed to initialize capability cache: %s", err.Error()))
+	}
 	if common.PasswordLoginEncryptionEnabled {
 		if err = model.InitPasswordEncryption(); err != nil {
 			common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))

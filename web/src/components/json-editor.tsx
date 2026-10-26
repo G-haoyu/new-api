@@ -35,6 +35,7 @@ type JsonEditorProps = {
   emptyMessage?: string
   template?: Record<string, unknown>
   valueType?: 'string' | 'number' | 'any'
+  defaultMode?: 'visual' | 'json'
 }
 
 type EditorRow = {
@@ -71,6 +72,7 @@ export function JsonEditor({
   emptyMessage,
   template,
   valueType = 'string',
+  defaultMode = 'visual',
 }: JsonEditorProps) {
   const { t } = useTranslation()
   const resolvedEmptyMessage =
@@ -79,7 +81,7 @@ export function JsonEditor({
   const resolvedValuePlaceholder = valuePlaceholder ?? t('Value')
   const resolvedKeyLabel = keyLabel ?? t('Key')
   const resolvedValueLabel = valueLabel ?? t('Value')
-  const [mode, setMode] = useState<'visual' | 'json'>('visual')
+  const [mode, setMode] = useState<'visual' | 'json'>(defaultMode)
   const [rows, setRows] = useState<EditorRow[]>(() => parseJsonRows(value))
   const [jsonValue, setJsonValue] = useState(value)
 

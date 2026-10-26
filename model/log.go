@@ -71,7 +71,6 @@ type Log struct {
 	IsStream          bool   `json:"is_stream"`
 	FastMode          bool   `json:"fast_mode" gorm:"index"`
 	ChannelId         int    `json:"channel" gorm:"index"`
-	ProviderSlug      string `json:"provider_slug,omitempty" gorm:"size:64;index"`
 	ChannelName       string `json:"channel_name" gorm:"->"`
 	TokenId           int    `json:"token_id" gorm:"default:0;index"`
 	Group             string `json:"group" gorm:"index"`
@@ -103,22 +102,6 @@ func ensureLogRequestId(log *Log) {
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
 	return LOG_DB.Create(log).Error
-}
-
-func resolveLogProviderSlug(c *gin.Context, channelId int) string {
-	if c != nil {
-		if providerSlug := common.GetContextKeyString(c, constant.ContextKeyProviderSlug); providerSlug != "" {
-			return providerSlug
-		}
-	}
-	if channelId <= 0 {
-		return ""
-	}
-	channel, err := GetChannelById(channelId, false)
-	if err != nil || channel == nil {
-		return ""
-	}
-	return channel.GetProviderSlug()
 }
 
 func clickHouseLogOrder(prefix string) string {
@@ -321,7 +304,6 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		ModelName:        modelName,
 		Quota:            0,
 		ChannelId:        channelId,
-		ProviderSlug:     resolveLogProviderSlug(c, channelId),
 		TokenId:          tokenId,
 		UseTime:          useTimeSeconds,
 		IsStream:         isStream,
@@ -343,7 +325,6 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 }
 
 type RecordConsumeLogParams struct {
-	ProviderSlug       string            `json:"provider_slug,omitempty"`
 	DashboardTokenUsed *int              `json:"-"`
 	FastMode           bool              `json:"fast_mode"`
 	ChannelId          int               `json:"channel_id"`
@@ -396,12 +377,6 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		IsStream:         params.IsStream,
 		FastMode:         params.FastMode,
 		Group:            params.Group,
-		ProviderSlug: func() string {
-			if params.ProviderSlug != "" {
-				return params.ProviderSlug
-			}
-			return resolveLogProviderSlug(c, params.ChannelId)
-		}(),
 		Ip: func() string {
 			if needRecordIp {
 				return c.ClientIP()
@@ -447,17 +422,16 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 }
 
 type RecordTaskBillingLogParams struct {
-	ProviderSlug string
-	UserId       int
-	LogType      int
-	Content      []*common.Message
-	ChannelId    int
-	ModelName    string
-	Quota        int
-	TokenId      int
-	Group        string
-	Other        *LogOther
-	NodeName     string // 任务发起节点；为空时回退当前节点
+	UserId    int
+	LogType   int
+	Content   []*common.Message
+	ChannelId int
+	ModelName string
+	Quota     int
+	TokenId   int
+	Group     string
+	Other     *LogOther
+	NodeName  string // 任务发起节点；为空时回退当前节点
 }
 
 func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
@@ -486,12 +460,6 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		TokenId:   params.TokenId,
 		Group:     params.Group,
 		Other:     other.JSONString(),
-		ProviderSlug: func() string {
-			if params.ProviderSlug != "" {
-				return params.ProviderSlug
-			}
-			return resolveLogProviderSlug(nil, params.ChannelId)
-		}(),
 	}
 	err := createLog(log)
 	if err != nil {

@@ -64,7 +64,6 @@ function makeLog(other: LogOtherData, type = 2): UsageLog {
     use_time: 0,
     is_stream: false,
     fast_mode: false,
-    provider_slug: '',
     iself_email: '',
     channel: 1,
     channel_name: '',

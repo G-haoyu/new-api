@@ -3,86 +3,16 @@ package controller
 import (
 	"errors"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service/capability"
 
 	"github.com/gin-gonic/gin"
 )
-
-type modelSquareProvider struct {
-	Slug          string                       `json:"slug"`
-	Name          string                       `json:"name"`
-	Icon          string                       `json:"icon,omitempty"`
-	WebsiteURL    string                       `json:"website_url,omitempty"`
-	StatusPageURL string                       `json:"status_page_url,omitempty"`
-	Available     bool                         `json:"available"`
-	Pricing       *modelSquareProviderPricing  `json:"pricing,omitempty"`
-	Metadata      *modelSquareProviderMetadata `json:"metadata,omitempty"`
-}
-
-type modelSquareProviderPricing struct {
-	InputPrice          float64  `json:"input_price"`
-	OutputPrice         float64  `json:"output_price"`
-	CacheReadPrice      *float64 `json:"cache_read_price,omitempty"`
-	CacheWritePrice     *float64 `json:"cache_write_price,omitempty"`
-	InputListPrice      *float64 `json:"input_list_price,omitempty"`
-	OutputListPrice     *float64 `json:"output_list_price,omitempty"`
-	CacheReadListPrice  *float64 `json:"cache_read_list_price,omitempty"`
-	CacheWriteListPrice *float64 `json:"cache_write_list_price,omitempty"`
-	DiscountRate        *float64 `json:"discount_rate,omitempty"`
-	Source              string   `json:"source"`
-}
-
-type modelSquareProviderMetadata struct {
-	ModelName           string   `json:"model_name,omitempty"`
-	ContextLength       int64    `json:"context_length,omitempty"`
-	MaxOutputTokens     int64    `json:"max_output_tokens,omitempty"`
-	Region              string   `json:"region,omitempty"`
-	Precision           string   `json:"precision,omitempty"`
-	Quantization        string   `json:"quantization,omitempty"`
-	SupportedParameters []string `json:"supported_parameters,omitempty"`
-	StreamCancellation  *bool    `json:"stream_cancellation,omitempty"`
-	Free                *bool    `json:"free,omitempty"`
-	Batch               *bool    `json:"batch,omitempty"`
-	SourceURL           string   `json:"source_url,omitempty"`
-	EffectiveAt         int64    `json:"effective_at,omitempty"`
-}
-
-func providerMetadataFromPrice(price model.ModelProviderPrice) *modelSquareProviderMetadata {
-	if price.ModelName == "" && price.ContextLength == 0 &&
-		price.MaxOutputTokens == 0 && price.Region == "" &&
-		price.Precision == "" && price.Quantization == "" &&
-		price.SupportedParameters == "" && price.StreamCancellation == nil &&
-		price.Free == nil && price.Batch == nil && price.SourceURL == "" &&
-		price.EffectiveAt == 0 {
-		return nil
-	}
-	metadata := &modelSquareProviderMetadata{
-		ModelName:          price.ModelName,
-		ContextLength:      price.ContextLength,
-		MaxOutputTokens:    price.MaxOutputTokens,
-		Region:             price.Region,
-		Precision:          price.Precision,
-		Quantization:       price.Quantization,
-		StreamCancellation: price.StreamCancellation,
-		Free:               price.Free,
-		Batch:              price.Batch,
-		SourceURL:          price.SourceURL,
-		EffectiveAt:        price.EffectiveAt,
-	}
-	if price.SupportedParameters != "" {
-		var supported []string
-		if err := common.Unmarshal([]byte(price.SupportedParameters), &supported); err == nil {
-			metadata.SupportedParameters = supported
-		}
-	}
-	return metadata
-}
 
 type modelSquareItem struct {
 	ID                     int                            `json:"id"`
@@ -109,15 +39,19 @@ type modelSquareItem struct {
 	EndpointMap            map[string]common.EndpointInfo `json:"endpoint_map,omitempty"`
 	BillingMode            string                         `json:"billing_mode,omitempty"`
 	BillingExpr            string                         `json:"billing_expr,omitempty"`
-	Providers              []modelSquareProvider          `json:"providers,omitempty"`
+
+	// 能力摘要来自模型级 capabilities 声明；未声明时全部为空。
+	Capabilities     []string               `json:"capabilities,omitempty"`
+	InputModalities  []string               `json:"input_modalities,omitempty"`
+	OutputModalities []string               `json:"output_modalities,omitempty"`
+	MaxOutputTokens  *int64                 `json:"max_output_tokens,omitempty"`
+	Parameters       []capability.Parameter `json:"parameters,omitempty"`
 }
 
 func modelSquareItemFromModel(
 	meta *model.Model,
 	pricingByName map[string]model.Pricing,
 	vendors map[int]model.Vendor,
-	providerPrices map[string]model.ModelProviderPrice,
-	providerMetadata map[string]model.Provider,
 ) modelSquareItem {
 	catalogSlug := meta.ModelName
 	if vendor, ok := vendors[meta.VendorID]; ok && vendor.Name != "" {
@@ -138,13 +72,20 @@ func modelSquareItemFromModel(
 		ReleaseDate:            meta.ReleaseDate,
 		EnableGroup:            []string{},
 		SupportedEndpointTypes: []string{},
-		Providers:              []modelSquareProvider{},
 	}
 	if vendor, ok := vendors[meta.VendorID]; ok {
 		item.VendorName = vendor.Name
 		item.VendorIcon = vendor.Icon
 		item.VendorDescription = vendor.Description
 	}
+	spec := capability.MustParse(meta.Capabilities)
+	summary := capability.Summarize(spec)
+	item.Capabilities = summary.Capabilities
+	item.InputModalities = summary.InputModalities
+	item.OutputModalities = summary.OutputModalities
+	item.MaxOutputTokens = summary.MaxOutputTokens
+	item.Parameters = capability.Parameters(spec)
+
 	if pricing, ok := pricingByName[meta.ModelName]; ok {
 		item.QuotaType = pricing.QuotaType
 		item.ModelRatio = pricing.ModelRatio
@@ -160,88 +101,7 @@ func modelSquareItemFromModel(
 		item.BillingMode = pricing.BillingMode
 		item.BillingExpr = pricing.BillingExpr
 	}
-	availableProviders := make(map[string]model.ProviderSummary)
-	if pricing, ok := pricingByName[meta.ModelName]; ok {
-		availableProviders = make(map[string]model.ProviderSummary, len(pricing.Providers))
-		for _, provider := range pricing.Providers {
-			availableProviders[provider.Slug] = provider
-		}
-	}
-	providerSlugs := make([]string, 0, len(providerPrices))
-	for providerSlug := range providerPrices {
-		providerSlugs = append(providerSlugs, providerSlug)
-	}
-	sort.Strings(providerSlugs)
-	for _, providerSlug := range providerSlugs {
-		providerPrice := providerPrices[providerSlug]
-		providerPrice.RecalculateEffectivePrices()
-		runtimeProvider, hasRuntimeProvider := availableProviders[providerSlug]
-		providerItem := modelSquareProvider{
-			Slug:      providerSlug,
-			Name:      runtimeProvider.Name,
-			Available: hasRuntimeProvider && runtimeProvider.Available,
-		}
-		if providerItem.Name == "" {
-			providerItem.Name = providerSlug
-		}
-		if metadata, ok := providerMetadata[providerSlug]; ok {
-			if strings.TrimSpace(metadata.DisplayName) != "" {
-				providerItem.Name = metadata.DisplayName
-			}
-			providerItem.Icon = metadata.Icon
-			providerItem.WebsiteURL = metadata.WebsiteURL
-			providerItem.StatusPageURL = metadata.StatusPageURL
-		}
-		providerItem.Pricing = &modelSquareProviderPricing{
-			InputPrice:          providerPrice.InputPrice,
-			OutputPrice:         providerPrice.OutputPrice,
-			CacheReadPrice:      providerPrice.CacheReadPrice,
-			CacheWritePrice:     providerPrice.CacheWritePrice,
-			InputListPrice:      providerPrice.InputListPrice,
-			OutputListPrice:     providerPrice.OutputListPrice,
-			CacheReadListPrice:  providerPrice.CacheReadListPrice,
-			CacheWriteListPrice: providerPrice.CacheWriteListPrice,
-			DiscountRate:        providerPrice.DiscountRate,
-			Source:              "model-provider",
-		}
-		providerItem.Metadata = providerMetadataFromPrice(providerPrice)
-		item.Providers = append(item.Providers, providerItem)
-	}
 	return item
-}
-
-// buildDefaultProviderPrices keeps the model square useful immediately after
-// a model is added. Explicit provider prices remain authoritative; missing
-// provider entries fall back to the model-level token pricing.
-func buildDefaultProviderPrices(
-	pricing model.Pricing,
-	providerPrices map[string]model.ModelProviderPrice,
-) map[string]model.ModelProviderPrice {
-	if len(pricing.Providers) == 0 {
-		return providerPrices
-	}
-	prices := make(map[string]model.ModelProviderPrice, len(pricing.Providers))
-	for slug, price := range providerPrices {
-		prices[slug] = price
-	}
-	inputPrice := pricing.ModelRatio * 2
-	outputPrice := inputPrice * pricing.CompletionRatio
-	if pricing.QuotaType == 1 {
-		inputPrice = pricing.ModelPrice
-		outputPrice = pricing.ModelPrice
-	}
-	for _, provider := range pricing.Providers {
-		if _, exists := prices[provider.Slug]; exists {
-			continue
-		}
-		prices[provider.Slug] = model.ModelProviderPrice{
-			ModelId:      0,
-			ProviderSlug: provider.Slug,
-			InputPrice:   inputPrice,
-			OutputPrice:  outputPrice,
-		}
-	}
-	return prices
 }
 
 func buildModelSquareItems(metas []model.Model) ([]modelSquareItem, error) {
@@ -257,28 +117,9 @@ func buildModelSquareItems(metas []model.Model) ([]modelSquareItem, error) {
 	for _, vendor := range vendorRows {
 		vendors[vendor.Id] = vendor
 	}
-	modelIds := make([]int, 0, len(metas))
-	for i := range metas {
-		modelIds = append(modelIds, metas[i].Id)
-	}
-	providerPriceMap, err := model.GetModelProviderPriceMap(modelIds)
-	if err != nil {
-		return nil, err
-	}
-	providerMetadata := model.GetProviderMetadataMap()
 	items := make([]modelSquareItem, 0, len(metas))
 	for i := range metas {
-		providerPrices := providerPriceMap[metas[i].Id]
-		if pricing, ok := pricingByName[metas[i].ModelName]; ok {
-			providerPrices = buildDefaultProviderPrices(pricing, providerPrices)
-		}
-		items = append(items, modelSquareItemFromModel(
-			&metas[i],
-			pricingByName,
-			vendors,
-			providerPrices,
-			providerMetadata,
-		))
+		items = append(items, modelSquareItemFromModel(&metas[i], pricingByName, vendors))
 	}
 	return items, nil
 }
@@ -288,16 +129,6 @@ func getModelSquareItems(offset, limit int) ([]modelSquareItem, int64, error) {
 	for _, pricing := range model.GetPricing() {
 		pricingByName[pricing.ModelName] = pricing
 	}
-	var modelIDs []int
-	if err := model.DB.Model(&model.ModelProviderPrice{}).
-		Distinct("model_id").
-		Pluck("model_id", &modelIDs).Error; err != nil {
-		return nil, 0, err
-	}
-	seenModelIDs := make(map[int]struct{}, len(modelIDs))
-	for _, id := range modelIDs {
-		seenModelIDs[id] = struct{}{}
-	}
 	var enabledAbilities []model.AbilityWithChannel
 	if err := model.DB.Table("abilities").
 		Select("abilities.*, channels.type as channel_type").
@@ -306,35 +137,24 @@ func getModelSquareItems(offset, limit int) ([]modelSquareItem, int64, error) {
 		Scan(&enabledAbilities).Error; err != nil {
 		return nil, 0, err
 	}
-	modelIDByName := make(map[string]int)
-	if len(enabledAbilities) > 0 {
-		var metas []model.Model
-		if err := model.DB.Where("status = ? AND name_rule = ?", 1, model.NameRuleExact).
-			Find(&metas).Error; err != nil {
-			return nil, 0, err
-		}
-		for _, meta := range metas {
-			modelIDByName[meta.ModelName] = meta.Id
-		}
-	}
+	names := make([]string, 0, len(enabledAbilities))
+	seen := make(map[string]struct{}, len(enabledAbilities))
 	for _, ability := range enabledAbilities {
 		if _, hasPricing := pricingByName[ability.Model]; !hasPricing {
 			continue
 		}
-		if id, ok := modelIDByName[ability.Model]; ok {
-			if _, exists := seenModelIDs[id]; exists {
-				continue
-			}
-			modelIDs = append(modelIDs, id)
-			seenModelIDs[id] = struct{}{}
+		if _, exists := seen[ability.Model]; exists {
+			continue
 		}
+		seen[ability.Model] = struct{}{}
+		names = append(names, ability.Model)
 	}
-	if len(modelIDs) == 0 {
+	if len(names) == 0 {
 		return []modelSquareItem{}, 0, nil
 	}
 	var metas []model.Model
 	query := model.DB.Model(&model.Model{}).
-		Where("status = ? AND name_rule = ? AND id IN ?", 1, model.NameRuleExact, modelIDs)
+		Where("status = ? AND name_rule = ? AND model_name IN ?", 1, model.NameRuleExact, names)
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -362,7 +182,7 @@ func getModelSquareItemByID(id int) (*modelSquareItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(items) == 0 || len(items[0].Providers) == 0 {
+	if len(items) == 0 {
 		return nil, errors.New("model not found")
 	}
 	items[0].EndpointMap = getModelSquareEndpointMap(items[0].SupportedEndpointTypes)
@@ -444,33 +264,4 @@ func GetModelSquareDetail(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": item})
-}
-
-func GetModelSquareProviderDetail(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	providerSlug := strings.ToLower(strings.TrimSpace(c.Param("provider")))
-	item, err := getModelSquareItemByID(id)
-	if err != nil {
-		common.ApiErrorMsg(c, "model not found")
-		return
-	}
-	for _, provider := range item.Providers {
-		if provider.Slug == providerSlug {
-			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"data": gin.H{
-					"model":     item,
-					"provider":  provider,
-					"groups":    item.EnableGroup,
-					"endpoints": item.SupportedEndpointTypes,
-				},
-			})
-			return
-		}
-	}
-	common.ApiErrorMsg(c, "provider not found")
 }

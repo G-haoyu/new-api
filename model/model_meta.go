@@ -28,6 +28,7 @@ const (
 )
 
 type BoundChannel struct {
+	ID   int    `json:"id"`
 	Name string `json:"name"`
 	Type int    `json:"type"`
 }
@@ -40,6 +41,7 @@ type Model struct {
 	Tags               string         `json:"tags,omitempty" gorm:"type:varchar(255)"`
 	VendorID           int            `json:"vendor_id,omitempty" gorm:"index"`
 	Endpoints          string         `json:"endpoints,omitempty" gorm:"type:text"`
+	Capabilities       string         `json:"capabilities,omitempty" gorm:"type:text"`
 	SupportedEndpoints []string       `json:"supported_endpoints,omitempty" gorm:"-"`
 	ContextLength      int64          `json:"context_length,omitempty" gorm:"bigint"`
 	ParameterCount     string         `json:"parameter_count,omitempty" gorm:"type:varchar(64)"`
@@ -237,7 +239,7 @@ func SearchModelsWithChannels(keyword, vendor, status, syncOfficial string, offs
 }
 
 func (mi *Model) Insert() error {
-	return metadataTransaction(func(tx *gorm.DB) error {
+	err := metadataTransaction(func(tx *gorm.DB) error {
 		if err := validateModelVendor(tx, mi.VendorID); err != nil {
 			return err
 		}
@@ -250,6 +252,10 @@ func (mi *Model) Insert() error {
 		mi.Status, mi.SyncOfficial = status, syncOfficial
 		return tx.Model(&Model{}).Where("id = ?", mi.Id).Updates(map[string]any{"status": status, "sync_official": syncOfficial}).Error
 	})
+	if err == nil {
+		_ = InitCapabilityCache()
+	}
+	return err
 }
 
 func IsModelNameDuplicated(id int, name string) (bool, error) {
@@ -262,14 +268,18 @@ func IsModelNameDuplicated(id int, name string) (bool, error) {
 }
 
 func (mi *Model) Update() error {
-	return metadataTransaction(func(tx *gorm.DB) error {
+	err := metadataTransaction(func(tx *gorm.DB) error {
 		if err := validateModelVendor(tx, mi.VendorID); err != nil {
 			return err
 		}
 		mi.UpdatedTime = common.GetTimestamp()
 		return tx.Model(&Model{}).Where("id = ?", mi.Id).
-			Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "context_length", "parameter_count", "release_date", "status", "sync_official", "name_rule", "updated_time").Updates(mi).Error
+			Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "capabilities", "context_length", "parameter_count", "release_date", "status", "sync_official", "name_rule", "updated_time").Updates(mi).Error
 	})
+	if err == nil {
+		_ = InitCapabilityCache()
+	}
+	return err
 }
 
 func (mi *Model) Delete() error {
@@ -381,6 +391,7 @@ func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (Mod
 	if result.UpdatedChannels > 0 {
 		InitChannelCache()
 	}
+	_ = InitCapabilityCache()
 	RefreshPricing()
 	return result, nil
 }
@@ -415,12 +426,13 @@ func GetBoundChannelsByModelsMap(modelNames []string) (map[string][]BoundChannel
 	}
 	type row struct {
 		Model string
+		ID    int
 		Name  string
 		Type  int
 	}
 	var rows []row
 	err := excludeDisabledChannelModels(DB.Table("channels")).
-		Select("abilities.model as model, channels.name as name, channels.type as type").
+		Select("abilities.model as model, channels.id as id, channels.name as name, channels.type as type").
 		Joins("JOIN abilities ON abilities.channel_id = channels.id").
 		Where("abilities.model IN ? AND abilities.enabled = ?", modelNames, true).
 		Distinct().
@@ -429,7 +441,7 @@ func GetBoundChannelsByModelsMap(modelNames []string) (map[string][]BoundChannel
 		return nil, err
 	}
 	for _, r := range rows {
-		result[r.Model] = append(result[r.Model], BoundChannel{Name: r.Name, Type: r.Type})
+		result[r.Model] = append(result[r.Model], BoundChannel{ID: r.ID, Name: r.Name, Type: r.Type})
 	}
 	return result, nil
 }

@@ -28,10 +28,9 @@ import (
 )
 
 type ModelRequest struct {
-	Model           string                 `json:"model"`
-	Group           string                 `json:"group,omitempty"`
-	ProviderRouting *model.ProviderRouting `json:"provider,omitempty"`
-	Workload        string                 `json:"workload,omitempty"`
+	Model    string `json:"model"`
+	Group    string `json:"group,omitempty"`
+	Workload string `json:"workload,omitempty"`
 }
 
 func Distribute() func(c *gin.Context) {
@@ -53,18 +52,12 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
-		if modelRequest.ProviderRouting != nil {
-			routing := modelRequest.ProviderRouting.Normalized()
-			if routing == nil {
-				abortWithOpenAiMessage(c, http.StatusBadRequest, "provider.order must contain at least one provider")
-				return
-			}
-			common.SetContextKey(c, constant.ContextKeyProviderRouting, routing)
-			modelRequest.ProviderRouting = routing
-		}
 		if workload := strings.TrimSpace(modelRequest.Workload); workload != "" {
 			common.SetContextKey(c, constant.ContextKeySchedulerWorkload, workload)
 		}
+		// 能力门控在模型确定前构建：auto 用它筛候选模型，选定模型后再做渠道级收窄。
+		// 未配置、请求体不可用或没有任何模型级声明时返回 nil，行为与改动前一致。
+		capabilityGate := service.BuildCapabilityGate(c)
 		autoRouting := shouldSelectChannel && service.IsAutoRouterRequest(c, modelRequest.Model)
 		_, pinned, _ := constraints.ResolvedPin()
 		if pinned && autoRouting {
@@ -144,10 +137,14 @@ func Distribute() func(c *gin.Context) {
 						}
 						ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
 							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)]) &&
-							len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0
+							len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0 &&
+							(capabilityGate == nil || capabilityGate.Allows(candidate))
 						usable[candidate] = ok
 						return ok
 					})
+					if capabilityGate != nil {
+						capabilityGate.LogSummary(c)
+					}
 					if err != nil {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, err.Error(), types.ErrorCodeModelNotFound)
 						return
@@ -159,8 +156,20 @@ func Distribute() func(c *gin.Context) {
 		if !pinned && shouldSelectChannel {
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectGroup string
+			allowedChannels := usableChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path)
+			if capabilityGate != nil {
+				narrowed := capabilityGate.FilterChannels(c, modelRequest.Model, allowedChannels)
+				if len(narrowed) != len(allowedChannels) {
+					constraints.AddFilter(taskdto.ChannelFilter{
+						Kind:              taskdto.FilterCapability,
+						AllowedChannelIDs: narrowed,
+					})
+					allowedChannels = narrowed
+				}
+				capabilityGate.LogSummary(c)
+			}
 			if service.SchedulerClient().Enabled {
-				common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, usableChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path))
+				common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, allowedChannels)
 			}
 			if service.SchedulerEnforcedForRequest(c) {
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
@@ -187,6 +196,10 @@ func Distribute() func(c *gin.Context) {
 					if candidateErr != nil || candidateChannel == nil || candidateChannel.Status != common.ChannelStatusEnabled ||
 						!channelSupportsRequestPath(candidateChannel, c.Request.URL.Path, modelRequest.Model) {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("scheduler candidate channel %d unavailable", candidate.ChannelID), types.ErrorCodeModelNotFound)
+						return
+					}
+					if !channelPassesCapabilityFilter(c, candidateChannel.Id) {
+						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("scheduler candidate channel %d rejected by capability constraints", candidate.ChannelID), types.ErrorCodeModelNotFound)
 						return
 					}
 					if usingGroup == "auto" {
@@ -217,12 +230,11 @@ func Distribute() func(c *gin.Context) {
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectErr *service.ChannelSelectError
 			channel, _, selectErr = service.SelectChannelForRequest(c, modelRequest.Model, &service.RetryParam{
-				Ctx:             c,
-				ModelName:       modelRequest.Model,
-				TokenGroup:      usingGroup,
-				RequestPath:     c.Request.URL.Path,
-				ProviderRouting: modelRequest.ProviderRouting,
-				Retry:           common.GetPointer(0),
+				Ctx:         c,
+				ModelName:   modelRequest.Model,
+				TokenGroup:  usingGroup,
+				RequestPath: c.Request.URL.Path,
+				Retry:       common.GetPointer(0),
 			})
 			if selectErr != nil {
 				if selectErr.FilterKind == taskdto.FilterTaskPluginIdentity {
@@ -237,10 +249,6 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, selectErr.StatusCode, message, selectErr.Code)
 				return
 			}
-		}
-		if !providerRoutingAllowsChannel(modelRequest.ProviderRouting, channel) {
-			abortWithOpenAiMessage(c, http.StatusForbidden, "provider routing conflicts with the selected channel")
-			return
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
@@ -298,19 +306,6 @@ func usableChannelIDs(c *gin.Context, modelName, usingGroup, requestPath string)
 // - application/x-www-form-urlencoded
 // - multipart/form-data
 
-func providerRoutingAllowsChannel(routing *model.ProviderRouting, channel *model.Channel) bool {
-	if routing == nil || channel == nil {
-		return routing == nil
-	}
-	provider := channel.GetProviderSlug()
-	for _, requested := range routing.Order {
-		if requested == provider {
-			return true
-		}
-	}
-	return false
-}
-
 // noAvailableChannelMessage explains a 503 for a task-plugin-claimed model.
 // The response tells the caller the model is plugin-claimed without naming the
 // plugin; the candidate plugin keys go to the server log under the request id.
@@ -360,6 +355,23 @@ func channelMatchesExpectedTaskPlugin(c *gin.Context, channel *model.Channel, ex
 	}
 	plugin, ok := pinned.Generation.GetByChannelType(channel.Type)
 	return ok && plugin == pinned.Plugin
+}
+
+// channelPassesCapabilityFilter 复核渠道是否落在本请求的能力允许集内。
+// 没有能力过滤器时一律放行。
+func channelPassesCapabilityFilter(c *gin.Context, channelID int) bool {
+	for _, filter := range service.GetChannelConstraints(c).Filters {
+		if filter.Kind != taskdto.FilterCapability {
+			continue
+		}
+		if filter.AllowedChannelIDs == nil {
+			continue
+		}
+		if !slices.Contains(filter.AllowedChannelIDs, channelID) {
+			return false
+		}
+	}
+	return true
 }
 
 // channelSupportsRequestPath reports whether a channel can serve the request path.
@@ -466,21 +478,10 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var providerRouting *model.ProviderRouting
-	if values[2].Exists() && values[2].Type != gjson.Null {
-		if values[2].Type != gjson.JSON {
-			return nil, fmt.Errorf("field provider must be an object")
-		}
-		var parsed model.ProviderRouting
-		if err := common.Unmarshal([]byte(values[2].Raw), &parsed); err != nil {
-			return nil, fmt.Errorf("field provider is invalid: %w", err)
-		}
-		parsed.HasAllowFallbacks = values[2].Get("allow_fallbacks").Exists()
-		providerRouting = &parsed
-	}
+	providerPresent := values[2].Exists() && values[2].Type != gjson.Null
 	cleanedBody, err := sjson.DeleteBytes(requestBody, "provider")
 	if err != nil {
-		return nil, fmt.Errorf("failed to remove provider routing field: %w", err)
+		return nil, fmt.Errorf("failed to remove provider field: %w", err)
 	}
 	if string(cleanedBody) != string(requestBody) {
 		replacement, err := common.CreateBodyStorage(cleanedBody)
@@ -490,6 +491,13 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 		_ = storage.Close()
 		c.Set(common.KeyBodyStorage, replacement)
 		storage = replacement
+	}
+	if providerPresent {
+		// 供应商层已移除。保留剥离动作是为了不让该字段透传给上游（部分供应商会 400），
+		// 但路由偏好不再生效，因此显式告警，避免管理员以为配置仍起作用。
+		logger.LogWarn(c.Request.Context(), common.LogText(
+			"request provider field is ignored: model=%s request_id=%s; provider routing has been removed",
+			modelName, c.GetString(common.RequestIdKey)))
 	}
 	workload, err := getJSONStringValue(values[3], "workload")
 	if err != nil {
@@ -502,10 +510,9 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	c.Request.Body = io.NopCloser(storage)
 
 	return &ModelRequest{
-		Model:           modelName,
-		Group:           group,
-		ProviderRouting: providerRouting,
-		Workload:        workload,
+		Model:    modelName,
+		Group:    group,
+		Workload: workload,
 	}, nil
 }
 
@@ -630,9 +637,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			}
 			if req != nil {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 		} else if c.Request.Method == http.MethodGet {
 			relayMode = relayconstant.RelayModeVideoFetchByID
@@ -648,9 +652,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 				return nil, false, err
 			}
 			modelRequest.Model = req.Model
-			if req.ProviderRouting != nil {
-				modelRequest.ProviderRouting = req.ProviderRouting
-			}
 			relayMode = relayconstant.RelayModeVideoSubmit
 		} else if c.Request.Method == http.MethodGet {
 			relayMode = relayconstant.RelayModeVideoFetchByID
@@ -674,9 +675,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			return nil, false, err
 		}
 		modelRequest.Model = req.Model
-		if req.ProviderRouting != nil {
-			modelRequest.ProviderRouting = req.ProviderRouting
-		}
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
 		//wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01
@@ -708,9 +706,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			req, err := getModelFromRequest(c)
 			if err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 		}
 	}
@@ -723,9 +718,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			// 先尝试从请求读取
 			if req, err := getModelFromRequest(c); err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranslation
@@ -733,9 +725,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			// 先尝试从请求读取
 			if req, err := getModelFromRequest(c); err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranscription
@@ -750,9 +739,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		}
 		modelRequest.Model = req.Model
 		modelRequest.Group = req.Group
-		if req.ProviderRouting != nil {
-			modelRequest.ProviderRouting = req.ProviderRouting
-		}
 		common.SetContextKey(c, constant.ContextKeyTokenGroup, modelRequest.Group)
 	}
 
@@ -837,7 +823,6 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
 	common.SetContextKey(c, constant.ContextKeyChannelTag, channel.GetTag())
-	common.SetContextKey(c, constant.ContextKeyProviderSlug, channel.GetProviderSlug())
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())

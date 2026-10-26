@@ -26,6 +26,7 @@ import { z } from 'zod'
  * Bound channel information
  */
 export interface BoundChannel {
+  id: number
   name: string
   type: number
 }
@@ -46,6 +47,7 @@ export interface Model {
   tags?: string
   vendor_id?: number
   endpoints?: string
+  capabilities?: string
   context_length?: number
   parameter_count?: string
   release_date?: string
@@ -78,70 +80,28 @@ export interface Vendor {
   updated_time: number
 }
 
-/** Provider registry metadata used by the model square. */
-export interface Provider {
+/** 能力设置页的模型 → 渠道清单。 */
+export interface CapabilityTargetChannel {
   id: number
-  slug: string
-  display_name: string
-  icon?: string
-  website_url?: string
-  status_page_url?: string
-  headquarters?: string
-  byok_supported: boolean
-  prompt_training_policy?: string
-  retention_policy?: string
-  moderation_policy?: string
-  metadata_source_url?: string
-  metadata_verified_at?: number
-  status: number
-  created_time: number
-  updated_time: number
-}
-
-export interface GetProvidersResponse {
-  success: boolean
-  message?: string
-  data?: {
-    items: Provider[]
-    total: number
-    page: number
-    page_size: number
-  }
-}
-
-export interface ModelProviderPrice {
-  id: number
-  model_id: number
-  provider_slug: string
-  input_price: number
-  output_price: number
-  cache_read_price?: number | null
-  cache_write_price?: number | null
-  source_url?: string
-  effective_at?: number
-  created_time: number
-  updated_time: number
-  model_name?: string
-  context_length?: number
-  max_output_tokens?: number
-  region?: string
-  precision?: string
-  quantization?: string
-  supported_parameters?: string
-  stream_cancellation?: boolean | null
-  free?: boolean | null
-  batch?: boolean | null
-}
-
-export interface ProviderModelRelation {
-  model_id: number
-  model_name: string
-  model_icon?: string
-  vendor_name?: string
-  vendor_icon?: string
+  name: string
+  type: number
   configured: boolean
-  available: boolean
-  price?: ModelProviderPrice
+}
+
+export interface CapabilityTarget {
+  id: number
+  model_name: string
+  capabilities?: string
+  channels: CapabilityTargetChannel[]
+}
+
+export interface ChannelModelCapabilityDetail {
+  channel_id: number
+  model: string
+  configured: boolean
+  capabilities: string
+  model_capabilities: string
+  effective: string
 }
 
 /**
@@ -422,7 +382,7 @@ export type ModelTabCategory =
   | 'metadata'
   | 'vendors'
   | 'deployments'
-  | 'providers'
+  | 'capabilities'
 
 /**
  * Deployment entity from API

@@ -384,7 +384,7 @@ it('keeps prices and channel explanations readable in the mobile card and detail
 })
 
 it('uses backend square states for success, warning, hidden, and partial rows including models without metadata', async () => {
-  const activeChannels = [{ name: 'Active', type: 1 }]
+  const activeChannels = [{ id: 1, name: 'Active', type: 1 }]
   await renderList([
     { ...metadata, model_name: 'catalog-only' },
     {
@@ -450,11 +450,11 @@ it('uses backend square states for success, warning, hidden, and partial rows in
   await act(async () => {
     await i18n.changeLanguage('zhCN')
   })
-  expect(screen.getByText('无法展示')).toBeVisible()
+  expect(screen.getByText('不可用')).toBeVisible()
   expect(screen.getByText('部分展示')).toBeVisible()
   expect(screen.getAllByText('正常展示')).toHaveLength(2)
   expect(screen.getAllByText('已隐藏')).toHaveLength(2)
-  for (const label of ['无法展示', '部分展示']) {
+  for (const label of ['不可用', '部分展示']) {
     expect(screen.getByText(label)).toHaveClass('truncate')
   }
 })
@@ -789,7 +789,7 @@ it('keeps all columns while collapsing tags and connection counts', async () => 
     {
       ...channel,
       tags: 'Tools,Files,Vision',
-      bound_channels: [{ name: 'Main', type: 1 }],
+      bound_channels: [{ id: 1, name: 'Main', type: 1 }],
       enable_groups: ['default', 'premium'],
     },
   ])
