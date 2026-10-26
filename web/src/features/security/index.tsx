@@ -82,7 +82,7 @@ export function Security() {
             <h3 id='security-authentication' className='text-sm font-semibold'>
               {t('Login & Authentication')}
             </h3>
-            {profile.has_password !== false && (
+            {!profile.hoidc_id && profile.has_password !== false && (
               <AccountActionCard
                 action='password'
                 username={profile.username}

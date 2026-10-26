@@ -16,6 +16,7 @@ import (
 )
 
 type SsoUserInfo struct {
+	Uid                   int    `json:"uid"`
 	Email                 string `json:"email"`
 	Name                  string `json:"name"`
 	Avatar                string `json:"avatar"`
@@ -92,7 +93,7 @@ func VerifySsoToken(token string) (*SsoUserInfo, error) {
 	return &result.Data, nil
 }
 
-func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSignup bool) (*model.User, error) {
+func ProvisionSsoUser(hoidcId, email, name, avatar, departmentTreePathStr string, allowSignup bool) (*model.User, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
 	if email == "" {
 		return nil, errors.New("email is empty")
@@ -108,6 +109,9 @@ func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSi
 		}
 		updates := map[string]any{
 			"updated_at": time.Now().Unix(),
+		}
+		if hoidcId != "" && hoidcId != user.HoidcId {
+			updates["hoidc_id"] = hoidcId
 		}
 		if name != "" && truncateStr(name, 20) != user.DisplayName {
 			updates["display_name"] = truncateStr(name, 20)
@@ -150,6 +154,7 @@ func ProvisionSsoUser(email, name, avatar, departmentTreePathStr string, allowSi
 		Password:              "",
 		Role:                  common.RoleCommonUser,
 		Status:                common.UserStatusEnabled,
+		HoidcId:               hoidcId,
 		SecondaryOrganization: secondary,
 		TertiaryOrganization:  tertiary,
 		Team:                  team,

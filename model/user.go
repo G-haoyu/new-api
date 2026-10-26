@@ -96,6 +96,7 @@ type User struct {
 	OidcId               string                     `json:"oidc_id" gorm:"column:oidc_id;index"`
 	WeChatId             string                     `json:"wechat_id" gorm:"column:wechat_id;index"`
 	TelegramId           string                     `json:"telegram_id" gorm:"column:telegram_id;index"`
+	HoidcId              string                     `json:"hoidc_id" gorm:"column:hoidc_id;index"`
 	VerificationCode     string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
 	AccessToken          *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
 	AccessTokenCreatedAt *int64                     `json:"-" gorm:"type:bigint;column:access_token_created_at"`    // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
@@ -538,7 +539,7 @@ func GetSelfUserById(id int) (*User, error) {
 		"id", "username", "display_name", "avatar",
 		"secondary_organization", "tertiary_organization", "team", "org_str",
 		"role", "status", "email",
-		"github_id", "discord_id", "oidc_id", "wechat_id", "telegram_id",
+		"github_id", "discord_id", "oidc_id", "wechat_id", "telegram_id", "hoidc_id",
 		"group", "quota", "used_quota", "request_count", "aff_code", "aff_count",
 		"aff_quota", "aff_history", "inviter_id", "linux_do_id", "setting",
 		"stripe_customer", "auth_version",
@@ -557,14 +558,25 @@ func GetUserIdByAffCode(affCode string) (int, error) {
 	return user.Id, err
 }
 
-// DisableStaleSsoUsers disables SSO users (password is empty) whose updated_at
-// is older than cutoffTimestamp, indicating they were not seen in recent syncs.
+// DisableStaleSsoUsers disables SSO users whose updated_at is older than
+// cutoffTimestamp, indicating they were not seen in recent syncs.
 func DisableStaleSsoUsers(cutoffTimestamp int64) (int64, error) {
 	result := DB.Model(&User{}).
-		Where("password = '' AND status = ? AND updated_at > 0 AND updated_at < ?",
+		Where("hoidc_id != '' AND status = ? AND updated_at > 0 AND updated_at < ?",
 			common.UserStatusEnabled, cutoffTimestamp).
 		Update("status", common.UserStatusResigned)
 	return result.RowsAffected, result.Error
+}
+
+// BackfillHoidcId marks legacy SSO users (empty password + non-empty org_str)
+// with a placeholder hoidc_id so the new identity check picks them up.
+func BackfillHoidcId() {
+	result := DB.Model(&User{}).
+		Where("hoidc_id = '' AND password = '' AND org_str != ''").
+		Update("hoidc_id", "0")
+	if result.RowsAffected > 0 {
+		common.SysLog(fmt.Sprintf("backfilled hoidc_id for %d legacy SSO users", result.RowsAffected))
+	}
 }
 
 // DeleteUserById soft-deletes a user and returns how many scoped access tokens
