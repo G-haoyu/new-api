@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -46,22 +49,68 @@ type modelSquareItem struct {
 	OutputModalities []string               `json:"output_modalities,omitempty"`
 	MaxOutputTokens  *int64                 `json:"max_output_tokens,omitempty"`
 	Parameters       []capability.Parameter `json:"parameters,omitempty"`
+
+	// CatalogKey 是模型广场详情页使用的路由键。它按具体模型名编码，
+	// 这样命中同一条前缀/后缀声明的多个模型也能各自有稳定的详情地址；
+	// 编码后不含 "/"，模型名里带斜杠（如 vendor/model）也能作为单个路径段。
+	CatalogKey string               `json:"catalog_key"`
+	Channels   []modelSquareChannel `json:"channels,omitempty"`
+}
+
+const modelSquareCatalogKeyPrefix = "m_"
+
+func modelSquareCatalogKey(modelName string) string {
+	return modelSquareCatalogKeyPrefix + base64.RawURLEncoding.EncodeToString([]byte(modelName))
+}
+
+func decodeModelSquareCatalogKey(key string) (string, bool) {
+	encoded, ok := strings.CutPrefix(key, modelSquareCatalogKeyPrefix)
+	if !ok || encoded == "" {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 {
+		return "", false
+	}
+	return string(decoded), true
+}
+
+// modelSquareChannel 是模型广场公开的单个服务渠道信息。
+// 只暴露渠道 ID、费用倍率与生效能力，不暴露渠道名称和密钥。
+type modelSquareChannel struct {
+	ID               int                    `json:"id"`
+	CostMultiplier   float64                `json:"cost_multiplier"`
+	Capabilities     []string               `json:"capabilities,omitempty"`
+	InputModalities  []string               `json:"input_modalities,omitempty"`
+	OutputModalities []string               `json:"output_modalities,omitempty"`
+	MaxOutputTokens  *int64                 `json:"max_output_tokens,omitempty"`
+	Parameters       []capability.Parameter `json:"parameters,omitempty"`
+}
+
+// modelSquareRoute 是一条启用的"模型 → 渠道"路由，携带计算展示信息所需的渠道字段。
+type modelSquareRoute struct {
+	Model        string
+	ChannelID    int
+	ModelMapping *string
+	Setting      *string
 }
 
 func modelSquareItemFromModel(
 	meta *model.Model,
+	modelName string,
 	pricingByName map[string]model.Pricing,
 	vendors map[int]model.Vendor,
 ) modelSquareItem {
-	catalogSlug := meta.ModelName
+	catalogSlug := modelName
 	if vendor, ok := vendors[meta.VendorID]; ok && vendor.Name != "" {
 		ownerSlug := strings.ToLower(strings.TrimSpace(vendor.Name))
 		ownerSlug = strings.NewReplacer(" ", "-", "/", "-", "_", "-").Replace(ownerSlug)
-		catalogSlug = ownerSlug + "/" + meta.ModelName
+		catalogSlug = ownerSlug + "/" + modelName
 	}
 	item := modelSquareItem{
 		ID:                     meta.Id,
-		ModelName:              meta.ModelName,
+		ModelName:              modelName,
+		CatalogKey:             modelSquareCatalogKey(modelName),
 		CatalogSlug:            catalogSlug,
 		Description:            meta.Description,
 		Icon:                   meta.Icon,
@@ -86,7 +135,7 @@ func modelSquareItemFromModel(
 	item.MaxOutputTokens = summary.MaxOutputTokens
 	item.Parameters = capability.Parameters(spec)
 
-	if pricing, ok := pricingByName[meta.ModelName]; ok {
+	if pricing, ok := pricingByName[modelName]; ok {
 		item.QuotaType = pricing.QuotaType
 		item.ModelRatio = pricing.ModelRatio
 		item.ModelPrice = pricing.ModelPrice
@@ -104,7 +153,59 @@ func modelSquareItemFromModel(
 	return item
 }
 
-func buildModelSquareItems(metas []model.Model) ([]modelSquareItem, error) {
+// loadModelSquareRoutes 返回所有启用的"模型 → 渠道"路由。
+func loadModelSquareRoutes() ([]modelSquareRoute, error) {
+	var routes []modelSquareRoute
+	err := model.DB.Table("abilities").
+		Select("abilities.model as model, channels.id as channel_id, channels.model_mapping as model_mapping, channels.setting as setting").
+		Joins("JOIN channels ON channels.id = abilities.channel_id").
+		Where("abilities.enabled = ? AND channels.status = ?", true, common.ChannelStatusEnabled).
+		Distinct().
+		Order("abilities.model, channels.id").
+		Scan(&routes).Error
+	return routes, err
+}
+
+// squareChannelsByModel 把路由行整理成公开的渠道展示信息。
+func squareChannelsByModel(routes []modelSquareRoute, names map[string]struct{}) map[string][]modelSquareChannel {
+	byModel := make(map[string][]modelSquareChannel)
+	for _, route := range routes {
+		if _, wanted := names[route.Model]; !wanted {
+			continue
+		}
+		modelMapping := ""
+		if route.ModelMapping != nil {
+			modelMapping = *route.ModelMapping
+		}
+		setting := ""
+		if route.Setting != nil {
+			setting = *route.Setting
+		}
+		channel := modelSquareChannel{
+			ID:             route.ChannelID,
+			CostMultiplier: model.ChannelCostMultiplier(setting, modelMapping, route.Model),
+		}
+		if channel.CostMultiplier <= 0 {
+			channel.CostMultiplier = 1
+		}
+		if spec, ok := model.EffectiveChannelCapability(route.ChannelID, route.Model); ok {
+			summary := capability.Summarize(spec)
+			channel.Capabilities = summary.Capabilities
+			channel.InputModalities = summary.InputModalities
+			channel.OutputModalities = summary.OutputModalities
+			channel.MaxOutputTokens = summary.MaxOutputTokens
+			channel.Parameters = capability.Parameters(spec)
+		}
+		byModel[route.Model] = append(byModel[route.Model], channel)
+	}
+	return byModel
+}
+
+func buildModelSquareItems(
+	resolved map[string]*model.Model,
+	names []string,
+	routes []modelSquareRoute,
+) ([]modelSquareItem, error) {
 	pricingByName := make(map[string]model.Pricing)
 	for _, pricing := range model.GetPricing() {
 		pricingByName[pricing.ModelName] = pricing
@@ -117,68 +218,120 @@ func buildModelSquareItems(metas []model.Model) ([]modelSquareItem, error) {
 	for _, vendor := range vendorRows {
 		vendors[vendor.Id] = vendor
 	}
-	items := make([]modelSquareItem, 0, len(metas))
-	for i := range metas {
-		items = append(items, modelSquareItemFromModel(&metas[i], pricingByName, vendors))
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	channelsByName := squareChannelsByModel(routes, wanted)
+	items := make([]modelSquareItem, 0, len(names))
+	for _, name := range names {
+		meta := resolved[name]
+		if meta == nil {
+			continue
+		}
+		item := modelSquareItemFromModel(meta, name, pricingByName, vendors)
+		item.Channels = channelsByName[name]
+		items = append(items, item)
 	}
 	return items, nil
 }
 
+// getModelSquareItems 从启用路由出发构建模型广场列表。
+// 只要模型能被任意声明行（精确/前缀/后缀/包含）命中、有价格、有启用渠道，
+// 就出现在广场里；元数据取命中行的描述、厂商与能力声明。
 func getModelSquareItems(offset, limit int) ([]modelSquareItem, int64, error) {
 	pricingByName := make(map[string]model.Pricing)
 	for _, pricing := range model.GetPricing() {
 		pricingByName[pricing.ModelName] = pricing
 	}
-	var enabledAbilities []model.AbilityWithChannel
-	if err := model.DB.Table("abilities").
-		Select("abilities.*, channels.type as channel_type").
-		Joins("left join channels on abilities.channel_id = channels.id").
-		Where("abilities.enabled = ?", true).
-		Scan(&enabledAbilities).Error; err != nil {
+	routes, err := loadModelSquareRoutes()
+	if err != nil {
 		return nil, 0, err
 	}
-	names := make([]string, 0, len(enabledAbilities))
-	seen := make(map[string]struct{}, len(enabledAbilities))
-	for _, ability := range enabledAbilities {
-		if _, hasPricing := pricingByName[ability.Model]; !hasPricing {
+	names := make([]string, 0, len(routes))
+	seen := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		if _, hasPricing := pricingByName[route.Model]; !hasPricing {
 			continue
 		}
-		if _, exists := seen[ability.Model]; exists {
+		if _, exists := seen[route.Model]; exists {
 			continue
 		}
-		seen[ability.Model] = struct{}{}
-		names = append(names, ability.Model)
+		seen[route.Model] = struct{}{}
+		names = append(names, route.Model)
 	}
 	if len(names) == 0 {
 		return []modelSquareItem{}, 0, nil
 	}
-	var metas []model.Model
-	query := model.DB.Model(&model.Model{}).
-		Where("status = ? AND name_rule = ? AND model_name IN ?", 1, model.NameRuleExact, names)
-	var total int64
-	if err := query.Count(&total).Error; err != nil {
+	resolved, err := model.ResolveModelMetadataByName(names)
+	if err != nil {
 		return nil, 0, err
 	}
-	query = query.Order("id ASC")
+	visible := make([]string, 0, len(names))
+	for _, name := range names {
+		if meta := resolved[name]; meta != nil && meta.Status == 1 {
+			visible = append(visible, name)
+		}
+	}
+	sort.Strings(visible)
+	total := len(visible)
 	if offset > 0 {
-		query = query.Offset(offset)
+		if offset >= total {
+			return []modelSquareItem{}, int64(total), nil
+		}
+		visible = visible[offset:]
 	}
-	if limit > 0 {
-		query = query.Limit(limit)
+	if limit > 0 && limit < len(visible) {
+		visible = visible[:limit]
 	}
-	if err := query.Find(&metas).Error; err != nil {
-		return nil, 0, err
-	}
-	items, err := buildModelSquareItems(metas)
-	return items, total, err
+	items, err := buildModelSquareItems(resolved, visible, routes)
+	return items, int64(total), err
 }
 
-func getModelSquareItemByID(id int) (*modelSquareItem, error) {
-	var meta model.Model
-	if err := model.DB.Where("id = ? AND status = ? AND name_rule = ?", id, 1, model.NameRuleExact).First(&meta).Error; err != nil {
+// getModelSquareItemByCatalogKey 按广场路由键取详情。
+// 数值键保持旧链接兼容（元数据行 ID，仅精确声明）；非数值键是具体模型名。
+func getModelSquareItemByCatalogKey(key string) (*modelSquareItem, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, errors.New("model not found")
+	}
+	routes, err := loadModelSquareRoutes()
+	if err != nil {
 		return nil, err
 	}
-	items, err := buildModelSquareItems([]model.Model{meta})
+	var meta *model.Model
+	var modelName string
+	if id, parseErr := strconv.Atoi(key); parseErr == nil {
+		// 旧链接使用元数据行 ID；只有精确行能用 ID 定位。
+		var exact model.Model
+		if err := model.DB.Where("id = ? AND status = ? AND name_rule = ?", id, 1, model.NameRuleExact).
+			First(&exact).Error; err != nil {
+			return nil, errors.New("model not found")
+		}
+		meta = &exact
+		modelName = exact.ModelName
+	} else {
+		decoded, ok := decodeModelSquareCatalogKey(key)
+		if !ok {
+			return nil, errors.New("model not found")
+		}
+		resolved, resolveErr := model.ResolveModelMetadataByName([]string{decoded})
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		meta = resolved[decoded]
+		if meta == nil || meta.Status != 1 {
+			return nil, errors.New("model not found")
+		}
+		modelName = decoded
+	}
+	hasRoute := slices.ContainsFunc(routes, func(route modelSquareRoute) bool {
+		return route.Model == modelName
+	})
+	if !hasRoute {
+		return nil, errors.New("model not found")
+	}
+	items, err := buildModelSquareItems(map[string]*model.Model{modelName: meta}, []string{modelName}, routes)
 	if err != nil {
 		return nil, err
 	}
@@ -253,12 +406,7 @@ func GetModelSquare(c *gin.Context) {
 }
 
 func GetModelSquareDetail(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	item, err := getModelSquareItemByID(id)
+	item, err := getModelSquareItemByCatalogKey(c.Param("id"))
 	if err != nil {
 		common.ApiErrorMsg(c, "model not found")
 		return

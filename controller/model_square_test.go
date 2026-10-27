@@ -27,12 +27,14 @@ func setupModelSquareControllerTest(t *testing.T) *gorm.DB {
 		&model.Vendor{},
 		&model.Channel{},
 		&model.Ability{},
+		&model.ChannelModelCapability{},
 	))
 	model.DB = db
 	model.InvalidatePricingCache()
 	t.Cleanup(func() {
 		model.DB = previousDB
 		model.InvalidatePricingCache()
+		model.InvalidateCapabilityCache()
 		sqlDB, dbErr := db.DB()
 		if dbErr == nil {
 			require.NoError(t, sqlDB.Close())
@@ -49,6 +51,13 @@ func seedModelSquareModel(t *testing.T, db *gorm.DB, id int, name string, capabi
 		Status:       1,
 		NameRule:     model.NameRuleExact,
 		Capabilities: capabilities,
+	}).Error)
+	require.NoError(t, db.Create(&model.Channel{
+		Id:     id,
+		Name:   fmt.Sprintf("channel-%d", id),
+		Group:  "default",
+		Models: name,
+		Status: common.ChannelStatusEnabled,
 	}).Error)
 	require.NoError(t, db.Create(&model.Ability{
 		Group:     "default",
@@ -151,4 +160,72 @@ func TestGetModelSquareDetailRejectsUnknownModel(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 	assert.False(t, response.Success)
 	assert.Equal(t, "model not found", response.Message)
+}
+
+func TestGetModelSquareListsRuleMatchedModelsWithChannels(t *testing.T) {
+	db := setupModelSquareControllerTest(t)
+	require.NoError(t, db.Create(&model.Model{
+		Id:           10,
+		ModelName:    "family-",
+		Status:       1,
+		NameRule:     model.NameRulePrefix,
+		Capabilities: `{"params":{"top_p":{"min":0,"max":1}},"tools":{"supported":true}}`,
+	}).Error)
+	setting := `{"cost_multiplier":{"family-model-1":1.5}}`
+	require.NoError(t, db.Create(&model.Channel{
+		Id: 7, Name: "seven", Group: "default", Models: "family-model-1",
+		Status: common.ChannelStatusEnabled, Setting: &setting,
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group: "default", Model: "family-model-1", ChannelId: 7, Enabled: true,
+	}).Error)
+	require.NoError(t, model.InitCapabilityCache())
+	require.NoError(t, model.SetChannelModelCapability(7, "family-model-1", `{"params":{"top_p":{"min":0,"max":0.5}}}`))
+	model.InvalidatePricingCache()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/model-square", nil)
+	GetModelSquare(context)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Data struct {
+			Items []modelSquareItem `json:"items"`
+			Total int64             `json:"total"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, int64(1), response.Data.Total)
+	require.Len(t, response.Data.Items, 1)
+	item := response.Data.Items[0]
+	assert.Equal(t, "family-model-1", item.ModelName)
+	assert.True(t, strings.HasPrefix(item.CatalogKey, "m_"), "详情路由键按模型名编码")
+	assert.Equal(t, 10, item.ID, "元数据取命中的前缀声明行")
+	assert.Contains(t, item.Capabilities, "function_calling")
+	require.Len(t, item.Channels, 1)
+	assert.Equal(t, 7, item.Channels[0].ID)
+	assert.Equal(t, 1.5, item.Channels[0].CostMultiplier)
+	topP := ""
+	for _, parameter := range item.Channels[0].Parameters {
+		if parameter.Name == "top_p" {
+			topP = parameter.Range
+		}
+	}
+	assert.Equal(t, "0 ~ 0.5", topP, "渠道收窄后的生效能力")
+
+	detail, err := getModelSquareItemByCatalogKey(item.CatalogKey)
+	require.NoError(t, err)
+	assert.Equal(t, "family-model-1", detail.ModelName)
+	assert.Equal(t, item.CatalogKey, detail.CatalogKey)
+	require.Len(t, detail.Channels, 1)
+	assert.Equal(t, 1.5, detail.Channels[0].CostMultiplier)
+
+	// 带斜杠的模型名必须编码成单个路径段，否则详情路由无法匹配。
+	slashed := modelSquareCatalogKey("vendor/model-x")
+	assert.NotContains(t, slashed, "/")
+	decodedName, ok := decodeModelSquareCatalogKey(slashed)
+	require.True(t, ok)
+	assert.Equal(t, "vendor/model-x", decodedName)
 }

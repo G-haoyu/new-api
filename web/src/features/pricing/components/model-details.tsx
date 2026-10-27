@@ -27,6 +27,7 @@ import {
   Info,
   Layers,
   Maximize2,
+  Server,
   Sparkles,
   Timer,
   Zap,
@@ -111,6 +112,7 @@ import type {
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
+import { ModelDetailsChannels } from './model-details-channels'
 import { ModelDetailsPerformance } from './model-details-performance'
 
 // ----------------------------------------------------------------------------
@@ -744,6 +746,18 @@ export function ModelSquareDetailPage(props: ModelDetailsContentProps) {
           />
         </div>
       </header>
+
+      {Array.isArray(model.channels) && (
+        <section id='channels' className='scroll-mt-6 space-y-4'>
+          <h2 className='flex items-center gap-2 text-xl font-semibold'>
+            <Server className='size-5' />
+            {t('Serving channels')}
+          </h2>
+          <div className='bg-card rounded-xl border p-4 sm:p-6'>
+            <ModelDetailsChannels model={model} />
+          </div>
+        </section>
+      )}
 
       <section id='api' className='scroll-mt-6 space-y-4'>
         <h2 className='flex items-center gap-2 text-xl font-semibold'>
@@ -1614,7 +1628,7 @@ function ProviderGroupPricingSection(
   )
 }
 
-const TAB_VALUES = ['overview', 'performance', 'api'] as const
+const TAB_VALUES = ['overview', 'performance', 'channels', 'api'] as const
 type TabValue = (typeof TAB_VALUES)[number]
 
 const TAB_META: Record<
@@ -1623,6 +1637,7 @@ const TAB_META: Record<
 > = {
   overview: { icon: Info, labelKey: 'Overview' },
   performance: { icon: HeartPulse, labelKey: 'Performance' },
+  channels: { icon: Server, labelKey: 'Channels' },
   api: { icon: Code2, labelKey: 'API' },
 }
 
@@ -1656,13 +1671,25 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
     simpleTaskPricing ||
     taskTiers.length === 0
 
+  // The pricing page predates the channel listing; only the model square
+  // publishes channels, so hide the tab instead of showing a misleading empty state.
+  const hasChannelData = Array.isArray(props.model.channels)
+  const tabValues = hasChannelData
+    ? TAB_VALUES
+    : TAB_VALUES.filter((value) => value !== 'channels')
+
   return (
     <div className='@container/details space-y-4'>
       <ModelHeader model={props.model} />
 
       <Tabs defaultValue='overview' className='gap-4'>
-        <TabsList className='bg-muted/60 grid w-full grid-cols-3 gap-1 rounded-lg p-1 group-data-horizontal/tabs:h-auto'>
-          {TAB_VALUES.map((value) => {
+        <TabsList
+          className={cn(
+            'bg-muted/60 grid w-full gap-1 rounded-lg p-1 group-data-horizontal/tabs:h-auto',
+            hasChannelData ? 'grid-cols-4' : 'grid-cols-3'
+          )}
+        >
+          {tabValues.map((value) => {
             const Icon = TAB_META[value].icon
             return (
               <TabsTrigger
@@ -1720,6 +1747,12 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
         <TabsContent value='performance' className='outline-none'>
           <ModelDetailsPerformance model={props.model} />
         </TabsContent>
+
+        {hasChannelData && (
+          <TabsContent value='channels' className='outline-none'>
+            <ModelDetailsChannels model={props.model} />
+          </TabsContent>
+        )}
 
         <TabsContent value='api' className='outline-none'>
           <ModelDetailsApi

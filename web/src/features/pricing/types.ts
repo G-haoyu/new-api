@@ -114,6 +114,22 @@ export type PricingModel = {
   output_modalities?: Modality[]
   capabilities?: ModelCapability[]
   parameters?: ModelParameter[]
+  /** Route key for the detail page: always the concrete model name. */
+  catalog_key?: string
+  /** Enabled channels serving this model, published by the model square. */
+  channels?: SquareChannel[]
+}
+
+/** One enabled channel serving a catalog model, as exposed by the model square. */
+export type SquareChannel = {
+  id: number
+  /** Cost factor recorded in relay attempt logs; 1 when not configured. */
+  cost_multiplier: number
+  capabilities?: ModelCapability[]
+  input_modalities?: Modality[]
+  output_modalities?: Modality[]
+  max_output_tokens?: number
+  parameters?: ModelParameter[]
 }
 
 /** A request parameter declared by the model-level capability spec. */
