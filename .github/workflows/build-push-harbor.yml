@@ -1,0 +1,81 @@
+name: Build & push image (Harbor)
+
+# Runs on the self-hosted Tokyo runner. Never add pull_request triggers here:
+# the repository is public and fork PRs must not execute on this machine.
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-push-harbor-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HARBOR_HOST: registry.intsig.net
+  IMAGE_REPO: registry.intsig.net/noc_maas/new-api
+  HARBOR_USERNAME: robot$noc_maas_robot
+
+jobs:
+  build-push:
+    name: Build & push (linux/amd64)
+    runs-on: [self-hosted, overseas]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Resolve tag & write VERSION
+        id: version
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          BRANCH_TAG=$(printf '%s' "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g')
+          TAG="${BRANCH_TAG}-$(git rev-parse --short=12 HEAD)"
+          echo "$TAG" > VERSION
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=$BRANCH_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Harbor
+        env:
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: printf '%s' "$HARBOR_PASSWORD" | docker login "$HARBOR_HOST" --username "$HARBOR_USERNAME" --password-stdin
+
+      # Plain docker build (default driver) so the build and push use the
+      # host's /etc/hosts entry for Harbor and keep the local layer cache.
+      - name: Build
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          BRANCH_TAG: ${{ steps.version.outputs.branch_tag }}
+        run: |
+          docker build --progress=plain \
+            --build-arg GOPROXY=https://proxy.golang.org,direct \
+            --build-arg GOSUMDB=sum.golang.org \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --tag "$IMAGE_REPO:$TAG" \
+            --tag "$IMAGE_REPO:$BRANCH_TAG-latest" \
+            .
+
+      - name: Push
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          BRANCH_TAG: ${{ steps.version.outputs.branch_tag }}
+        run: |
+          docker push "$IMAGE_REPO:$TAG"
+          docker push "$IMAGE_REPO:$BRANCH_TAG-latest"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REPO:$TAG")
+          {
+            echo "### Image"
+            echo '```'
+            echo "$IMAGE_REPO:$TAG"
+            echo "$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of Harbor
+        if: always()
+        run: docker logout "$HARBOR_HOST"
