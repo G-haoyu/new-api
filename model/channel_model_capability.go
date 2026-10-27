@@ -3,12 +3,14 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service/capability"
 
 	"gorm.io/gorm"
@@ -366,16 +368,116 @@ type CapabilityTargetChannel struct {
 	Name       string `json:"name"`
 	Type       int    `json:"type"`
 	Configured bool   `json:"configured"`
+	// CostMultiplier 是渠道对该模型的费用倍率，0 表示未配置（按 1 处理）。
+	CostMultiplier float64 `json:"cost_multiplier"`
 }
 
 // CapabilityTarget 是"模型 → 服务渠道"清单的一行。
 type CapabilityTarget struct {
-	ID              int                       `json:"id"`
-	ModelName       string                    `json:"model_name"`
-	DeclarationName string                    `json:"declaration_name"`
-	NameRule        int                       `json:"name_rule"`
-	Capabilities    string                    `json:"capabilities,omitempty"`
-	Channels        []CapabilityTargetChannel `json:"channels"`
+	ID              int    `json:"id"`
+	ModelName       string `json:"model_name"`
+	DeclarationName string `json:"declaration_name"`
+	NameRule        int    `json:"name_rule"`
+	Capabilities    string `json:"capabilities,omitempty"`
+	// Declared 为 false 表示没有任何模型级声明命中该模型，只能配置渠道倍率。
+	Declared bool                      `json:"declared"`
+	Channels []CapabilityTargetChannel `json:"channels"`
+}
+
+// ChannelCostMultiplier 返回渠道对某个公开模型配置的费用倍率，未配置时返回 0。
+// 倍率的键是 model_mapping 映射后的上游模型名，所以这里先解析映射。
+func ChannelCostMultiplier(settingRaw, modelMappingRaw, publicModel string) float64 {
+	setting := dto.ChannelSettings{}
+	if strings.TrimSpace(settingRaw) != "" {
+		if err := common.UnmarshalJsonStr(settingRaw, &setting); err != nil {
+			return 0
+		}
+	}
+	multiplier, ok := setting.CostMultiplierMap[resolveUpstreamModelName(modelMappingRaw, publicModel)]
+	if !ok || multiplier <= 0 || math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
+		return 0
+	}
+	return multiplier
+}
+
+// resolveUpstreamModelName 返回渠道实际向上游发送的模型名。
+func resolveUpstreamModelName(modelMappingRaw, publicModel string) string {
+	if strings.TrimSpace(modelMappingRaw) == "" {
+		return publicModel
+	}
+	mapping := make(map[string]string)
+	if err := common.UnmarshalJsonStr(modelMappingRaw, &mapping); err != nil {
+		return publicModel
+	}
+	if upstream := strings.TrimSpace(mapping[publicModel]); upstream != "" {
+		return upstream
+	}
+	return publicModel
+}
+
+// SetChannelModelCostMultiplier 写入渠道对一个公开模型的费用倍率。
+// multiplier<=0 表示清除，回到未配置（按 1 处理）。倍率乘数只影响
+// relay_attempts 记录的成本，不参与计费。
+func SetChannelModelCostMultiplier(channelID int, publicModel string, multiplier float64) error {
+	publicModel = strings.TrimSpace(publicModel)
+	if channelID <= 0 || publicModel == "" {
+		return errors.New("channel_id and model are required")
+	}
+	if math.IsNaN(multiplier) || math.IsInf(multiplier, 0) || multiplier < 0 {
+		return errors.New("cost multiplier must be a positive number")
+	}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var row struct {
+			Models       string
+			ModelMapping *string
+			Setting      *string
+		}
+		if err := lockForUpdate(tx).Model(&Channel{}).
+			Select("models", "model_mapping", "setting").
+			Where("id = ?", channelID).
+			Take(&row).Error; err != nil {
+			return fmt.Errorf("channel #%d not found", channelID)
+		}
+		served := slices.ContainsFunc(strings.Split(row.Models, ","), func(model string) bool {
+			return strings.TrimSpace(model) == publicModel
+		})
+		if !served {
+			return fmt.Errorf("channel #%d does not serve model %q", channelID, publicModel)
+		}
+		setting := dto.ChannelSettings{}
+		if row.Setting != nil && strings.TrimSpace(*row.Setting) != "" {
+			if err := common.UnmarshalJsonStr(*row.Setting, &setting); err != nil {
+				return fmt.Errorf("invalid channel setting: %w", err)
+			}
+		}
+		modelMapping := ""
+		if row.ModelMapping != nil {
+			modelMapping = *row.ModelMapping
+		}
+		upstream := resolveUpstreamModelName(modelMapping, publicModel)
+		if multiplier > 0 {
+			if setting.CostMultiplierMap == nil {
+				setting.CostMultiplierMap = make(map[string]float64)
+			}
+			setting.CostMultiplierMap[upstream] = multiplier
+		} else {
+			delete(setting.CostMultiplierMap, upstream)
+			if len(setting.CostMultiplierMap) == 0 {
+				setting.CostMultiplierMap = nil
+			}
+		}
+		encoded, err := common.Marshal(setting)
+		if err != nil {
+			return err
+		}
+		raw := string(encoded)
+		return tx.Model(&Channel{}).Where("id = ?", channelID).Update("setting", raw).Error
+	})
+	if err != nil {
+		return err
+	}
+	InitChannelCache()
+	return nil
 }
 
 // CapabilityTargetQuery 是能力设置页的筛选与分页参数。Limit<=0 表示不分页。
@@ -397,13 +499,15 @@ func GetCapabilityTargets(query CapabilityTargetQuery) ([]CapabilityTarget, int,
 	}
 
 	var rows []struct {
-		Model string
-		ID    int
-		Name  string
-		Type  int
+		Model        string
+		ID           int
+		Name         string
+		Type         int
+		ModelMapping *string
+		Setting      *string
 	}
 	err := DB.Table("abilities").
-		Select("abilities.model as model, channels.id as id, channels.name as name, channels.type as type").
+		Select("abilities.model as model, channels.id as id, channels.name as name, channels.type as type, channels.model_mapping as model_mapping, channels.setting as setting").
 		Joins("JOIN channels ON channels.id = abilities.channel_id").
 		Where("abilities.enabled = ? AND channels.status = ?", true, common.ChannelStatusEnabled).
 		Distinct().
@@ -419,10 +523,19 @@ func GetCapabilityTargets(query CapabilityTargetQuery) ([]CapabilityTarget, int,
 	}
 	for _, row := range rows {
 		names[row.Model] = struct{}{}
+		modelMapping := ""
+		if row.ModelMapping != nil {
+			modelMapping = *row.ModelMapping
+		}
+		setting := ""
+		if row.Setting != nil {
+			setting = *row.Setting
+		}
 		channelsByModel[row.Model] = append(channelsByModel[row.Model], CapabilityTargetChannel{
-			ID:   row.ID,
-			Name: row.Name,
-			Type: row.Type,
+			ID:             row.ID,
+			Name:           row.Name,
+			Type:           row.Type,
+			CostMultiplier: ChannelCostMultiplier(setting, modelMapping, row.Model),
 		})
 	}
 
@@ -439,10 +552,7 @@ func GetCapabilityTargets(query CapabilityTargetQuery) ([]CapabilityTarget, int,
 	keyword := strings.ToLower(strings.TrimSpace(query.Keyword))
 	targets := make([]CapabilityTarget, 0, len(modelNames))
 	for _, name := range modelNames {
-		record, ok := resolveModelCapabilityRecord(name)
-		if !ok {
-			continue
-		}
+		record, declared := resolveModelCapabilityRecord(name)
 		if keyword != "" && !strings.Contains(strings.ToLower(name), keyword) {
 			continue
 		}
@@ -464,6 +574,7 @@ func GetCapabilityTargets(query CapabilityTargetQuery) ([]CapabilityTarget, int,
 			DeclarationName: record.name,
 			NameRule:        record.rule,
 			Capabilities:    record.raw,
+			Declared:        declared,
 			Channels:        channels,
 		})
 	}

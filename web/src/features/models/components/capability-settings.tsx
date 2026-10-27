@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
+import type { TFunction } from 'i18next'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -68,6 +69,7 @@ import {
   getCapabilityTargets,
   getChannelModelCapability,
   saveChannelModelCapability,
+  saveChannelModelCostMultiplier,
 } from '../api'
 import { getNameRuleConfig } from '../constants'
 import { capabilityTargetsQueryKeys } from '../lib'
@@ -81,6 +83,21 @@ type Selection = {
 }
 
 const EMPTY_TARGETS: CapabilityTarget[] = []
+
+/**
+ * 名称下方标注声明来源。没有声明命中时说明该行只能配置渠道倍率，
+ * 不能收窄能力。
+ */
+function capabilityTargetSourceLabel(
+  target: CapabilityTarget,
+  rule: { label: string } | null,
+  t: TFunction
+): string {
+  if (!target.declared) {
+    return t('No model-level declaration')
+  }
+  return rule ? `${rule.label} · ${target.declaration_name}` : t('Exact model')
+}
 
 /**
  * 一行一个模型，行内展开该模型的全部服务渠道。模型名可能由前缀/后缀/包含声明
@@ -175,9 +192,7 @@ export function CapabilitySettings() {
                   {target.model_name}
                 </div>
                 <div className='text-muted-foreground mt-0.5 truncate text-xs'>
-                  {rule
-                    ? `${rule.label} · ${target.declaration_name}`
-                    : t('Exact model')}
+                  {capabilityTargetSourceLabel(target, rule, t)}
                 </div>
               </div>
             </div>
@@ -326,39 +341,149 @@ function CapabilityChannelList(props: {
       </p>
     )
   }
+  const declared = props.target.declared
   return (
     <ul className='grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3'>
-      {props.target.channels.map((channel) => (
-        <li
-          key={channel.id}
-          className='bg-background flex min-w-0 items-center justify-between gap-2 rounded-md border px-2.5 py-1.5'
-        >
-          <div className='min-w-0'>
-            <div className='truncate text-sm' title={channel.name}>
-              #{channel.id} · {channel.name}
+      {props.target.channels.map((channel) => {
+        let statusLabel = t('Inherited')
+        if (!declared) {
+          statusLabel = t('No declaration')
+        } else if (channel.configured) {
+          statusLabel = t('Narrowed')
+        }
+        return (
+          <li
+            key={channel.id}
+            className='bg-background flex min-w-0 flex-col gap-1.5 rounded-md border px-2.5 py-1.5'
+          >
+            <div className='flex min-w-0 items-center justify-between gap-2'>
+              <div className='min-w-0'>
+                <div className='truncate text-sm' title={channel.name}>
+                  #{channel.id} · {channel.name}
+                </div>
+                <div className='text-muted-foreground text-xs'>
+                  {t(getChannelTypeLabel(channel.type))}
+                </div>
+              </div>
+              <StatusBadge
+                label={statusLabel}
+                variant={declared && channel.configured ? 'blue' : 'neutral'}
+                size='sm'
+                copyable={false}
+              />
             </div>
-            <div className='text-muted-foreground text-xs'>
-              {t(getChannelTypeLabel(channel.type))}
+            <div className='flex min-w-0 items-center justify-between gap-2'>
+              <ChannelCostMultiplierInput
+                channel={channel}
+                modelName={props.target.model_name}
+              />
+              {declared && (
+                <Button
+                  size='sm'
+                  variant='outline'
+                  className='h-7'
+                  onClick={() => props.onSelect(channel)}
+                >
+                  {channel.configured ? t('Edit narrowing') : t('Narrow')}
+                </Button>
+              )}
             </div>
-          </div>
-          <div className='flex shrink-0 items-center gap-1.5'>
-            <StatusBadge
-              label={channel.configured ? t('Narrowed') : t('Inherited')}
-              variant={channel.configured ? 'blue' : 'neutral'}
-              size='sm'
-            />
-            <Button
-              size='sm'
-              variant='outline'
-              className='h-7'
-              onClick={() => props.onSelect(channel)}
-            >
-              {channel.configured ? t('Edit narrowing') : t('Narrow')}
-            </Button>
-          </div>
-        </li>
-      ))}
+          </li>
+        )
+      })}
     </ul>
+  )
+}
+
+/**
+ * 渠道模型的费用倍率。倍率保存在渠道 setting 的 cost_multiplier 里
+ * （键是 model_mapping 之后的上游名），只影响 attempt 日志的成本，不参与计费。
+ */
+function ChannelCostMultiplierInput(props: {
+  channel: CapabilityTargetChannel
+  modelName: string
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const stored =
+    props.channel.cost_multiplier > 0 ? String(props.channel.cost_multiplier) : ''
+  const [draft, setDraft] = useState(stored)
+  const [error, setError] = useState('')
+
+  useEffect(() => setDraft(stored), [stored])
+
+  const save = useMutation({
+    mutationFn: async (multiplier: number) => {
+      const response = await saveChannelModelCostMultiplier({
+        channel_id: props.channel.id,
+        model: props.modelName,
+        multiplier,
+      })
+      if (!response.success) {
+        throw new Error(response.message || t('Operation failed'))
+      }
+    },
+    onSuccess: async () => {
+      setError('')
+      await queryClient.invalidateQueries({
+        queryKey: capabilityTargetsQueryKeys.all,
+      })
+      await queryClient.invalidateQueries({ queryKey: ['channels'] })
+      toast.success(t('Cost multiplier saved'))
+    },
+    onError: (saveError) => {
+      setError(
+        getServerErrorMessage(saveError, t('Failed to save cost multiplier'))
+      )
+    },
+  })
+
+  const commit = () => {
+    const trimmed = draft.trim()
+    const next = trimmed === '' ? 0 : Number(trimmed)
+    if (!Number.isFinite(next) || next < 0) {
+      setError(t('Enter a positive multiplier, or leave it empty to use 1.'))
+      return
+    }
+    if (next === props.channel.cost_multiplier) {
+      setError('')
+      return
+    }
+    save.mutate(next)
+  }
+
+  return (
+    <label className='text-muted-foreground flex min-w-0 items-center gap-1 text-xs'>
+      <span className='shrink-0'>{t('Multiplier')}</span>
+      <Input
+        className='h-7 w-16 px-1.5 text-right tabular-nums'
+        inputMode='decimal'
+        placeholder='1'
+        value={draft}
+        disabled={save.isPending}
+        aria-label={t('Cost multiplier for channel #{{id}}', {
+          id: props.channel.id,
+        })}
+        aria-invalid={Boolean(error)}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+          }
+        }}
+      />
+      {error ? (
+        <span
+          className='text-destructive max-w-40 truncate'
+          title={error}
+          role='alert'
+        >
+          {error}
+        </span>
+      ) : null}
+    </label>
   )
 }
 
@@ -394,9 +519,7 @@ function CapabilityMobileList(props: {
                   {target.model_name}
                 </span>
                 <span className='text-muted-foreground block truncate text-xs'>
-                  {rule
-                    ? `${rule.label} · ${target.declaration_name}`
-                    : t('Exact model')}
+                  {capabilityTargetSourceLabel(target, rule, t)}
                 </span>
               </span>
               <Badge variant={configured > 0 ? 'default' : 'outline'}>

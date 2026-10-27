@@ -49,9 +49,22 @@ const targets: CapabilityTarget[] = [
     declaration_name: 'sonnet-5',
     name_rule: 0,
     capabilities: '{"context":{"max_output_tokens":1024}}',
+    declared: true,
     channels: [
-      { id: 12, name: 'main', type: 1, configured: true },
-      { id: 19, name: 'backup', type: 1, configured: false },
+      {
+        id: 12,
+        name: 'main',
+        type: 1,
+        configured: true,
+        cost_multiplier: 1.5,
+      },
+      {
+        id: 19,
+        name: 'backup',
+        type: 1,
+        configured: false,
+        cost_multiplier: 0,
+      },
     ],
   },
   {
@@ -60,6 +73,7 @@ const targets: CapabilityTarget[] = [
     declaration_name: 'gpt-5.5',
     name_rule: 1,
     capabilities: '{"context":{"max_output_tokens":2048}}',
+    declared: true,
     channels: [],
   },
 ]
@@ -90,6 +104,9 @@ async function renderTargets(items: CapabilityTarget[] = targets, total = 2) {
     }
     return { data: { success: true, data: { items: [] } } }
   })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockImplementation(async () => ({ data: { success: true } }))
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
@@ -116,7 +133,7 @@ async function renderTargets(items: CapabilityTarget[] = targets, total = 2) {
   )
   await screen.findByText(items[0].model_name)
   await waitFor(() => expect(client.isFetching()).toBe(0))
-  return { get }
+  return { get, put }
 }
 
 beforeEach(() => {
@@ -160,6 +177,30 @@ it('shows each serving channel inline after expanding its model row', async () =
   expect(
     within(inherited as HTMLElement).getByRole('button', { name: 'Narrow' })
   ).toBeVisible()
+})
+
+it('saves a per-channel cost multiplier on blur', async () => {
+  const { put } = await renderTargets()
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'Expand' }))
+
+  const configured = screen.getByLabelText('Cost multiplier for channel #12')
+  expect(configured).toHaveValue('1.5')
+  expect(screen.getByLabelText('Cost multiplier for channel #19')).toHaveValue(
+    ''
+  )
+
+  await user.clear(configured)
+  await user.type(configured, '1.8')
+  await user.tab()
+
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(
+      '/api/channel-model-capabilities/cost-multiplier',
+      { channel_id: 12, model: 'sonnet-5', multiplier: 1.8 },
+      expect.anything()
+    )
+  )
 })
 
 it('requests the filtered page when the model name and channel ID inputs change', async () => {

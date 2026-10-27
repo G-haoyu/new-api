@@ -68,6 +68,14 @@ func GetChannelModelCapability(c *gin.Context) {
 	if configured {
 		overRaw, _ = capability.Encode(over)
 	}
+	costMultiplier := 0.0
+	if channel, channelErr := model.GetChannelById(channelID, false); channelErr == nil && channel != nil {
+		setting := ""
+		if channel.Setting != nil {
+			setting = *channel.Setting
+		}
+		costMultiplier = model.ChannelCostMultiplier(setting, channel.GetModelMapping(), modelName)
+	}
 	common.ApiSuccess(c, gin.H{
 		"channel_id":         channelID,
 		"model":              modelName,
@@ -75,7 +83,28 @@ func GetChannelModelCapability(c *gin.Context) {
 		"capabilities":       overRaw,
 		"model_capabilities": baseRaw,
 		"effective":          effectiveRaw,
+		"cost_multiplier":    costMultiplier,
 	})
+}
+
+type channelModelCostMultiplierRequest struct {
+	ChannelId  int     `json:"channel_id"`
+	Model      string  `json:"model"`
+	Multiplier float64 `json:"multiplier"`
+}
+
+// SaveChannelModelCostMultiplier 保存某个渠道模型的费用倍率，0 表示清除。
+func SaveChannelModelCostMultiplier(c *gin.Context) {
+	var request channelModelCostMultiplierRequest
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := model.SetChannelModelCostMultiplier(request.ChannelId, request.Model, request.Multiplier); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, nil)
 }
 
 // SaveChannelModelCapability 保存一条渠道能力收窄。

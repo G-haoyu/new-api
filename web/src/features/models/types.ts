@@ -86,6 +86,8 @@ export interface CapabilityTargetChannel {
   name: string
   type: number
   configured: boolean
+  /** 渠道对该模型的费用倍率；0 表示未配置（按 1 处理）。 */
+  cost_multiplier: number
 }
 
 export interface CapabilityTarget {
@@ -96,6 +98,8 @@ export interface CapabilityTarget {
   /** 声明行的匹配规则：0 精确、1 前缀、2 包含、3 后缀。 */
   name_rule: number
   capabilities?: string
+  /** 没有模型级声明命中时只能配置渠道倍率，不能收窄能力。 */
+  declared: boolean
   channels: CapabilityTargetChannel[]
 }
 
@@ -113,6 +117,7 @@ export interface ChannelModelCapabilityDetail {
   capabilities: string
   model_capabilities: string
   effective: string
+  cost_multiplier: number
 }
 
 /**

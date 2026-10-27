@@ -41,6 +41,7 @@ func TestCapabilityTargetsExpandPrefixDeclarations(t *testing.T) {
 	targets, _, err := GetCapabilityTargets(CapabilityTargetQuery{})
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
+	assert.True(t, targets[0].Declared)
 	assert.Equal(t, "deepseek-v4-pro", targets[0].ModelName)
 	assert.Equal(t, "deepseek-v4-pro", targets[0].DeclarationName)
 	assert.Equal(t, NameRulePrefix, targets[0].NameRule)
@@ -231,4 +232,53 @@ func TestValidateModelCapabilityNarrowingsRejectsStaleChannel(t *testing.T) {
 
 	// 仍覆盖存量收窄时保存通过。
 	require.NoError(t, ValidateModelCapabilityNarrowings(declaration))
+}
+
+func TestCapabilityTargetsListUndeclaredChannelModelsForCostMultiplier(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	require.NoError(t, db.Create(&Channel{Id: 9, Name: "raw", Group: "default", Models: "plain-model", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&Ability{Group: "default", Model: "plain-model", ChannelId: 9, Enabled: true}).Error)
+	require.NoError(t, InitCapabilityCache())
+
+	targets, _, err := GetCapabilityTargets(CapabilityTargetQuery{})
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	assert.False(t, targets[0].Declared)
+	assert.Empty(t, targets[0].DeclarationName)
+	require.Len(t, targets[0].Channels, 1)
+	assert.Equal(t, 0.0, targets[0].Channels[0].CostMultiplier)
+}
+
+func TestChannelCostMultiplierFollowsModelMapping(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	mapping := `{"public-model":"upstream-model"}`
+	require.NoError(t, db.Create(&Channel{
+		Id: 5, Name: "mapped", Group: "default", Models: "public-model",
+		ModelMapping: &mapping, Status: common.ChannelStatusEnabled,
+	}).Error)
+	require.NoError(t, db.Create(&Ability{Group: "default", Model: "public-model", ChannelId: 5, Enabled: true}).Error)
+	require.NoError(t, InitCapabilityCache())
+
+	assert.Equal(t, 0.0, ChannelCostMultiplier("", mapping, "public-model"))
+
+	require.NoError(t, SetChannelModelCostMultiplier(5, "public-model", 1.25))
+	var channel Channel
+	require.NoError(t, db.First(&channel, "id = ?", 5).Error)
+	assert.Equal(t, map[string]float64{"upstream-model": 1.25}, channel.GetSetting().CostMultiplierMap)
+	assert.Equal(t, 1.25, ChannelCostMultiplier(*channel.Setting, mapping, "public-model"))
+
+	targets, _, err := GetCapabilityTargets(CapabilityTargetQuery{})
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Len(t, targets[0].Channels, 1)
+	assert.Equal(t, 1.25, targets[0].Channels[0].CostMultiplier)
+
+	// 0 表示清除倍率，回到按 1 处理。
+	require.NoError(t, SetChannelModelCostMultiplier(5, "public-model", 0))
+	require.NoError(t, db.First(&channel, "id = ?", 5).Error)
+	assert.Empty(t, channel.GetSetting().CostMultiplierMap)
+
+	err = SetChannelModelCostMultiplier(5, "other-model", 2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not serve model")
 }

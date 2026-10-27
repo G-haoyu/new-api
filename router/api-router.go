@@ -435,6 +435,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			channelModelCapabilityRoute.GET("/", controller.GetChannelModelCapability)
 			channelModelCapabilityRoute.PUT("/", controller.SaveChannelModelCapability)
+			channelModelCapabilityRoute.PUT("/cost-multiplier", controller.SaveChannelModelCostMultiplier)
 			channelModelCapabilityRoute.DELETE("/", controller.DeleteChannelModelCapability)
 		}
 

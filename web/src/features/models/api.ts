@@ -267,6 +267,22 @@ export async function saveChannelModelCapability(data: {
   return res.data
 }
 
+export async function saveChannelModelCostMultiplier(data: {
+  channel_id: number
+  model: string
+  multiplier: number
+}): Promise<{ success: boolean; message?: string }> {
+  const res = await api.put(
+    '/api/channel-model-capabilities/cost-multiplier',
+    data,
+    {
+      skipBusinessError: true,
+      skipErrorHandler: true,
+    }
+  )
+  return res.data
+}
+
 export async function deleteChannelModelCapability(params: {
   channel_id: number
   model: string
