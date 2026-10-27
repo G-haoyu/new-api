@@ -358,7 +358,9 @@ func migrateDB() error {
 		&Redemption{},
 		&Ability{},
 		&ChannelModelStatus{},
+		&ChannelModelCapability{},
 		&ChannelModelEvent{},
+		&CapabilityGateEvent{},
 		&Log{},
 		&Midjourney{},
 		&TopUp{},
@@ -376,8 +378,6 @@ func migrateDB() error {
 		&UserSubscription{},
 		&SubscriptionPreConsumeRecord{},
 		&CustomOAuthProvider{},
-		&Provider{},
-		&ModelProviderPrice{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
 		&SystemInstance{},
@@ -389,9 +389,6 @@ func migrateDB() error {
 		&UserAccessToken{},
 	)
 	if err != nil {
-		return err
-	}
-	if err := SeedProvidersFromChannels(); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
@@ -433,7 +430,9 @@ func migrateDBFast() error {
 		{&Redemption{}, "Redemption"},
 		{&Ability{}, "Ability"},
 		{&ChannelModelStatus{}, "ChannelModelStatus"},
+		{&ChannelModelCapability{}, "ChannelModelCapability"},
 		{&ChannelModelEvent{}, "ChannelModelEvent"},
+		{&CapabilityGateEvent{}, "CapabilityGateEvent"},
 		{&Log{}, "Log"},
 		{&Midjourney{}, "Midjourney"},
 		{&TopUp{}, "TopUp"},
@@ -450,8 +449,6 @@ func migrateDBFast() error {
 		{&UserSubscription{}, "UserSubscription"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
-		{&Provider{}, "Provider"},
-		{&ModelProviderPrice{}, "ModelProviderPrice"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
 		{&PerfMetric{}, "PerfMetric"},
 		{&SystemInstance{}, "SystemInstance"},
@@ -481,9 +478,6 @@ func migrateDBFast() error {
 		if err != nil {
 			return err
 		}
-	}
-	if err := SeedProvidersFromChannels(); err != nil {
-		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err
@@ -520,9 +514,6 @@ func migrateClickHouseLogDB() error {
 		return err
 	}
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS fast_mode UInt8 DEFAULT 0").Error; err != nil {
-		return err
-	}
-	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS provider_slug String DEFAULT ''").Error; err != nil {
 		return err
 	}
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS iself_email String DEFAULT ''").Error; err != nil {
@@ -578,7 +569,6 @@ CREATE TABLE IF NOT EXISTS logs (
 	is_stream UInt8 DEFAULT 0,
 	fast_mode UInt8 DEFAULT 0,
 	channel_id Int32 DEFAULT 0,
-	provider_slug String DEFAULT '',
 	token_id Int32 DEFAULT 0,
 	`+"`group`"+` String DEFAULT '',
 	ip String DEFAULT '',

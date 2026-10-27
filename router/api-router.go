@@ -42,7 +42,6 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			modelSquareRoute.GET("", controller.GetModelSquare)
 			modelSquareRoute.GET("/:id", controller.GetModelSquareDetail)
-			modelSquareRoute.GET("/:id/providers/:provider", controller.GetModelSquareProviderDetail)
 		}
 		perfMetricsRoute := apiRouter.Group("/perf-metrics")
 		perfMetricsRoute.Use(middleware.HeaderNavModulePublicOrUserAuth("pricing"))
@@ -107,7 +106,6 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.GET("/self/groups", controller.GetUserGroups)
 				selfRoute.GET("/self", controller.GetSelf)
 				selfRoute.GET("/models", controller.GetUserModels)
-				selfRoute.GET("/providers", controller.GetUserModelProviders)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.UpdateSelf)
 				selfRoute.DELETE("/self", middleware.DisableCache(), controller.DeleteSelf)
 				accessTokenRoute := selfRoute.Group("/access_tokens")
@@ -416,26 +414,6 @@ func SetApiRouter(router *gin.Engine) {
 			vendorRoute.DELETE("/:id", controller.DeleteVendorMeta)
 		}
 
-		providerRoute := apiRouter.Group("/providers")
-		providerRoute.Use(middleware.AdminAuth())
-		{
-			providerRoute.GET("/", controller.ListProvider)
-			providerRoute.GET("/:id", controller.GetProvider)
-			providerRoute.POST("/", controller.CreateProvider)
-			providerRoute.PUT("/", controller.UpdateProvider)
-			providerRoute.DELETE("/:id", controller.DeleteProvider)
-		}
-
-		modelProviderPriceRoute := apiRouter.Group("/model-provider-prices")
-		modelProviderPriceRoute.Use(middleware.AdminAuth())
-		{
-			modelProviderPriceRoute.GET("/providers/:provider_slug/models", controller.ListProviderModels)
-			modelProviderPriceRoute.GET("/", controller.ListModelProviderPrice)
-			modelProviderPriceRoute.POST("/", controller.CreateModelProviderPrice)
-			modelProviderPriceRoute.PUT("/", controller.UpdateModelProviderPrice)
-			modelProviderPriceRoute.DELETE("/:id", controller.DeleteModelProviderPrice)
-		}
-
 		modelsRoute := apiRouter.Group("/models")
 		modelsRoute.Use(middleware.AdminAuth())
 		{
@@ -445,10 +423,26 @@ func SetApiRouter(router *gin.Engine) {
 			modelsRoute.GET("/missing", controller.GetMissingModels)
 			modelsRoute.GET("/", controller.GetAllModelsMeta)
 			modelsRoute.GET("/search", controller.SearchModelsMeta)
+			modelsRoute.GET("/capability-targets", controller.GetModelCapabilityTargets)
 			modelsRoute.GET("/:id", controller.GetModelMeta)
 			modelsRoute.POST("/", controller.CreateModelMeta)
 			modelsRoute.PUT("/", controller.UpdateModelMeta)
 			modelsRoute.DELETE("/:id", controller.DeleteModelMeta)
+		}
+
+		channelModelCapabilityRoute := apiRouter.Group("/channel-model-capabilities")
+		channelModelCapabilityRoute.Use(middleware.AdminAuth())
+		{
+			channelModelCapabilityRoute.GET("/", controller.GetChannelModelCapability)
+			channelModelCapabilityRoute.PUT("/", controller.SaveChannelModelCapability)
+			channelModelCapabilityRoute.PUT("/cost-multiplier", controller.SaveChannelModelCostMultiplier)
+			channelModelCapabilityRoute.DELETE("/", controller.DeleteChannelModelCapability)
+		}
+
+		capabilityGateRoute := apiRouter.Group("/capability-gate")
+		capabilityGateRoute.Use(middleware.AdminAuth())
+		{
+			capabilityGateRoute.GET("/events", controller.GetCapabilityGateEvents)
 		}
 
 		// Deployments (model deployment management)

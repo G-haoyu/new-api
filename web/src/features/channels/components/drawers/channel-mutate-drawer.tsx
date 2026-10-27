@@ -210,7 +210,6 @@ import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
-import { CostMultiplierEditor } from '../cost-multiplier-editor'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
 import { ConfigureModelsDialog } from '../dialogs/configure-models-dialog'
 import {
@@ -1003,18 +1002,6 @@ export function ChannelMutateDrawer({
     modelMappingGuardrail.entries,
     t,
   ])
-
-  // Cost multiplier keys must be names this channel actually serves upstream:
-  // model mapping targets, or channel models that no mapping entry redirects
-  // away. Mirrors the backend ValidateSettings cross-check.
-  const costMultiplierModelOptions = useMemo(() => {
-    const allowed = new Set(currentModelsArray)
-    for (const entry of modelMappingGuardrail.entries) {
-      allowed.delete(entry.source)
-      allowed.add(entry.target)
-    }
-    return [...allowed]
-  }, [currentModelsArray, modelMappingGuardrail])
 
   const upstreamUpdateMeta = useMemo(() => {
     const settings = parseSettingsRecord(currentSettings)
@@ -2667,25 +2654,6 @@ export function ChannelMutateDrawer({
   const basicSection = (
     <div className='scroll-mt-4'>
       <ChannelBasicSection>
-        <FormField
-          control={form.control}
-          name='provider_slug'
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('Provider slug')}</FormLabel>
-              <FormControl>
-                <Input placeholder='siliconflow' {...field} />
-              </FormControl>
-              <FormDescription>
-                {t(
-                  'Stable identifier used when users select a provider for routing.'
-                )}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
         <div className='grid gap-4'>
           <FormField
             control={form.control}
@@ -4832,34 +4800,6 @@ export function ChannelMutateDrawer({
           <>
             {redirectPanelActive ? redirectPanelNotice : modelMappingFields}
             {routingFields}
-            <fieldset
-              disabled={sensitiveLocked}
-              className='disabled:opacity-60'
-            >
-              <FormField
-                control={form.control}
-                name='cost_multiplier'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Model Cost Multiplier')}</FormLabel>
-                    <FormControl>
-                      <CostMultiplierEditor
-                        value={field.value || ''}
-                        onChange={field.onChange}
-                        disabled={isSubmitting}
-                        modelOptions={costMultiplierModelOptions}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'One "model:multiplier" pair per line, keyed by the upstream model name after model mapping. Attribute only: it never affects billing, it scales the recorded cost in relay attempt logs.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </fieldset>
           </>
         }
         request={

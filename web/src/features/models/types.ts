@@ -26,6 +26,7 @@ import { z } from 'zod'
  * Bound channel information
  */
 export interface BoundChannel {
+  id: number
   name: string
   type: number
 }
@@ -46,6 +47,7 @@ export interface Model {
   tags?: string
   vendor_id?: number
   endpoints?: string
+  capabilities?: string
   context_length?: number
   parameter_count?: string
   release_date?: string
@@ -78,70 +80,44 @@ export interface Vendor {
   updated_time: number
 }
 
-/** Provider registry metadata used by the model square. */
-export interface Provider {
+/** 能力设置页的模型 → 渠道清单。 */
+export interface CapabilityTargetChannel {
   id: number
-  slug: string
-  display_name: string
-  icon?: string
-  website_url?: string
-  status_page_url?: string
-  headquarters?: string
-  byok_supported: boolean
-  prompt_training_policy?: string
-  retention_policy?: string
-  moderation_policy?: string
-  metadata_source_url?: string
-  metadata_verified_at?: number
-  status: number
-  created_time: number
-  updated_time: number
-}
-
-export interface GetProvidersResponse {
-  success: boolean
-  message?: string
-  data?: {
-    items: Provider[]
-    total: number
-    page: number
-    page_size: number
-  }
-}
-
-export interface ModelProviderPrice {
-  id: number
-  model_id: number
-  provider_slug: string
-  input_price: number
-  output_price: number
-  cache_read_price?: number | null
-  cache_write_price?: number | null
-  source_url?: string
-  effective_at?: number
-  created_time: number
-  updated_time: number
-  model_name?: string
-  context_length?: number
-  max_output_tokens?: number
-  region?: string
-  precision?: string
-  quantization?: string
-  supported_parameters?: string
-  stream_cancellation?: boolean | null
-  free?: boolean | null
-  batch?: boolean | null
-}
-
-export interface ProviderModelRelation {
-  model_id: number
-  model_name: string
-  model_icon?: string
-  vendor_name?: string
-  vendor_icon?: string
+  name: string
+  type: number
   configured: boolean
-  available: boolean
-  price?: ModelProviderPrice
+  /** 渠道对该模型的费用倍率；0 表示未配置（按 1 处理）。 */
+  cost_multiplier: number
+}
+
+export interface CapabilityTarget {
+  id: number
+  model_name: string
+  /** 命中的模型级声明行名称；精确模型时与 model_name 相同。 */
+  declaration_name: string
+  /** 声明行的匹配规则：0 精确、1 前缀、2 包含、3 后缀。 */
+  name_rule: number
+  capabilities?: string
+  /** 没有模型级声明命中时只能配置渠道倍率，不能收窄能力。 */
+  declared: boolean
+  channels: CapabilityTargetChannel[]
+}
+
+export interface CapabilityTargetsPage {
+  items: CapabilityTarget[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ChannelModelCapabilityDetail {
+  channel_id: number
+  model: string
+  configured: boolean
+  capabilities: string
+  model_capabilities: string
+  effective: string
+  cost_multiplier: number
 }
 
 /**
@@ -422,7 +398,7 @@ export type ModelTabCategory =
   | 'metadata'
   | 'vendors'
   | 'deployments'
-  | 'providers'
+  | 'capabilities'
 
 /**
  * Deployment entity from API

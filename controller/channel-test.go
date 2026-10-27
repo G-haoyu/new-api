@@ -952,6 +952,10 @@ func runChannelModelRecoveryTask(ctx context.Context, report func(processed, tot
 	if _, err := model.CleanupChannelModelEvents(common.GetTimestamp() - int64(retentionDays)*86400); err != nil {
 		common.SysError("failed to clean up channel model events: " + err.Error())
 	}
+	gateRetentionDays := operation_setting.GetCapabilityGateSetting().EventRetentionDays
+	if _, err := model.CleanupCapabilityGateEvents(common.GetTimestamp() - int64(gateRetentionDays)*86400); err != nil {
+		common.SysError("failed to clean up capability gate events: " + err.Error())
+	}
 	if len(statuses) == 0 {
 		return channelModelRecoverySummary{}, nil
 	}
