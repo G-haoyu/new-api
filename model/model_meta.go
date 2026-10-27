@@ -90,6 +90,10 @@ func resolveModelMetadata(records []Model, names []string) map[string]*Model {
 	}
 	for _, rule := range []int{NameRulePrefix, NameRuleSuffix, NameRuleContains} {
 		matchedLength := make(map[string]int, len(names))
+		// 本轮规则的最长匹配先记在 best 里，等整轮扫描完再合并。
+		// 直接写 resolved 会让先遍历到的短前缀占位，后续更长的前缀被
+		// "已被解析" 的判断挡掉，导致 claude-opus-5-5 落到 claude-opus-5 上。
+		best := make(map[string]*Model, len(names))
 		for i := range records {
 			metadata := &records[i]
 			if metadata.NameRule != rule {
@@ -106,11 +110,26 @@ func resolveModelMetadata(records []Model, names []string) map[string]*Model {
 					continue
 				}
 				matchedLength[name] = len(metadata.ModelName)
-				resolved[name] = metadata
+				best[name] = metadata
 			}
+		}
+		for name, metadata := range best {
+			resolved[name] = metadata
 		}
 	}
 	return resolved
+}
+
+// ResolveModelMetadataByName maps concrete model names to the declaration row
+// that governs them (exact → prefix → suffix → contains, longest key first).
+// Callers that start from live routes, such as the public model square, can use
+// it to pick up metadata declared by a rule row instead of requiring an exact row.
+func ResolveModelMetadataByName(names []string) (map[string]*Model, error) {
+	var records []Model
+	if err := DB.Find(&records).Error; err != nil {
+		return nil, err
+	}
+	return resolveModelMetadata(records, names), nil
 }
 
 // FillModelSquareStates applies the same metadata policy as the public catalog
