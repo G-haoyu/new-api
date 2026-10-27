@@ -341,7 +341,9 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 			return nil, ErrVerificationForbidden
 		}
 		if len(methods) == 0 {
-			if state.HasPassword {
+			if state.HoidcId != "" {
+				methods = []string{VerificationMethodOAuth}
+			} else if state.HasPassword {
 				methods = []string{VerificationMethodPassword}
 			} else {
 				methods = []string{VerificationMethodOAuth}

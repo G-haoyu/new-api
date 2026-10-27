@@ -423,6 +423,7 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
+		OutcomeTracked:   true,
 		ModelName:        logModel,
 		TokenName:        tokenName,
 		Quota:            quota,

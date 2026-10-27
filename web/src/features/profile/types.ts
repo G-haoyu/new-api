@@ -43,6 +43,13 @@ export interface UserProfile {
   username: string
   /** Display name */
   display_name: string
+  /** Avatar URL */
+  avatar?: string
+  /** Organization fields from SSO */
+  secondaryOrganization?: string
+  tertiaryOrganization?: string
+  team?: string
+  orgStr?: string
   /** User role (1=普通用户, 10=管理员, 100=超级管理员) */
   role: number
   /** Email address */
@@ -85,6 +92,8 @@ export interface UserProfile {
   telegram_id?: string
   /** LinuxDO ID (OAuth) */
   linux_do_id?: string
+  /** HOIDC SSO ID */
+  hoidc_id?: string
 }
 
 /**

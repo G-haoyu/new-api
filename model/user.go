@@ -83,6 +83,11 @@ type User struct {
 	HasPassword          bool                       `json:"-" gorm:"-:all"`
 	OriginalPassword     string                     `json:"original_password" gorm:"-:all"` // this field is only for Password change verification, don't save it to database!
 	DisplayName          string                     `json:"display_name" gorm:"index" validate:"max=20"`
+	Avatar               string                     `json:"avatar" gorm:"column:avatar;type:varchar(512);default:''"`
+	SecondaryOrganization string                    `json:"secondaryOrganization" gorm:"column:secondary_organization;type:varchar(128);default:''"`
+	TertiaryOrganization  string                    `json:"tertiaryOrganization" gorm:"column:tertiary_organization;type:varchar(128);default:''"`
+	Team                  string                    `json:"team" gorm:"column:team;type:varchar(128);default:''"`
+	OrgStr                string                    `json:"orgStr" gorm:"column:org_str;type:varchar(512);default:''"`
 	Role                 int                        `json:"role" gorm:"type:int;default:1"`   // admin, common
 	Status               int                        `json:"status" gorm:"type:int;default:1"` // enabled, disabled
 	Email                string                     `json:"email" gorm:"index" validate:"max=50"`
@@ -91,6 +96,7 @@ type User struct {
 	OidcId               string                     `json:"oidc_id" gorm:"column:oidc_id;index"`
 	WeChatId             string                     `json:"wechat_id" gorm:"column:wechat_id;index"`
 	TelegramId           string                     `json:"telegram_id" gorm:"column:telegram_id;index"`
+	HoidcId              string                     `json:"hoidc_id" gorm:"column:hoidc_id;index"`
 	VerificationCode     string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
 	AccessToken          *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
 	AccessTokenCreatedAt *int64                     `json:"-" gorm:"type:bigint;column:access_token_created_at"`    // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
@@ -109,6 +115,7 @@ type User struct {
 	Remark               string                     `json:"remark,omitempty" gorm:"type:varchar(255)" validate:"max=255"`
 	StripeCustomer       string                     `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
 	CreatedAt            int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
+	UpdatedAt            int64                      `json:"updated_at" gorm:"autoUpdateTime;column:updated_at"`
 	LastLoginAt          int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
 	AuthVersion          int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
@@ -529,8 +536,10 @@ func GetSelfUserById(id int) (*User, error) {
 		HasPassword bool `gorm:"column:has_password"`
 	}
 	err := DB.Model(&User{}).Select([]string{
-		"id", "username", "display_name", "role", "status", "email",
-		"github_id", "discord_id", "oidc_id", "wechat_id", "telegram_id",
+		"id", "username", "display_name", "avatar",
+		"secondary_organization", "tertiary_organization", "team", "org_str",
+		"role", "status", "email",
+		"github_id", "discord_id", "oidc_id", "wechat_id", "telegram_id", "hoidc_id",
 		"group", "quota", "used_quota", "request_count", "aff_code", "aff_count",
 		"aff_quota", "aff_history", "inviter_id", "linux_do_id", "setting",
 		"stripe_customer", "auth_version",
@@ -547,6 +556,27 @@ func GetUserIdByAffCode(affCode string) (int, error) {
 	var user User
 	err := DB.Select("id").First(&user, "aff_code = ?", affCode).Error
 	return user.Id, err
+}
+
+// DisableStaleSsoUsers disables SSO users whose updated_at is older than
+// cutoffTimestamp, indicating they were not seen in recent syncs.
+func DisableStaleSsoUsers(cutoffTimestamp int64) (int64, error) {
+	result := DB.Model(&User{}).
+		Where("hoidc_id != '' AND status = ? AND updated_at > 0 AND updated_at < ?",
+			common.UserStatusEnabled, cutoffTimestamp).
+		Update("status", common.UserStatusResigned)
+	return result.RowsAffected, result.Error
+}
+
+// BackfillHoidcId marks legacy SSO users (empty password + non-empty org_str)
+// with a placeholder hoidc_id so the new identity check picks them up.
+func BackfillHoidcId() {
+	result := DB.Model(&User{}).
+		Where("hoidc_id = '' AND password = '' AND org_str != ''").
+		Update("hoidc_id", "0")
+	if result.RowsAffected > 0 {
+		common.SysLog(fmt.Sprintf("backfilled hoidc_id for %d legacy SSO users", result.RowsAffected))
+	}
 }
 
 // DeleteUserById soft-deletes a user and returns how many scoped access tokens

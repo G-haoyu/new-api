@@ -216,6 +216,20 @@ export function useUsersColumns(): ColumnDef<User>[] {
         meta: { mobileOrder: 30 },
       },
       {
+        accessorKey: 'orgStr',
+        header: t('Organization'),
+        cell: ({ row }) => {
+          const orgStr = row.original.orgStr
+          if (!orgStr) {
+            return <span className='text-muted-foreground text-sm'>—</span>
+          }
+          return (
+            <LongText className='max-w-[180px] text-sm'>{orgStr}</LongText>
+          )
+        },
+        size: 180,
+      },
+      {
         accessorKey: 'role',
         header: t('Role'),
         cell: ({ row }) => {

@@ -55,6 +55,7 @@ const providerDictionary: Record<string, ProviderMeta> = {
       <IconWeChat className={props.className} focusable='false' />
     ),
   },
+  sso: { label: 'SSO', Icon: Shield },
 }
 
 export function OAuthCallbackScreen({

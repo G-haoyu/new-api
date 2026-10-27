@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { DashboardChartPreferences, DashboardFilters } from './types'
+import type {
+  DashboardChartPreferences,
+  DashboardFilters,
+  ModelAvailabilityMinutes,
+  ModelAvailabilityStatus,
+  ModelAvailabilityStatusId,
+} from './types'
 
 export const TIME_GRANULARITY_STORAGE_KEY = 'data_export_default_time'
 export const DASHBOARD_CHART_PREFERENCES_STORAGE_KEY =
@@ -49,6 +55,32 @@ export const TIME_RANGE_PRESETS = [
   { label: '14 Days', days: 14 },
   { label: '29 Days', days: 29 },
 ] as const
+
+export const ADMIN_TIME_RANGE_PRESETS = [
+  ...TIME_RANGE_PRESETS,
+  { label: '60 Days', days: 60 },
+  { label: '90 Days', days: 90 },
+] as const
+
+export const ADMIN_MAX_RANGE_DAYS = 92
+export const SELF_MAX_RANGE_DAYS = 30
+
+export const MODEL_AVAILABILITY_WINDOW_MINUTES = [
+  10, 30, 60,
+] as const satisfies readonly ModelAvailabilityMinutes[]
+
+export const AVAILABILITY_MIN_SAMPLES = 10
+
+export const MODEL_AVAILABILITY_STATUSES = {
+  insufficient_samples: {
+    id: 'insufficient_samples',
+    labelKey: 'Insufficient samples',
+  },
+  stable: { id: 'stable', labelKey: 'Stable' },
+  fair: { id: 'fair', labelKey: 'Fair' },
+  degraded: { id: 'degraded', labelKey: 'Degraded' },
+  unstable: { id: 'unstable', labelKey: 'Unstable' },
+} as const satisfies Record<ModelAvailabilityStatusId, ModelAvailabilityStatus>
 
 export const CONSUMPTION_DISTRIBUTION_CHART_OPTIONS = [
   { value: 'bar', labelKey: 'Bar Chart' },

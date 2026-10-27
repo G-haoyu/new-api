@@ -141,6 +141,18 @@ func InitEnv() {
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
 	SearchRateLimitDuration = int64(GetEnvOrDefault("SEARCH_RATE_LIMIT_DURATION", 60))
+
+	HoidcEnabled = GetEnvOrDefaultBool("HOIDC_ENABLED", false)
+	HoidcLoginPage = GetEnvOrDefaultString("HOIDC_LOGIN_PAGE", "")
+	HoidcSsoApi = GetEnvOrDefaultString("HOIDC_SSO_API", "")
+	HoidcPlatformId = GetEnvOrDefaultString("HOIDC_PLATFORM_ID", "")
+	HoidcAllowSignup = GetEnvOrDefaultBool("HOIDC_ALLOW_SIGNUP", false)
+	HoidcEnforceSso = GetEnvOrDefaultBool("HOIDC_ENFORCE_SSO", false)
+	SsoSyncEnabled = GetEnvOrDefaultBool("SSO_SYNC_ENABLED", false)
+	SsoUserListApiUrl = GetEnvOrDefaultString("SSO_USER_LIST_API_URL", "")
+	SsoUserListPlatformId = GetEnvOrDefaultString("SSO_USER_LIST_PLATFORM_ID", "")
+	SsoUserListSecret = GetEnvOrDefaultString("SSO_USER_LIST_SECRET", "")
+
 	initConstantEnv()
 }
 

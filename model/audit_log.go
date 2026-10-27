@@ -139,11 +139,9 @@ func RecordAuditLog(c *gin.Context, entry AuditLog) {
 func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*AuditLog, int64, error) {
 	query := LOG_DB.Model(&AuditLog{})
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		// Decode native JSON through database/sql as text for AuditOther.Scan.
-		// Preserve numeric metadata instead of returning quoted Int64 values.
-		query = query.WithContext(clickhouse.Context(query.Statement.Context, clickhouse.WithSettings(clickhouse.Settings{
-			"output_format_native_write_json_as_string": 1,
-			"output_format_json_quote_64bit_integers":   0,
+		// Read both String columns and existing native JSON as text for Scan.
+		query = query.Select("* EXCEPT(other), CAST(other AS String) AS other").WithContext(clickhouse.Context(query.Statement.Context, clickhouse.WithSettings(clickhouse.Settings{
+			"output_format_json_quote_64bit_integers": 0,
 		})))
 	}
 	if viewerRole < common.RoleRootUser {
@@ -256,7 +254,7 @@ func MigrateAuditLogs() error {
 		id Int64 DEFAULT 0, event_id String, user_id Int64, username String, actor_role Int32,
 		created_at Int64, category String, action String, token_ref String,
 		auth_method String, ip String, user_agent String, method String, route String,
-		status Int32, success UInt8, request_id String, content String, other JSON
+		status Int32, success UInt8, request_id String, content String, other String
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(toDateTime(created_at))
 	ORDER BY (created_at, event_id)`).Error

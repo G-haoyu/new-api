@@ -400,6 +400,7 @@ func migrateDB() error {
 	if err := InitializeExternalIdentityClaims(); err != nil {
 		return err
 	}
+	BackfillHoidcId()
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		if err := ensureSubscriptionPlanTableSQLite(); err != nil {
 			return err

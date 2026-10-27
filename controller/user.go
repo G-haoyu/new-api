@@ -56,6 +56,10 @@ func Login(c *gin.Context) {
 		common.ApiErrorT(c, "Password login has been disabled by administrator")
 		return
 	}
+	if common.HoidcEnforceSso {
+		common.ApiErrorT(c, "SSO login is enforced, password login is disabled")
+		return
+	}
 	var loginRequest LoginRequest
 	err := common.DecodeJson(c.Request.Body, &loginRequest)
 	if err != nil {
@@ -500,6 +504,7 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"id":                user.Id,
 		"username":          user.Username,
 		"display_name":      user.DisplayName,
+		"avatar":            user.Avatar,
 		"has_password":      user.HasPassword,
 		"role":              user.Role,
 		"status":            user.Status,
@@ -519,10 +524,15 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"aff_history_quota": user.AffHistoryQuota,
 		"inviter_id":        user.InviterId,
 		"linux_do_id":       user.LinuxDOId,
+		"hoidc_id":          user.HoidcId,
 		"setting":           user.Setting,
 		"stripe_customer":   user.StripeCustomer,
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
 		"permissions":       permissions,
+		"secondaryOrganization": user.SecondaryOrganization,
+		"tertiaryOrganization":  user.TertiaryOrganization,
+		"team":                  user.Team,
+		"orgStr":                user.OrgStr,
 	}
 }
 
@@ -795,6 +805,26 @@ func UpdateSelf(c *gin.Context) {
 		password, isString := value.(string)
 		passwordRequested = !isString || password != ""
 	}
+
+	currentUser, err := model.GetUserById(c.GetInt("id"), true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	isSsoUser := currentUser.HoidcId != ""
+	if isSsoUser {
+		if passwordRequested {
+			common.ApiErrorT(c, "SSO users cannot change password")
+			return
+		}
+		if newUsername, ok := requestData["username"]; ok {
+			if usernameStr, isStr := newUsername.(string); isStr && usernameStr != currentUser.Username {
+				common.ApiErrorT(c, "SSO users cannot change username")
+				return
+			}
+		}
+	}
+
 	succeeded, notificationFailed := false, false
 	if passwordRequested {
 		defer func() {
