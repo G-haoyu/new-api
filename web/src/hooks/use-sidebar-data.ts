@@ -37,6 +37,7 @@ import {
   ClipboardList,
   Settings,
   ShieldCheck,
+  ChartNoAxesCombined,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -154,6 +155,11 @@ export function useSidebarData(): SidebarData {
             title: t('Channels'),
             url: '/channels',
             icon: RadioTower,
+          },
+          {
+            title: t('Resource Pools'),
+            url: '/resource-pools',
+            icon: ChartNoAxesCombined,
           },
           {
             title: t('Models'),
