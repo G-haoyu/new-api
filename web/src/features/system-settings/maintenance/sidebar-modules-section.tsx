@@ -146,6 +146,12 @@ export function SidebarModulesSection({
         title: t('Channels'),
         description: t('Configure upstream providers and routing.'),
       },
+      resource_pool: {
+        title: t('Resource Pools'),
+        description: t(
+          'Monitor upstream account water levels by provider.'
+        ),
+      },
       models: {
         title: t('Models'),
         description: t('Manage catalog visibility and pricing.'),
