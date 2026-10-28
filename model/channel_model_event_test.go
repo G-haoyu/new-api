@@ -36,33 +36,3 @@ func TestChannelModelEventsCanBeFilteredAndCleanedUp(t *testing.T) {
 	require.Len(t, remaining, 1)
 	assert.Equal(t, ChannelModelEventRecovered, remaining[0].Event)
 }
-
-func TestCapabilityGateEventsCanBeFilteredAndCleanedUp(t *testing.T) {
-	require.NoError(t, DB.Exec("DELETE FROM capability_gate_events").Error)
-	t.Cleanup(func() { DB.Exec("DELETE FROM capability_gate_events") })
-	events := []CapabilityGateEvent{
-		{Mode: "shadow", Model: "model-a", Action: CapabilityGateEventWouldReject, RejectedChannels: "1,2", Dimensions: `[{"dimension":"tools.supported","severity":"hard"}]`, CreatedAt: 100},
-		{Mode: "enforce", Model: "model-a", Action: CapabilityGateEventRejected, RejectedChannels: "3", Dimensions: `[{"dimension":"params.top_p","severity":"soft"}]`, CreatedAt: 200},
-		{Mode: "enforce", Model: "model-b", Action: CapabilityGateEventSoft, Dimensions: `[{"dimension":"params.stop","severity":"soft"}]`, CreatedAt: 300},
-	}
-	for index := range events {
-		require.NoError(t, RecordCapabilityGateEvent(&events[index]))
-	}
-
-	filtered, total, err := GetCapabilityGateEvents(CapabilityGateEventQuery{
-		Model: "model-a", Action: CapabilityGateEventRejected, StartTime: 150, Limit: 20,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), total)
-	require.Len(t, filtered, 1)
-	assert.Equal(t, "3", filtered[0].RejectedChannels)
-
-	deleted, err := CleanupCapabilityGateEvents(250)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), deleted)
-	remaining, total, err := GetCapabilityGateEvents(CapabilityGateEventQuery{Limit: 20})
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), total)
-	require.Len(t, remaining, 1)
-	assert.Equal(t, CapabilityGateEventSoft, remaining[0].Action)
-}

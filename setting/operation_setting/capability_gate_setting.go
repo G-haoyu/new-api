@@ -16,7 +16,8 @@ type CapabilityGateSetting struct {
 	// RecordOnlyDimensions 是"只记录不拦截"的维度：可以写维度组（params）
 	// 或单个维度（tools.parallel），命中规则同 name_rule 的前缀语义。
 	RecordOnlyDimensions string `json:"record_only_dimensions"`
-	// RecordPassed 控制是否也记录通过的判定；关闭后只留违规留痕。
+	// RecordPassed 控制是否也记录通过的判定。开启后每个请求都会产生一条事件，
+	// 只适合短期排查；默认关闭，只留违规留痕。
 	RecordPassed bool `json:"record_passed"`
 }
 
@@ -53,7 +54,6 @@ var capabilityGateSetting = CapabilityGateSetting{
 	MaxBodyBytes:         DefaultCapabilityGateMaxBodyBytes,
 	EventRetentionDays:   DefaultCapabilityGateEventRetentionDays,
 	RecordOnlyDimensions: DefaultCapabilityGateRecordOnly,
-	RecordPassed:         true,
 }
 
 func init() {

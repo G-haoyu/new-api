@@ -156,6 +156,10 @@ func main() {
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()
 
+	// Capability gate events are written off the request path in batches; every
+	// node serves requests, so every node runs a writer.
+	service.StartCapabilityGateEventWriter()
+
 	// Wire task polling adaptor factory (breaks service -> relay import cycle).
 	// Must run before the system task runner starts: the async_task_poll handler
 	// calls service.RunTaskPollingOnce, which needs this factory set.
@@ -256,6 +260,8 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	// 在数据库关闭之前把队列里剩余的门控事件写完。
+	service.StopCapabilityGateEventWriter()
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()

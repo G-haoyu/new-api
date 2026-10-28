@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -19,8 +20,19 @@ const (
 	CapabilityGateEventWouldReject = "would_reject"
 )
 
+const (
+	// CapabilityGateEventRejectedChannelsMax 是 rejected_channels 的列宽，跟表结构绑定，
+	// 不能用环境变量调大。超出部分由写入方截断，完整数量见 RejectedCount。
+	CapabilityGateEventRejectedChannelsMax = 255
+
+	// capabilityGateEventInsertChunk 是单条 INSERT 的行数。一次 flush 可以带更多事件，
+	// 这里再切块：12 列 × 200 行 = 2400 个占位符，远低于 SQLite、MySQL、PostgreSQL 的单语句上限。
+	capabilityGateEventInsertChunk = 200
+)
+
 // CapabilityGateEvent 是一次渠道级能力判定留痕。
-// 只在真的有违规（hard 淘汰或 soft 越界）时写入，正常请求不产生行。
+// 它是追加写的遥测数据，落在日志库（LOG_SQL_DSN 为空时与主库同库），
+// 由 service 里的异步 writer 批量写入，不在请求路径上。
 type CapabilityGateEvent struct {
 	Id                int64  `json:"id" gorm:"primaryKey"`
 	Mode              string `json:"mode" gorm:"type:varchar(16);index"`
@@ -30,21 +42,29 @@ type CapabilityGateEvent struct {
 	RejectedChannels  string `json:"rejected_channels" gorm:"type:varchar(255)"`
 	Dimensions        string `json:"dimensions" gorm:"type:text"`
 	CreatedAt         int64  `json:"created_at" gorm:"bigint;index"`
+
+	// RejectedCount 是被淘汰渠道的准确数量；RejectedChannels 过长时会被截断，
+	// 不能再用它推算数量。历史行没有这一列，此时为 0。
+	RejectedCount int `json:"rejected_count"`
+	// RequestId 与 logs、relay_attempts 的 request_id 同源，用来把判定和请求的真实结果对上。
+	RequestId  string `json:"request_id" gorm:"type:varchar(64);index:idx_capability_gate_events_request_id"`
+	UserId     int    `json:"user_id"`
+	TokenId    int    `json:"token_id"`
+	UsingGroup string `json:"using_group" gorm:"type:varchar(64)"`
 }
 
-func RecordCapabilityGateEvent(event *CapabilityGateEvent) error {
-	if event == nil || strings.TrimSpace(event.Model) == "" || strings.TrimSpace(event.Action) == "" {
+// BatchInsertCapabilityGateEvents 向日志库追加一批事件，调用方是异步 writer。
+func BatchInsertCapabilityGateEvents(events []*CapabilityGateEvent) error {
+	if len(events) == 0 {
 		return nil
 	}
-	if event.CreatedAt == 0 {
-		event.CreatedAt = common.GetTimestamp()
-	}
-	return DB.Create(event).Error
+	return LOG_DB.CreateInBatches(events, capabilityGateEventInsertChunk).Error
 }
 
 type CapabilityGateEventQuery struct {
 	Model     string
 	Action    string
+	RequestId string
 	StartTime int64
 	EndTime   int64
 	Offset    int
@@ -52,13 +72,13 @@ type CapabilityGateEventQuery struct {
 }
 
 func GetCapabilityGateEvents(query CapabilityGateEventQuery) ([]CapabilityGateEvent, int64, error) {
-	db := DB.Model(&CapabilityGateEvent{})
-	if modelName := strings.TrimSpace(query.Model); modelName != "" {
-		db = db.Where("model = ?", modelName)
-	}
-	if action := strings.TrimSpace(query.Action); action != "" {
-		db = db.Where("action = ?", action)
-	}
+	db := LOG_DB.Model(&CapabilityGateEvent{})
+	// struct 条件只带非零字段，空的筛选项不会参与查询；列名也由 GORM 按方言加引号。
+	db = db.Where(&CapabilityGateEvent{
+		Model:     strings.TrimSpace(query.Model),
+		Action:    strings.TrimSpace(query.Action),
+		RequestId: strings.TrimSpace(query.RequestId),
+	})
 	if query.StartTime > 0 {
 		db = db.Where("created_at >= ?", query.StartTime)
 	}
@@ -76,15 +96,71 @@ func GetCapabilityGateEvents(query CapabilityGateEventQuery) ([]CapabilityGateEv
 	if limit > 100 {
 		limit = 100
 	}
+	offset := max(query.Offset, 0)
+	clickHouse := common.UsingLogDatabase(common.DatabaseTypeClickHouse)
+	order := "id DESC"
+	if clickHouse {
+		order = clickHouseLogOrder("")
+	}
 	var events []CapabilityGateEvent
-	err := db.Order("id DESC").Offset(max(query.Offset, 0)).Limit(limit).Find(&events).Error
-	return events, total, err
+	if err := db.Order(order).Offset(offset).Limit(limit).Find(&events).Error; err != nil {
+		return nil, 0, err
+	}
+	if clickHouse {
+		// ClickHouse 没有自增主键，id 恒为 0；给前端分配页内唯一的展示 id。
+		for i := range events {
+			events[i].Id = int64(offset + i + 1)
+		}
+	}
+	return events, total, nil
 }
 
-func CleanupCapabilityGateEvents(before int64) (int64, error) {
-	if before <= 0 {
+// CleanupCapabilityGateEvents 分块删除 before 之前的事件，避免一条大 DELETE 长时间持锁。
+// 每块的行数由 CAPABILITY_GATE_EVENT_CLEANUP_CHUNK 调整（默认 1000，范围 1-10000）：块越小单次持锁越短，
+// 块越大清理越快；上限保证 id IN (...) 的占位符数远低于各数据库的单语句上限。
+// ClickHouse 日志库靠表 TTL 过期，这里不处理。ctx 取消时返回已删除的行数和 ctx 的错误。
+func CleanupCapabilityGateEvents(ctx context.Context, before int64) (int64, error) {
+	if before <= 0 || common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return 0, nil
 	}
-	result := DB.Where("created_at < ?", before).Delete(&CapabilityGateEvent{})
-	return result.RowsAffected, result.Error
+	chunk := min(max(common.GetEnvOrDefault("CAPABILITY_GATE_EVENT_CLEANUP_CHUNK", 1000), 1), 10000)
+	db := LOG_DB.WithContext(ctx)
+	var deleted int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		var ids []int64
+		if err := db.Model(&CapabilityGateEvent{}).
+			Where("created_at < ?", before).
+			Order("created_at ASC").
+			Limit(chunk).
+			Pluck("id", &ids).Error; err != nil {
+			return deleted, err
+		}
+		if len(ids) == 0 {
+			return deleted, nil
+		}
+		result := db.Where("id IN ?", ids).Delete(&CapabilityGateEvent{})
+		if result.Error != nil {
+			return deleted, result.Error
+		}
+		deleted += result.RowsAffected
+		if len(ids) < chunk || result.RowsAffected == 0 {
+			return deleted, nil
+		}
+	}
+}
+
+// HasCapabilityGateEventsBefore 报告是否还有 before 之前的事件，供清理任务判断要不要运行。
+func HasCapabilityGateEventsBefore(before int64) bool {
+	if before <= 0 || common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return false
+	}
+	var ids []int64
+	err := LOG_DB.Model(&CapabilityGateEvent{}).
+		Where("created_at < ?", before).
+		Limit(1).
+		Pluck("id", &ids).Error
+	return err == nil && len(ids) > 0
 }

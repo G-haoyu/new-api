@@ -27,7 +27,7 @@ const (
 )
 
 // CurrentCapabilityGateMode 读取系统设置里的门控模式（默认 shadow）。
-// 环境变量 AUTO_CAPABILITY_GATE_MODE 只在启动时作为初始默认值。
+// 模式只存在数据库里，没有环境变量开关。
 func CurrentCapabilityGateMode() CapabilityGateMode {
 	switch operation_setting.GetCapabilityGateSetting().Mode {
 	case operation_setting.CapabilityGateModeOff:
@@ -208,7 +208,7 @@ func (g *CapabilityGate) FilterChannels(c *gin.Context, modelName string, channe
 	g.channelsEvaluated = len(channelIDs)
 	g.channelsRejected = rejected
 	g.channelRejections = rejections
-	recordCapabilityGateEvent(g, baseModel, len(channelIDs), rejected, rejections, soft)
+	recordCapabilityGateEvent(c, g, baseModel, len(channelIDs), rejected, rejections, soft)
 	if g.mode != CapabilityGateEnforce {
 		return channelIDs
 	}
@@ -260,10 +260,14 @@ func normalizeGateViolations(violations []capability.Violation) []capability.Vio
 	return out
 }
 
-// recordCapabilityGateEvent 把一次渠道级判定写进门控事件表。
+// recordCapabilityGateEvent 把一次渠道级判定交给异步 writer 落库。
 // 设置里允许记录通过时，每个请求都会留痕（含多渠道命中里部分渠道不满足的情况）；
-// 写入失败只记日志，绝不影响本次请求的选路。
-func recordCapabilityGateEvent(g *CapabilityGate, modelName string, evaluated int, rejected []int, rejections map[int]capabilityRejection, soft map[string]capability.Violation) {
+// 这里只做内存里的组装和非阻塞投递，落库失败或队列满都不影响本次请求的选路。
+func recordCapabilityGateEvent(c *gin.Context, g *CapabilityGate, modelName string, evaluated int, rejected []int, rejections map[int]capabilityRejection, soft map[string]capability.Violation) {
+	writer := capabilityGateEvents.Load()
+	if writer == nil {
+		return
+	}
 	action := capabilityGateEventAction(g.mode, evaluated, len(rejected), len(soft))
 	if action == model.CapabilityGateEventPassed && !operation_setting.GetCapabilityGateSetting().RecordPassed {
 		return
@@ -314,17 +318,25 @@ func recordCapabilityGateEvent(g *CapabilityGate, modelName string, evaluated in
 			ids = append(ids, strconv.Itoa(channelID))
 		}
 		channelText = strings.Join(ids, ",")
+		// 列宽有限，超出时在逗号处截断；准确数量由 RejectedCount 记录。
+		if len(channelText) > model.CapabilityGateEventRejectedChannelsMax {
+			channelText = channelText[:strings.LastIndex(channelText[:model.CapabilityGateEventRejectedChannelsMax+1], ",")]
+		}
 	}
-	if err := model.RecordCapabilityGateEvent(&model.CapabilityGateEvent{
+	writer.enqueue(&model.CapabilityGateEvent{
 		Mode:              string(g.mode),
 		Model:             modelName,
 		Action:            action,
 		ChannelsEvaluated: evaluated,
 		RejectedChannels:  channelText,
 		Dimensions:        string(encoded),
-	}); err != nil {
-		common.SysError("failed to record capability gate event: " + err.Error())
-	}
+		CreatedAt:         common.GetTimestamp(),
+		RejectedCount:     len(rejected),
+		RequestId:         c.GetString(common.RequestIdKey),
+		UserId:            common.GetContextKeyInt(c, constant.ContextKeyUserId),
+		TokenId:           common.GetContextKeyInt(c, constant.ContextKeyTokenId),
+		UsingGroup:        common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
+	})
 }
 
 // ExplainChannelRejection 把本次请求的渠道级淘汰原因整理成面向调用方的错误。
@@ -513,7 +525,7 @@ func capabilityGateBody(c *gin.Context, maxBytes int64) ([]byte, bool) {
 	}
 	if maxBytes > 0 && int64(len(body)) > maxBytes {
 		logger.LogWarn(c.Request.Context(), common.LogText(
-			"capability gate skipped: body %d bytes exceeds AUTO_CAPABILITY_GATE_MAX_BODY_BYTES %d",
+			"capability gate skipped: body %d bytes exceeds capability_gate_setting.max_body_bytes %d",
 			len(body), maxBytes))
 		return nil, false
 	}

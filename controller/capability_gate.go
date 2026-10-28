@@ -17,6 +17,7 @@ func GetCapabilityGateEvents(c *gin.Context) {
 	events, total, err := model.GetCapabilityGateEvents(model.CapabilityGateEventQuery{
 		Model:     c.Query("model"),
 		Action:    c.Query("action"),
+		RequestId: c.Query("request_id"),
 		StartTime: startTime,
 		EndTime:   endTime,
 		Offset:    pageInfo.GetStartIdx(),
