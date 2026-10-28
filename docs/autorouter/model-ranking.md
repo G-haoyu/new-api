@@ -128,13 +128,13 @@ LiveBench、LMArena、Artificial Analysis 的模型名统一走同一套匹配�
 - **分数**：画像内有数据的指标取算术平均。
 - **覆盖要求**：有数据的指标数 ≥ 画像指标数的一半（向上取整）。即 1–2 个指标的画像至少有 1 项，3 个指标的画像至少有 2 项。不满足的模型不进入该画像的列表。
 
-分数只来自榜单，不叠加用量、延迟等其他信号。
+分数只来自榜单，不叠加用量、延迟等其他信号。价格不进入分数，只在运行时从分数接近的模型里挑更便宜的，见第 7.3 节。
 
 ## 7. 列表与运行时选择
 
 ### 7.1 列表
 
-`task_models` 以画像名为键，共 14 个列表（12 个二级类 + `code`、`data` 两个一级类）。每个列表包含所有满足覆盖要求的模型，按分数降序；同分时价格低的在前，再相同按 id。列表不截断，运行时取第一个当前可用的模型。
+`task_models` 以画像名为键，共 14 个列表（12 个二级类 + `code`、`data` 两个一级类）。每个列表包含所有满足覆盖要求的模型，按分数降序；同分时价格低的在前，再相同按 id。列表不截断。运行时在当前可用的模型里按第 7.3 节比较质量和价格，比不出结果时取第一个可用的模型。
 
 `default_models` 按 `general` 一级画像生成，同时充当 `general` 的一级列表：
 
@@ -151,27 +151,202 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 | 否则 `P(best) ≥ min_task_type_probability` | `best` |
 | 否则 | 沿用上一次路由；没有上一次时用 `default_models` |
 
-确定画像后按 `task_models[leaf] → task_models[parent] → default_models` 依次取第一个可用模型；从一级类开始时按 `task_models[best] → default_models`。`general` 没有一级列表，这一步即 `default_models`。
+确定画像后按 `task_models[leaf] → task_models[parent] → default_models` 依次取模型；从一级类开始时按 `task_models[best] → default_models`。`general` 没有一级列表，这一步即 `default_models`。每一级 `task_models` 列表先按第 7.3 节比较质量和价格；列表里没有带榜单分且可比价的可用模型时，取该列表第一个可用的模型；仍然没有才进入下一级。`default_models` 已按分数和价格排好序，直接取第一个可用的模型，不再比较。
 
-思考强度、`larger_model_benefit` 提档、同任务延续（`task_change < continuation_task_change` 时沿用上一次的模型、思考强度不降）的规则不变。可用性判断与 `ResolveVariant` 解析思考强度变体的规则不变。
+可信的判断要求难度大于 0，来源可以是现调 jev、判断缓存命中、延续上一任务，或可信的会话继承。可信的判断自己定思考强度，按模型的渠道声明收敛后写进请求体，覆盖客户端写的推理字段；只有一级类可信时同样如此。模型没有推理声明时不动客户端的字段。不可信的兜底（辅助请求、jev 失败、概率不够）沿用上一次路由或 `default_models`，不碰客户端的推理字段。
 
-路由日志与 trace 记录 `task_type`（jev 选中的二级类）、`route_profile`（实际使用的画像）和 `route_fallback`（`leaf` / `parent` / `default`），用于复核分类和兜底的发生频率。
+思考强度、`larger_model_benefit` 提档、同任务延续（`task_change < continuation_task_change` 时沿用上一次的模型、思考强度不降）的规则不变。`ResolveVariant` 解析思考强度变体的规则不变，只补了一处：档位不在档位表里时也探测 `-medium` 后缀。“可用”的含义见第 7.3 节。
+
+路由日志与 trace 记录 `task_type`（jev 选中的二级类）、`route_profile`（实际使用的画像）和 `route_fallback`（`leaf` / `class` / `default`），用于复核分类和兜底的发生频率。消费日志的 `admin_info.auto_router` 带完整的决策过程，包括第 7.3 节的比较明细，成功和失败的请求都写，样例见第 7.4 节。
+
+### 7.3 质量与价格的比较
+
+榜单分只说明谁更强，不说明谁更划算：分数接近的模型，价格可以差好几倍。所以每一级 `task_models` 列表先在分数接近的模型里挑更便宜的，而不是直接取第一名。这是对整个列表做一次整体比较，不是从第一名开始逐个往下比价。
+
+**候选**：列表里同时满足下面三条的模型。
+
+- 在该画像下有榜单分（`task_scores`）。
+- 当前可用：令牌白名单允许、所在分组启用，并且至少有一个渠道可用（已启用、支持当前请求路径、没被熔断，渠道的生效能力满足请求）。判断时撇开客户端自己写的推理档位，因为可信的判断会自己定档位。
+- 有可比较的价格：按 token 计价，且用户侧价格已配置。
+
+没配置价格的模型计费时会直接失败，任何路径都不选。按次计价的模型可以被选中，但没法和按 token 计价的模型比价，所以不进入比较，只会在比较选不出结果时按列表顺序出现。
+
+**步骤**：
+
+1. 参照分：候选里最高的榜单分。它是当前可用候选的最高分，不一定是榜单第一名。
+2. 候选带：榜单分不低于 `参照分 − λ − δ` 的候选。再便宜，掉出这条线的也不选。
+3. 价格折扣：带内按价格的对数位置打折，最便宜的折 0，最贵的折满 λ，其余按对数位置插值。免费（价格为 0）的模型不拉低价格下限；带内全部免费或价格相同时不打折。
+4. 折后分：榜单分减折扣。设折后分最高的模型为 B，折后分不低于 `B 的折后分 − δ` 的算同档。
+5. 选择：同档里取价格最低的；价格相同取折后分高的。
+
+选中的模型比参照分最多低 λ + δ。候选 X 能和 B 同档，条件是 `榜单分(B) − 榜单分(X) ≤ 折扣(B) − 折扣(X) + δ`：B 比 X 贵得越多，X 能让出的分数就越多。λ 和 δ 都为 0 时，同档只剩并列最高分的模型，等于永远取榜单第一。
+
+**参数**：`autorouter_setting.cost_lambda`（λ，默认 `0.05`）和 `score_tie_delta`（δ，默认 `0.02`）。两者在库里，改动即时生效，不需要发版；负数和 NaN 按 0，大于 1 按 1。它们对所有画像相同，没有按画像或按令牌的设置。
+
+**价格**：用户侧的混合价（美元/百万 token），输入价和输出价按 3:1 混合，再乘计费分组倍率。倍率计价的模型取模型倍率和补全倍率；表达式计价的模型把预估输入长度代入表达式，取对应档位的价格，预估不出长度时按最小档。令牌分组是 `auto` 时，每个候选按自己实际会走的计费分组取倍率。这个价格不是 `task_models.json` 里的 `price_per_mtok`，后者是 OpenRouter 的价格，只用来给 `default_models` 排序和生成榜单。
+
+**不做比较的情况**：
+
+- 同任务延续，沿用上一次的模型。
+- 辅助请求、jev 失败或判断不可信，走兜底。
+- 该级列表没有带榜单分的可用模型，或者没有可比价的候选，取列表第一个可用的。
+- `default_models` 已按分数和价格排好序，直接取第一个可用的。
+
+调用 jev 之前，网关先扫一遍 `default_models` 和各 `task_models`：一个可用模型都没有就直接返回 503，不花这次 jev 调用；候选是被能力门控全部淘汰的，错误信息里会列出未满足的能力维度。
+
+### 7.4 示例
+
+下面的数字取自 2026-10-28 的内置榜单。价格用 `task_models.json` 里的 `price_per_mtok` 代替用户侧价格，只用来演示机制；线上的分数和价格以当时的榜单和计费配置为准。λ=0.05，δ=0.02，分数和折扣保留四位小数。
+
+**例 1：便宜的候选进入同档**
+
+jev 判成 `code.build`，概率 0.82，叶子可信。榜单第一名 `claude-fable-5-1` 是 0.9865 分，候选带的下限是 0.9865 − 0.05 − 0.02 = 0.9165。`claude-sonnet-5-5`（0.9052）和 `gemini-4-argon`（0.9012）低于下限，不参与。带内 4 个模型：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-fable-5-1 | 0.9865 | 20.00 | 0.0500 | 0.9365 | 是 |
+| gpt-6-astra | 0.9765 | 20.00 | 0.0500 | 0.9265 | |
+| claude-opus-5-5 | 0.9700 | 8.00 | 0.0215 | 0.9485 | 是 |
+| gpt-6.1-sol | 0.9410 | 4.00 | 0 | 0.9410 | 是 |
+
+价格最贵的 20 美元折满 0.05，最便宜的 4 美元折 0，8 美元按对数位置折 0.0215。折后分最高的是 `claude-opus-5-5`（0.9485），同档线是 0.9485 − 0.02 = 0.9285，`gpt-6-astra`（0.9265）差一点，其余三个同档，取最便宜的 `gpt-6.1-sol`。它的榜单分比 `claude-opus-5-5` 低 0.0290，不超过 0.0215 + 0.02 = 0.0415，所以同档；比第一名低 0.0455，价格是五分之一，没有超过 λ + δ = 0.07。
+
+**例 2：领先者留下**
+
+jev 的概率是 `general.chat` 0.40、`code.build` 0.35、`code.ops` 0.25。概率最高的叶子只有 0.40，没到 0.5；`code` 大类是 0.35 + 0.25 = 0.60，达到阈值，所以按 `code` 画像选，在 `task_models["code"]` 里比较。参照分 0.9734，下限 0.9034，带内 4 个模型：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-5-5 | 0.9734 | 8.00 | 0.0215 | 0.9519 | 是 |
+| claude-fable-5-1 | 0.9703 | 20.00 | 0.0500 | 0.9203 | |
+| gpt-6-astra | 0.9477 | 20.00 | 0.0500 | 0.8977 | |
+| claude-sonnet-5-5 | 0.9129 | 4.00 | 0 | 0.9129 | |
+
+`claude-opus-5-5` 的折后分最高，同档线是 0.9519 − 0.02 = 0.9319。最便宜的 `claude-sonnet-5-5` 折后分 0.9129，比同档线低 0.0190，不同档：它要同档，榜单分最多比 `claude-opus-5-5` 低 0.0215 + 0.02 = 0.0415，实际低 0.0605。所以结果仍是 `claude-opus-5-5`。同一个 `claude-sonnet-5-5`，在 `code.build` 画像里是 0.9052，在 `code` 画像里是 0.9129：画像用的指标不同，榜单分就不同，所以它在例 1 里掉出了候选带，在例 2 里进了带却不同档。
+
+**例 3：第一名不可用，参照分下移**
+
+条件和例 1 相同，但 `claude-fable-5-1` 没有可用渠道。参照分变成 `gpt-6-astra` 的 0.9765，下限随之降到 0.9765 − 0.07 = 0.9065。`claude-sonnet-5-5`（0.9052）仍差 0.0013，在带外。带内剩 3 个模型，价格范围还是 4 到 20 美元，折扣和折后分与例 1 相同，同档线 0.9285，结果仍是 `gpt-6.1-sol`。
+
+候选带跟着“当前可用的最高分”走，不是固定按榜单名次。
+
+**例 4：λ 和 δ 都设为 0**
+
+仍是 `code.build`。带内只剩 `claude-fable-5-1`，折扣为 0，结果是榜单第一名。把 `cost_lambda` 和 `score_tie_delta` 都设为 0，就等于关掉价格比较，在库里改完即时生效。
+
+**例 5：同一个窗口，在不同画像里宽窄不同**
+
+榜单分是各指标归一化值的平均，λ + δ = 0.07 对不同刻度的指标意义不同。ratio 刻度（LiveBench、Artificial Analysis）里，0.07 是比最高分低 7%；elo 刻度（Design Arena，以及 LMArena 除 `lma.agent_bash` 外的各榜）里，最高分附近的 0.07 约等于 24 个 Elo 点，窗口窄得多。所以只用 elo 指标的画像带更窄，含 ratio 指标的画像带更宽。
+
+| 画像 | 指标刻度 | 带内模型数 | 选中 |
+| --- | --- | --- | --- |
+| `code.frontend` | 全是 elo | 2 | claude-sonnet-5-5 |
+| `data.business` | ratio 和 elo 混合 | 17 | muse-spark-1.2 |
+
+`code.frontend` 带内只有 `claude-opus-5-5`（0.9426，8 美元）和 `claude-sonnet-5-5`（0.8983，4 美元）。带里只有两个模型，贵的折满 0.05，便宜的折 0，折后分是 0.8926 对 0.8983，两个同档，取便宜的 `claude-sonnet-5-5`：让出 0.0443 分，价格减半。
+
+`data.business` 带内 17 个模型，下面是其中 4 个：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-4-7 | 0.9970 | 10.00 | 0.0366 | 0.9604 | 是 |
+| muse-spark-1.2 | 0.9807 | 2.00 | 0.0056 | 0.9751 | 是 |
+| gemini-4-argon | 0.9658 | 4.00 | 0.0189 | 0.9469 | |
+| gemini-3.7-flash | 0.9290 | 1.50 | 0 | 0.9290 | |
+
+`gemini-3.7-flash` 是带内最便宜的（1.50 美元），但折后分 0.9290 低于同档线 0.9751 − 0.02 = 0.9551，不同档。最后取同档里最便宜的 `muse-spark-1.2`：比第一名低 0.0163 分，价格是五分之一。最便宜的不一定被选中。
+
+**例 6：价格相同，取折后分高的**
+
+jev 判成 `general.design`。参照分是 `claude-opus-5-5` 的 1.0000，下限 0.9300，带内 9 个模型，同档线 0.9599 − 0.02 = 0.9399，5 个模型同档。同档里价格最低的两个都是 0.20 美元：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-5-5 | 1.0000 | 8.00 | 0.0401 | 0.9599 | 是 |
+| claude-haiku-5-5 | 0.9563 | 0.20 | 0 | 0.9563 | 是 |
+| gpt-6-luna | 0.9494 | 0.20 | 0 | 0.9494 | 是 |
+
+另有两个同档模型未列出。价格相同，取折后分高的 `claude-haiku-5-5`：比第一名低 0.0437 分，价格是四十分之一。这个快照里 `da.slides` 停更，`general.design` 实际只剩 `lb.design` 一个指标，拿 0.0437 分换四十倍价差，依据偏薄，见第 10 节。
+
+**例 7：从 jev 的概率到画像**
+
+阈值取默认的 0.5，没有上一次路由，所有模型都可用：
+
+| jev 的概率 | 画像 | 说明 |
+| --- | --- | --- |
+| `code.build` 0.82、`code.ops` 0.10、`general.chat` 0.08 | `code.build` | 叶子达到阈值，按叶子的榜单比较 |
+| `general.chat` 0.40、`code.build` 0.35、`code.ops` 0.25 | `code` | 叶子都没到阈值，`code` 大类合计 0.60 到了，按大类的榜单比较 |
+| `general.chat` 0.32、`general.knowledge` 0.30、`general.writing` 0.20、`code.build` 0.18 | 默认 | `general` 大类合计 0.82 可信，但 `general` 没有一级列表，取 `default_models` 第一个可用的；仍是可信判断，会覆盖客户端的推理档位 |
+| `code.build` 0.40、`data.analysis` 0.35、`general.chat` 0.25 | 沿用上一次，没有则默认 | 没有任何大类到阈值，判断不可信 |
+| `unknown` 0.70、`code.build` 0.30 | 沿用上一次，没有则默认 | `unknown` 不属于任何大类，不计入大类概率；`code` 只有 0.30，判断不可信 |
+
+**例 8：某一级没有可用模型**
+
+一级找不到可用模型，就往下一级找，最后落到 `default_models`，不再比较。
+
+- `code.frontend` 的 114 个模型都不可用，只启用了 `code` 里不在 `code.frontend` 列表中的 8 个模型。画像落到 `code`，参照分是 `gpt-6-astra` 的 0.9477，下限 0.8777，带内只有它一个，结果是它。
+- `general.browser` 的 26 个模型都不可用。`general` 没有一级列表，直接取 `default_models` 第一个可用的。`default_models` 的前 11 个都在 `general.browser` 的榜单上，同样不可用，取到第 12 个 `muse-wonder`。
+
+**例 9：一次决策在日志里的样子**
+
+例 1 的请求，难度 3，`larger_model_benefit` 为 0.2，不到 0.5 所以不提档。消费日志 `admin_info.auto_router`（数值保留四位小数）：
+
+```json
+{
+  "resolved_model": "gpt-6.1-sol",
+  "profile": "code.build",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "source": "jev",
+  "decision": {
+    "task_type": "code.build",
+    "task_type_probability": 0.82,
+    "task_type_probabilities": {"code.build": 0.82, "code.ops": 0.1, "general.chat": 0.08},
+    "difficulty": 3,
+    "task_change": 1,
+    "larger_model_benefit": 0.2
+  },
+  "effort_in_body": true,
+  "effort_override": true,
+  "pick": {
+    "chosen": "gpt-6.1-sol",
+    "lambda": 0.05,
+    "delta": 0.02,
+    "band": [
+      {"model": "claude-fable-5-1", "score": 0.9865, "price": 20, "utility": 0.9365, "tied": true},
+      {"model": "gpt-6-astra", "score": 0.9765, "price": 20, "utility": 0.9265},
+      {"model": "claude-opus-5-5", "score": 0.97, "price": 8, "utility": 0.9485, "tied": true},
+      {"model": "gpt-6.1-sol", "score": 0.941, "price": 4, "utility": 0.941, "tied": true}
+    ]
+  },
+  "applied_effort": "high",
+  "effort_action": "set"
+}
+```
+
+- `profile` 是实际用的榜单；它和 `decision.task_type` 不一致，说明发生了回退（回到大类或默认）。
+- `source` 是 `jev`（本次调用）、`cache`（判断缓存命中）、`inherit`（沿用上一轮）或 `default`（没有可用信号）。
+- `pick` 只在做过质量/价格比较时出现。`band` 是候选带，`utility` 是折后分，`tied` 标出同档，`chosen` 是选中的。沿用上一轮模型、兜底和按列表顺序取第一个时没有 `pick`。
+- `effort` 是难度给出的期望档位，`applied_effort` 是按模型的渠道声明收敛后真正写进请求体的档位，`effort_action` 是 `set`（写入）、`keep`（不碰客户端字段）或 `strip`（模型不支持推理，去掉客户端字段）。`effort_override` 为 true 表示这是可信的判断，覆盖了客户端的推理字段。`effort_in_body` 为 true 表示档位写进请求体、模型名保持裸名；为 false 时档位拼在模型名后缀上（如 `gpt-5-high`）。
 
 ## 8. 在线刷新
 
-沿用系统任务 `autorouter_rank`：master 节点在数据库租约下按 `rank_refresh_interval_hours`（默认 24，最小 1）执行，依次写入 `task_models`、`default_models`、`rank_sources`，其他节点经配置同步生效，不需要重启。任一来源失败或任一画像没有模型时不写配置，线上保留上一份榜单。
+沿用系统任务 `autorouter_rank`：master 节点在数据库租约下按 `rank_refresh_interval_hours`（默认 24，最小 1）执行，依次写入 `task_models`、`task_scores`、`default_models`、`rank_sources`，其他节点经配置同步生效，不需要重启。任一来源失败或任一画像没有模型时不写配置，线上保留上一份榜单。
 
 - **启用条件**：`autorouter_setting.enabled` 与 `rank_refresh_enabled` 为 true，且进程环境变量有 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY` 之一。OpenRouter 模型列表是公开接口，不需要 key。
 - **网络**：网关需能访问 `openrouter.ai`、`livebench.ai`、`hf-mirror.com`、`artificialanalysis.ai`、`www.designarena.ai`。不再逐模型查询端点延迟，一次刷新通常在一分钟内完成。
 - **数据新鲜度**：按 OpenRouter 目录的上架时间（`created`）取每个来源评过分的最新 10 个候选（`-stale-probe`），某项指标在这 10 个里都没有数据时视为停更，本轮不参与打分，记入 `rank_sources.stale_metrics` 和刷新记录。来源评过分的候选不足 10 个时不做判断；视觉指标只看支持图像输入的候选。
-- **分类版本**：`rank_sources` 记录 `taxonomy_version`。启动或配置同步时若已存的版本与代码中的分类不一致，运行时改用内置 `task_models.json`，并立即触发一次刷新，不等周期。
+- **分类版本**：`rank_sources` 记录 `taxonomy_version`。启动或配置同步时若已存的版本与代码中的分类不一致，运行时改用内置 `task_models.json`，并立即触发一次刷新，不等周期。`task_scores` 与 `task_models` 按同一个版本判定，一起退回内置的，避免旧分类下的分数配上新分类的列表。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `autorouter_setting.rank_refresh_enabled` | `true` | 是否定时刷新 |
 | `autorouter_setting.rank_refresh_interval_hours` | `24` | 刷新周期，单位小时 |
 | `autorouter_setting.task_models` | 内置榜单 | 画像名 → 模型列表 |
+| `autorouter_setting.task_scores` | 内置榜单 | 画像名 → 模型 → 榜单分，第 7.3 节比较用；与 `task_models` 一起生成、一起刷新 |
 | `autorouter_setting.default_models` | 内置榜单 | 默认模型列表 |
+| `autorouter_setting.cost_lambda` | `0.05` | 第 7.3 节的 λ：为了价格最多让出的榜单分；负数和 NaN 按 0，大于 1 按 1 |
+| `autorouter_setting.score_tie_delta` | `0.02` | 第 7.3 节的 δ：折后分相差不超过它的算同档；取值范围同 λ |
 | `autorouter_setting.rank_sources` | 内置榜单 | 各来源快照日期、生成时间、`taxonomy_version` |
 | 环境变量 `ARTIFICIAL_ANALYSIS_API_KEY` | 无 | Artificial Analysis 免费接口所需；未设置时不刷新 |
 | 环境变量 `DESIGN_ARENA_API_KEY` | 无 | Design Arena 接口所需（`sk_live_` 开头，经 designarena.ai/developers/apply 申请）；未设置时经 OpenRouter 读取 |
@@ -187,9 +362,12 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 | `pkg/autorouter/modelrank/metrics.go` | 指标目录换成第 3 节；`taskWeights` 换成画像 → 指标列表；`code`、`data` 一级画像，`general` 一级画像即默认画像；`designArenaCategories` 只保留 `website`、`uicomponent`、`slides`；删除 `usageTags`、`openRouterBenchmarks` |
 | `pkg/autorouter/modelrank/sources.go` | 新增 Artificial Analysis 免费接口与 Design Arena 接口加载，无 Design Arena key 时经 OpenRouter `/benchmarks` 读取；新增指标新鲜度统计；LMArena 增加 `creative_writing` 与两个 `industry_*` 分类；删除 OpenRouter 自测 benchmark（GPQA、τ-bench）、AA 指数转发、任务用量、端点延迟的加载 |
 | `pkg/autorouter/modelrank/rank.go` | 等权平均与按指标数的覆盖要求；删除用量加分；帕累托比较只看分数与价格 |
-| `pkg/autorouter/policy.go` | 按第 7.2 节的顺序选画像与列表，记录 `route_profile`、`route_fallback` |
-| `setting/autorouter_setting/` | 新的内置 `task_models.json`；`taxonomy_version` 校验 |
-| `controller/system_task_handlers.go` | 刷新任务的启用条件改为检查 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY` |
+| `pkg/autorouter/policy.go` | 按第 7.2 节的顺序选画像与列表，记录 `route_profile`、`route_fallback`；每一级列表先按第 7.3 节比较，比不出再取第一个可用的 |
+| `pkg/autorouter/select.go` | 第 7.3 节的质量/价格比较：候选带、价格折扣、同档、取最便宜，并返回比较过程写进日志 |
+| `setting/autorouter_setting/` | 新的内置 `task_models.json`；`taxonomy_version` 校验；`task_scores` 从内置 `evidence` 播种，随 `task_models` 一起按版本退回内置；`cost_lambda`、`score_tie_delta` |
+| `controller/system_task_handlers.go` | 刷新任务的启用条件改为检查 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY`；刷新时同时写 `task_scores` |
+| `middleware/distributor.go`、`relay/helper/price.go` | 候选按“模型 + 渠道”判定可用；`RoutingPricer` 按用户侧价格给候选报价，只读价格配置，不写 `PriceData`、不碰额度 |
+| `service/autorouter.go`、`service/log_info_generate.go` | 调用 jev 前先检查有没有可用模型；比较过程写进 `admin_info.auto_router` |
 
 ## 10. 已知限制
 
@@ -197,3 +375,6 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 - **Artificial Analysis 免费接口只有指数**：单项 benchmark（如 Terminal-Bench、FrontierCode）需要付费接口，因此 `aa.*` 只用 Intelligence 指数（v5）和 Strategy & Ops 能力指数。接口仍返回 `coding_index`、`agentic_index` 字段，但它们已不在 v5 指数体系中、不再随新模型更新，不使用。Intelligence v5 只覆盖 2026-03 之后发布的模型。
 - **LMArena 分榜新旧不一**：文档、搜索榜可能比文本榜旧一个月以上，以 `rank_sources` 记录的日期为准。
 - **分类准确率待校准**：12 个二级类的判定标准需要用标注集验证 jev 的选择准确率，`min_task_type_probability` 随之调整；一级类兜底保证二级类判错时仍落在相近的榜单上。
+- **λ 和 δ 是全局的，窗口宽度随画像变**：见第 7.4 节例 5。只含 elo 指标的画像候选带窄，含 ratio 指标的宽。按 2026-10-28 的内置榜单和榜单文件里的价格，λ=0.05、δ=0.02 时 12 个二级类里有 8 个选的不是榜单第一名。按画像分别标定还没做。
+- **单指标画像的分数偏薄**：`general.browser`、`general.research` 只有一个指标；`general.design`、`general.search`、`general.writing` 在 2026-10-28 的快照里因 `da.slides`、`lma.search`、`lma.document` 停更，实际只剩一到两个有效指标。用很小的分差换很大的价差，依据比多指标画像弱。
+- **比价用的是用户侧价格**：榜单文件里的 `price_per_mtok` 是 OpenRouter 的价格，只用来给 `default_models` 排序和本文示例。运行时按第 7.3 节用用户侧价格比较，两者可能差很多。
