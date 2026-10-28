@@ -55,7 +55,7 @@ func TestSelectRoute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			available := func(model string) bool { return tt.available == nil || slices.Contains(tt.available, model) }
-			route, inherited, ok := SelectRoute(tt.decision, tt.previous, policy, available)
+			route, inherited, ok := SelectRoute(tt.decision, tt.previous, policy, available, available)
 			assert.Equal(t, tt.wantOK, ok)
 			if ok {
 				assert.Equal(t, tt.want, route)
@@ -63,6 +63,36 @@ func TestSelectRoute(t *testing.T) {
 			assert.Equal(t, tt.wantInherited, inherited)
 		})
 	}
+}
+
+// 可信的判断自己定档位、会改写客户端的推理字段，所以用 overridable 判定候选；
+// 兜底路径不碰客户端字段，仍按客户端原样的请求用 available 判定。
+func TestSelectRouteJudgesTrustedAndFallbackCandidatesSeparately(t *testing.T) {
+	policy := Policy{
+		TaskModels:             map[string][]string{"coding": {"coder", "coder-b"}},
+		DefaultModels:          []string{"general", "general-b"},
+		DifficultyEfforts:      []string{"low", "medium", "high", "xhigh"},
+		DefaultEffort:          "medium",
+		UpgradeBenefit:         0.5,
+		MinTaskTypeProbability: 0.5,
+		ContinuationTaskChange: 0.5,
+	}
+	one := 1.0
+	zero := 0.0
+	trusted := &Decision{TaskType: "coding", TaskTypeProbability: 0.9, Difficulty: 2, TaskChange: &one, LargerModelBenefit: &zero}
+	// 客户端自己带的推理档位 coder 的渠道不支持，但 auto 会把它改写掉，所以 coder 仍可选。
+	available := func(model string) bool { return model == "coder-b" || model == "general-b" }
+	overridable := func(string) bool { return true }
+
+	route, inherited, ok := SelectRoute(trusted, nil, policy, available, overridable)
+	assert.True(t, ok)
+	assert.False(t, inherited)
+	assert.Equal(t, "coder", route.Model, "可信判断按 overridable 选模")
+
+	route, inherited, ok = SelectRoute(nil, nil, policy, available, overridable)
+	assert.True(t, ok)
+	assert.True(t, inherited)
+	assert.Equal(t, "general-b", route.Model, "兜底按客户端原样的请求选模，跳过 general")
 }
 
 func TestPolicyAnyModelAvailable(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/cachex"
@@ -38,11 +39,13 @@ const (
 //     同一条指令的后续请求不再调 jev，但路由每次按各自的可用集合重新算，
 //     所以一次带图请求因为能力不满足换了模型，不会影响之后的纯文本请求。
 //   - r: 和 s: 键存最近一次算出的路由（Route），供下一条指令"沿用上一轮模型"，
-//     以及没有可读文字的子 agent 继承会话路由。
+//     以及没有可读文字的子 agent 继承会话路由。s: 键还记着这条路由是否来自可信的
+//     jev 判断（Trusted），子 agent 继承时据此决定能不能覆盖客户端的推理字段。
 type autoRouterEntry struct {
 	Route    autorouter.Route     `json:"route"`
 	Decision *autorouter.Decision `json:"decision,omitempty"`
 	Failed   bool                 `json:"failed,omitempty"`
+	Trusted  bool                 `json:"trusted,omitempty"`
 }
 
 var (
@@ -78,10 +81,22 @@ func IsAutoRouterRequest(c *gin.Context, modelName string) bool {
 	if modelName != autorouter.AutoModel || !autorouter_setting.GetAutoRouterSetting().Enabled {
 		return false
 	}
-	path := c.Request.URL.Path
-	mode := relayconstant.Path2RelayMode(path)
-	return mode == relayconstant.RelayModeChatCompletions || mode == relayconstant.RelayModeResponses ||
-		strings.HasPrefix(path, "/v1/messages")
+	_, supported := AutoRouterProtocol(c.Request.URL.Path)
+	return supported
+}
+
+// AutoRouterProtocol 返回 auto 支持的入站协议，决定推理档位写进请求体的哪个字段；
+// 其他路径 ok 为 false。
+func AutoRouterProtocol(path string) (protocol autorouter.Protocol, ok bool) {
+	switch mode := relayconstant.Path2RelayMode(path); {
+	case strings.HasPrefix(path, "/v1/messages"):
+		return autorouter.ProtocolAnthropic, true
+	case mode == relayconstant.RelayModeResponses:
+		return autorouter.ProtocolResponses, true
+	case mode == relayconstant.RelayModeChatCompletions:
+		return autorouter.ProtocolChat, true
+	}
+	return "", false
 }
 
 // AutoRouterListed reports whether "auto" belongs in a model list containing
@@ -111,15 +126,28 @@ func autoRouterCacheKey(kind string, tokenID int, parts ...string) string {
 	return kind + ":" + hex.EncodeToString(sum[:])
 }
 
+// AutoCandidates 由分发中间件提供，回答一个候选模型能不能服务这个请求。
+type AutoCandidates struct {
+	// Serves 判定一个候选：令牌白名单、分组启用、至少一个可用渠道的生效能力满足请求。
+	// ignoreClientReasoning 为 true 时撇开客户端自己写的推理字段：可信的 auto 判断
+	// 会自己定档位并改写它们；false 时按客户端原样的请求判定，兜底路径用它。
+	Serves func(name string, ignoreClientReasoning bool) bool
+	// Channels 返回候选模型的可用渠道，用来把期望档位收敛到渠道声明过的档位。
+	Channels func(name string) []int
+}
+
 // ResolveAutoModel picks the model and reasoning effort for an "auto" request.
-// available reports whether a model name is usable by this request (token
-// whitelist, group abilities, request path). A jev failure never fails the
-// request: the route falls back to the previous instruction's route or the
-// defaults.
-func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autorouter.Result, error) {
+// A jev failure never fails the request: the route falls back to the previous
+// instruction's route or the defaults.
+//
+// 模型声明了推理维度且裸模型名可用时，档位按声明收敛后写进请求体（result 里记着
+// 写什么，由分发中间件落到请求体）；否则沿用旧办法，把档位拼在模型名后缀上。
+func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Result, error) {
 	setting := autorouter_setting.GetAutoRouterSetting()
 	policy := setting.Policy()
 	result := &autorouter.Result{Source: autorouter.SourceDefault}
+	available := func(name string) bool { return candidates.Serves(name, false) }
+	overridable := func(name string) bool { return candidates.Serves(name, true) }
 
 	otelRuntime := observability.FromContext(c.Request.Context())
 	routeCtx, routeSpan := otelRuntime.StartAutoRouter(c.Request.Context())
@@ -141,13 +169,20 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 	cache := getAutoRouterCache()
 	ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
 	switch {
-	case !policy.AnyModelAvailable(available):
+	case !policy.AnyModelAvailable(overridable):
 		// 一个可用模型都没有时，分类得出什么都选不出路由，不必先花一次 jev 调用。
+		// 用 overridable 判是因为它是 available 的超集，只有它也找不到才是真的没有。
 	case instruction.Auxiliary:
 	case instruction.Text == "" && instruction.Session != "":
-		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found && autorouter.ModelAvailable(entry.Route.Model, available) {
-			result.Route, result.Source = entry.Route, autorouter.SourceInherit
-			ok = true
+		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found {
+			serves := available
+			if entry.Trusted {
+				serves = overridable
+			}
+			if autorouter.ModelAvailable(entry.Route.Model, serves) {
+				result.Route, result.Source, result.EffortOverride = entry.Route, autorouter.SourceInherit, entry.Trusted
+				ok = true
+			}
 		}
 	case instruction.Text != "":
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
@@ -216,7 +251,8 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		// 路由每次按本次请求自己的可用集合重新算，缓存里只有 jev 的判断。
 		var inherited bool
 		result.Decision = decision
-		result.Route, inherited, ok = autorouter.SelectRoute(decision, previous, policy, available)
+		result.Route, inherited, ok = autorouter.SelectRoute(decision, previous, policy, available, overridable)
+		result.EffortOverride = !inherited
 		if inherited && decision != nil {
 			route.Warning = "jev decision untrusted"
 		}
@@ -235,15 +271,32 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		// The session remembers its latest human instruction's route for the
 		// sub-agents whose task arrives without readable text.
 		if ok && instruction.Session != "" && !instruction.Agent {
-			_ = cache.SetWithTTL(autoRouterCacheKey("s", tokenID, instruction.Session), autoRouterEntry{Route: result.Route}, ttl)
+			_ = cache.SetWithTTL(autoRouterCacheKey("s", tokenID, instruction.Session), autoRouterEntry{Route: result.Route, Trusted: !inherited}, ttl)
 		}
 	}
 	if !ok {
-		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available)
+		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available, overridable)
+		result.EffortOverride = false
 	}
 
 	if ok {
-		result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, available)
+		serves := available
+		if result.EffortOverride {
+			serves = overridable
+		}
+		if spec, declared := model.ResolveModelCapability(capabilityBaseModel(result.Model)); declared && spec.Reasoning.Declared() && serves(result.Model) {
+			result.ResolvedModel, result.EffortInBody = result.Model, true
+			// 只有可信的判断才改客户端的推理字段；兜底路径保持原样。
+			result.EffortAction = autorouter.EffortKeep
+			if result.EffortOverride {
+				gate := CapabilityGateFromContext(c)
+				support := gate.EffortSupport(result.ResolvedModel, candidates.Channels(result.ResolvedModel))
+				result.AppliedEffort, result.EffortAction = support.Clamp(result.Effort)
+				gate.OverrideReasoning(result.EffortAction, result.AppliedEffort)
+			}
+		} else {
+			result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, serves)
+		}
 	}
 	if !ok {
 		route.Err = errors.New("auto router found no available model for this token and group")

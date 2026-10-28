@@ -46,7 +46,12 @@ type Route struct {
 // previous is the route of the previous instruction, nil when unknown.
 // inherited reports that the decision was not used and the route came from
 // previous or the defaults. ok is false when no model is available at all.
-func SelectRoute(decision *Decision, previous *Route, policy Policy, available func(model string) bool) (route Route, inherited, ok bool) {
+//
+// available judges a model against the request exactly as the client sent it;
+// the inherited fallbacks use it because they leave the client's reasoning
+// fields alone. overridable judges a model with the client's reasoning fields
+// set aside, because a trusted decision picks the effort itself and rewrites them.
+func SelectRoute(decision *Decision, previous *Route, policy Policy, available, overridable func(model string) bool) (route Route, inherited, ok bool) {
 	trusted := decision != nil && decision.TaskType != "" && decision.TaskType != TaskTypeUnknown &&
 		decision.TaskTypeProbability >= policy.MinTaskTypeProbability && decision.Difficulty > 0
 	if !trusted {
@@ -68,17 +73,17 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, available f
 	}
 
 	if previous != nil && decision.TaskChange != nil && *decision.TaskChange < policy.ContinuationTaskChange &&
-		ModelAvailable(previous.Model, available) {
+		ModelAvailable(previous.Model, overridable) {
 		if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
 			effort = previous.Effort
 		}
 		return Route{TaskType: previous.TaskType, Model: previous.Model, Effort: effort}, false, true
 	}
 
-	if model, found := firstAvailable(policy.TaskModels[decision.TaskType], available); found {
+	if model, found := firstAvailable(policy.TaskModels[decision.TaskType], overridable); found {
 		return Route{TaskType: decision.TaskType, Model: model, Effort: effort}, false, true
 	}
-	model, found := firstAvailable(policy.DefaultModels, available)
+	model, found := firstAvailable(policy.DefaultModels, overridable)
 	return Route{Model: model, Effort: effort}, false, found
 }
 
@@ -159,6 +164,15 @@ type Result struct {
 	Route
 	Source   string    `json:"source"`
 	Decision *Decision `json:"decision,omitempty"`
+	// EffortInBody 表示档位写进请求体而不是拼在模型名后缀上：只有模型声明了
+	// 推理维度，并且裸模型名本身可用时才这样做，其余沿用后缀。
+	EffortInBody bool `json:"effort_in_body,omitempty"`
+	// EffortOverride 表示这条路由来自可信的 jev 判断，可以覆盖客户端自己写的推理字段；
+	// 兜底路径（辅助请求、jev 失败或不可信）为 false，不碰客户端字段。
+	EffortOverride bool `json:"effort_override,omitempty"`
+	// AppliedEffort 和 EffortAction 是按模型的推理声明收敛后真正写进请求体的结果。
+	AppliedEffort string       `json:"applied_effort,omitempty"`
+	EffortAction  EffortAction `json:"effort_action,omitempty"`
 	// Jev is set only when this request called jev, cache hits leave it nil.
 	Jev *JevCall `json:"jev,omitempty"`
 }

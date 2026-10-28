@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/service/capability"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/reasoning"
@@ -137,8 +138,11 @@ func capabilityBaseModel(modelName string) string {
 // 所以通过这里的模型不会在后面被渠道级收窄淘汰到零渠道。
 // 这里只判定、不写门控事件：事件只给最终选中的那个模型写一条。
 // 没有模型级声明视为不合格；shadow 模式只记录，不拦截。
-// 结论按候选名缓存，同一个请求里同一个候选的渠道集合不会变。
-func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int) bool {
+//
+// ignoreClientReasoning 为 true 时撇开客户端自己写的推理字段来判定：
+// 可信的 auto 判断会自己定档位并改写这些字段，用客户端原来的档位去淘汰候选没有意义。
+// 结论按（候选名，是否撇开推理）缓存，同一个请求里同一个候选的渠道集合不会变。
+func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int, ignoreClientReasoning bool) bool {
 	if g == nil {
 		return true
 	}
@@ -148,11 +152,15 @@ func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int) bo
 	if g.modelRejections == nil {
 		g.modelRejections = make(map[string]capabilityRejection)
 	}
-	verdict, seen := g.modelVerdicts[modelName]
+	needs, memoKey := g.needs, modelName
+	if ignoreClientReasoning {
+		needs, memoKey = g.withoutClientReasoning(), modelName+"|auto-reasoning"
+	}
+	verdict, seen := g.modelVerdicts[memoKey]
 	if !seen {
-		judgement := g.judgeChannels(modelName, channelIDs)
+		judgement := g.judgeChannels(modelName, channelIDs, needs)
 		verdict = capabilityVerdict{satisfied: len(judgement.kept) > 0}
-		g.modelVerdicts[modelName] = verdict
+		g.modelVerdicts[memoKey] = verdict
 		g.evaluated++
 		if !verdict.satisfied {
 			// 每个渠道都因为同一个原因没声明时才算"未声明"，否则把各渠道的违规维度并起来。
@@ -163,7 +171,7 @@ func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int) bo
 					rejection.violations = append(rejection.violations, each.violations...)
 				}
 			}
-			g.modelRejections[modelName] = rejection
+			g.modelRejections[memoKey] = rejection
 			g.wouldReject = append(g.wouldReject, judgement.baseModel)
 		}
 	}
@@ -174,6 +182,58 @@ func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int) bo
 	return false
 }
 
+// withoutClientReasoning 返回撇开客户端推理字段的诉求副本，推理维度不参与判定。
+func (g *CapabilityGate) withoutClientReasoning() *capability.Needs {
+	if g.needs == nil {
+		return nil
+	}
+	needs := *g.needs
+	needs.ReasoningEnabled, needs.ReasoningEffort, needs.ReasoningBudget = nil, "", nil
+	return &needs
+}
+
+// OverrideReasoning 让后面的 FilterChannels 按 auto 写进请求体的推理结果判定，
+// 而不是客户端原来写的字段。none 要显式记成档位 none（并关闭思考），
+// 这样 mandatory 和 efforts 集合会真正拿它校验；Anthropic 的 disabled 重新解析不出档位。
+func (g *CapabilityGate) OverrideReasoning(action autorouter.EffortAction, effort string) {
+	if g == nil || g.needs == nil || action == autorouter.EffortKeep {
+		return
+	}
+	needs := g.withoutClientReasoning()
+	if action == autorouter.EffortSet {
+		enabled := effort != "none"
+		needs.ReasoningEnabled, needs.ReasoningEffort = &enabled, effort
+	}
+	g.needs = needs
+}
+
+// EffortSupport 汇总选中模型在候选渠道上的推理声明，用于把期望档位收敛到合法档位。
+// 渠道集合先按"撇开推理后其余诉求都满足"的渠道收窄，避免挑出一个只有被淘汰的渠道才支持的档位。
+// 只读声明，不依赖门控模式；g 为 nil（门控关闭）时按全部候选渠道汇总。
+func (g *CapabilityGate) EffortSupport(modelName string, channelIDs []int) autorouter.EffortSupport {
+	baseModel := capabilityBaseModel(modelName)
+	if g != nil {
+		if kept := g.judgeChannels(modelName, channelIDs, g.withoutClientReasoning()).kept; len(kept) > 0 {
+			channelIDs = kept
+		}
+	}
+	var support autorouter.EffortSupport
+	for _, channelID := range channelIDs {
+		effective, ok := model.EffectiveChannelCapability(channelID, baseModel)
+		if !ok {
+			continue
+		}
+		reasoning := effective.Reasoning
+		support.Add(autorouter.ChannelReasoning{
+			Declared:    reasoning.Declared(),
+			Unsupported: reasoning.Supported != nil && !*reasoning.Supported,
+			Mandatory:   reasoning.Mandatory != nil && *reasoning.Mandatory,
+			Efforts:     reasoning.Efforts,
+		})
+	}
+	return support
+}
+
 // FilterChannels 在选定模型后对候选渠道做一次能力合取，并写一条门控事件。
 // shadow 模式只记录应被剔除的渠道，enforce 模式返回过滤后的集合。
 // 只有 soft 违规（采样参数越界）的渠道仍然保留，但会写进门控事件供排查。
@@ -181,7 +241,7 @@ func (g *CapabilityGate) FilterChannels(c *gin.Context, modelName string, channe
 	if g == nil || len(channelIDs) == 0 {
 		return channelIDs
 	}
-	judgement := g.judgeChannels(modelName, channelIDs)
+	judgement := g.judgeChannels(modelName, channelIDs, g.needs)
 	g.channelModel = judgement.baseModel
 	g.channelsEvaluated = len(channelIDs)
 	g.channelsRejected = judgement.rejected
@@ -205,7 +265,7 @@ type channelJudgement struct {
 
 // judgeChannels 逐个渠道判定"模型级声明被该渠道收窄后"的生效能力能否满足请求。
 // 它不看门控模式、不写事件，模式如何处置由调用方决定。
-func (g *CapabilityGate) judgeChannels(modelName string, channelIDs []int) channelJudgement {
+func (g *CapabilityGate) judgeChannels(modelName string, channelIDs []int, needs *capability.Needs) channelJudgement {
 	baseModel := capabilityBaseModel(modelName)
 	_, declared := model.ResolveModelCapability(baseModel)
 	judgement := channelJudgement{
@@ -227,7 +287,7 @@ func (g *CapabilityGate) judgeChannels(modelName string, channelIDs []int) chann
 			judgement.rejections[channelID] = capabilityRejection{undeclared: true}
 			continue
 		}
-		violations := normalizeGateViolations(capability.Evaluate(effective, g.needs))
+		violations := normalizeGateViolations(capability.Evaluate(effective, needs))
 		if !capability.Satisfied(violations) {
 			judgement.rejected = append(judgement.rejected, channelID)
 			judgement.rejections[channelID] = capabilityRejection{violations: violations}

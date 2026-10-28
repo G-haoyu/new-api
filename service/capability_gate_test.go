@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/service/capability"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -61,12 +62,12 @@ func TestCapabilityGateCandidateNeedsOneSatisfyingChannel(t *testing.T) {
 		return &CapabilityGate{mode: mode, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
 	}
 
-	assert.True(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1, 2}), "渠道 2 满足就够了")
-	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1}), "唯一的渠道被收窄淘汰，模型不可选")
-	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("unregistered-model", []int{1, 2}))
+	assert.True(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1, 2}, false), "渠道 2 满足就够了")
+	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1}, false), "唯一的渠道被收窄淘汰，模型不可选")
+	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("unregistered-model", []int{1, 2}, false))
 
 	shadow := newGate(CapabilityGateShadow)
-	assert.True(t, shadow.AllowsAnyChannel("gated-model", []int{1}), "shadow 只记录不拦截")
+	assert.True(t, shadow.AllowsAnyChannel("gated-model", []int{1}, false), "shadow 只记录不拦截")
 	assert.Equal(t, []string{"gated-model"}, shadow.Summary().WouldReject)
 }
 
@@ -87,7 +88,7 @@ func TestCapabilityGateExplainsModelRejection(t *testing.T) {
 	setupCapabilityGateTest(t)
 	needs := &capability.Needs{BuiltinTools: []string{"web_search"}}
 	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
-	assert.False(t, enforce.AllowsAnyChannel("gated-model", []int{1, 2}))
+	assert.False(t, enforce.AllowsAnyChannel("gated-model", []int{1, 2}, false))
 	assert.True(t, enforce.AllEvaluatedRejected())
 	message := enforce.ExplainModelRejection()
 	assert.Contains(t, message, "tools.builtin")
@@ -376,15 +377,89 @@ func TestCapabilityGateEventsCarryRequestIdentityAndSkipPassedByDefault(t *testi
 	assert.Zero(t, passed.RejectedCount)
 }
 
+// setupReasoningCapabilities 在 setupCapabilityGateTest 的库上再声明三个模型：
+//   - reasoner：支持 tools 和推理，档位 none/low/medium/high/xhigh。渠道 11 收窄到 low/medium，
+//     渠道 12 收窄到 low/medium/high，渠道 13 收窄成不支持 tools 且只留 xhigh。
+//   - forced：推理关不掉（mandatory），档位 low/medium/high。
+//   - no-think：明确不支持推理。
+func setupReasoningCapabilities(t *testing.T) {
+	t.Helper()
+	setupCapabilityGateTest(t)
+	require.NoError(t, model.DB.Create(&[]model.Model{
+		{ModelName: "reasoner", NameRule: model.NameRuleExact, Capabilities: `{"tools":{"supported":true},"reasoning":{"supported":true,"efforts":["none","low","medium","high","xhigh"]}}`},
+		{ModelName: "forced", NameRule: model.NameRuleExact, Capabilities: `{"reasoning":{"supported":true,"mandatory":true,"efforts":["low","medium","high"]}}`},
+		{ModelName: "no-think", NameRule: model.NameRuleExact, Capabilities: `{"reasoning":{"supported":false}}`},
+	}).Error)
+	require.NoError(t, model.DB.Create(&[]model.Channel{
+		{Id: 11, Name: "r1", Group: "default", Models: "reasoner", Status: 1},
+		{Id: 12, Name: "r2", Group: "default", Models: "reasoner", Status: 1},
+		{Id: 13, Name: "r3", Group: "default", Models: "reasoner", Status: 1},
+		{Id: 14, Name: "f1", Group: "default", Models: "forced", Status: 1},
+		{Id: 15, Name: "n1", Group: "default", Models: "no-think", Status: 1},
+	}).Error)
+	require.NoError(t, model.InitCapabilityCache())
+	require.NoError(t, model.SetChannelModelCapability(11, "reasoner", `{"reasoning":{"efforts":["low","medium"]}}`))
+	require.NoError(t, model.SetChannelModelCapability(12, "reasoner", `{"reasoning":{"efforts":["low","medium","high"]}}`))
+	require.NoError(t, model.SetChannelModelCapability(13, "reasoner", `{"tools":{"supported":false},"reasoning":{"efforts":["xhigh"]}}`))
+}
+
+func TestCapabilityGateCandidateCanIgnoreClientReasoning(t *testing.T) {
+	setupReasoningCapabilities(t)
+	needs := &capability.Needs{ReasoningEffort: "max"}
+	gate := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
+
+	assert.False(t, gate.AllowsAnyChannel("reasoner", []int{11, 12}, false), "客户端要的 max 没有渠道声明过")
+	assert.True(t, gate.AllowsAnyChannel("reasoner", []int{11, 12}, true), "可信的 auto 判断自己定档位，不拿客户端原来的档位淘汰候选")
+	assert.Equal(t, "max", needs.ReasoningEffort, "撇开推理只是在副本上做，不改客户端的诉求")
+}
+
+func TestCapabilityGateEffortSupportOnlyCountsChannelsThatMeetTheOtherNeeds(t *testing.T) {
+	setupReasoningCapabilities(t)
+	gate := &CapabilityGate{mode: CapabilityGateEnforce, needs: &capability.Needs{ToolsCount: 1}, modelVerdicts: map[string]capabilityVerdict{}}
+
+	// 渠道 13 是唯一声明了 xhigh 的，但它不支持 tools：请求带 tools 时挑 xhigh 只会撞上被淘汰的渠道。
+	effort, action := gate.EffortSupport("reasoner", []int{11, 12, 13}).Clamp("xhigh")
+	assert.Equal(t, autorouter.EffortSet, action)
+	assert.Equal(t, "high", effort)
+
+	// 没有门控（关闭）时按全部候选渠道汇总，只读声明。
+	var closed *CapabilityGate
+	effort, action = closed.EffortSupport("reasoner", []int{11, 12, 13}).Clamp("xhigh")
+	assert.Equal(t, autorouter.EffortSet, action)
+	assert.Equal(t, "xhigh", effort)
+
+	_, action = closed.EffortSupport("no-think", []int{15}).Clamp("high")
+	assert.Equal(t, autorouter.EffortStrip, action, "明确声明不支持推理的模型，去掉客户端的推理字段")
+	_, action = gate.EffortSupport("gated-model", []int{1, 2}).Clamp("high")
+	assert.Equal(t, autorouter.EffortKeep, action, "模型没有推理声明，不碰客户端字段")
+}
+
+func TestCapabilityGateOverrideReasoningDrivesTheFinalFilter(t *testing.T) {
+	setupReasoningCapabilities(t)
+	filter := func(action autorouter.EffortAction, effort string) []int {
+		gate := &CapabilityGate{mode: CapabilityGateEnforce, needs: &capability.Needs{ReasoningEffort: "xhigh"}, modelVerdicts: map[string]capabilityVerdict{}}
+		gate.OverrideReasoning(action, effort)
+		return gate.FilterChannels(&gin.Context{}, "reasoner", []int{11, 12})
+	}
+
+	assert.Empty(t, filter(autorouter.EffortKeep, ""), "保留客户端字段时仍按它判定：没有渠道声明 xhigh")
+	assert.Equal(t, []int{12}, filter(autorouter.EffortSet, "high"), "按 auto 写进请求体的档位判定")
+	assert.Equal(t, []int{11, 12}, filter(autorouter.EffortStrip, ""), "字段被去掉后没有推理诉求")
+
+	forced := &CapabilityGate{mode: CapabilityGateEnforce, needs: &capability.Needs{}, modelVerdicts: map[string]capabilityVerdict{}}
+	forced.OverrideReasoning(autorouter.EffortSet, "none")
+	assert.Empty(t, forced.FilterChannels(&gin.Context{}, "forced", []int{14}), "none 要显式按档位校验，推理关不掉的模型拒绝它")
+}
+
 func TestCapabilityGateCandidateJudgementWritesNoEvent(t *testing.T) {
 	setupCapabilityGateTest(t)
 	batches := captureCapabilityGateEvents(t)
 	gate := &CapabilityGate{mode: CapabilityGateEnforce, needs: &capability.Needs{ToolsCount: 1}, modelVerdicts: map[string]capabilityVerdict{}}
 
 	// 候选阶段会判定很多模型，但都不留痕；事件只给最终选中的模型写一条。
-	gate.AllowsAnyChannel("unregistered-model", []int{1})
-	gate.AllowsAnyChannel("gated-model", []int{1})
-	gate.AllowsAnyChannel("gated-model", []int{1, 2})
+	gate.AllowsAnyChannel("unregistered-model", []int{1}, false)
+	gate.AllowsAnyChannel("gated-model", []int{1}, false)
+	gate.AllowsAnyChannel("gated-model", []int{1, 2}, false)
 	assert.Equal(t, []int{2}, gate.FilterChannels(&gin.Context{}, "gated-model", []int{1, 2}))
 
 	event := receiveWithin(t, batches)[0]

@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -151,20 +152,32 @@ func Distribute() func(c *gin.Context) {
 						}
 					}
 					usable := map[string]bool{}
-					result, err := service.ResolveAutoModel(c, func(candidate string) bool {
-						if ok, seen := usable[candidate]; seen {
+					channels := map[string][]int{}
+					result, err := service.ResolveAutoModel(c, service.AutoCandidates{
+						// 候选按"模型+渠道"判定：至少有一个可用渠道的生效能力满足请求。
+						// 渠道级收窄在这里就生效，不会选中一个渠道全被收窄淘汰的模型再 503。
+						Serves: func(candidate string, ignoreClientReasoning bool) bool {
+							key := candidate
+							if ignoreClientReasoning {
+								key += "|auto-reasoning"
+							}
+							if ok, seen := usable[key]; seen {
+								return ok
+							}
+							ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
+								(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)])
+							if ok {
+								channelIDs, seen := channels[candidate]
+								if !seen {
+									channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
+									channels[candidate] = channelIDs
+								}
+								ok = len(channelIDs) > 0 && (capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs, ignoreClientReasoning))
+							}
+							usable[key] = ok
 							return ok
-						}
-						ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
-							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)])
-						if ok {
-							// 候选按"模型+渠道"判定：至少有一个可用渠道的生效能力满足请求。
-							// 渠道级收窄在这里就生效，不会选中一个渠道全被收窄淘汰的模型再 503。
-							channelIDs := usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
-							ok = len(channelIDs) > 0 && (capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs))
-						}
-						usable[candidate] = ok
-						return ok
+						},
+						Channels: func(candidate string) []int { return channels[candidate] },
 					})
 					if capabilityGate != nil {
 						capabilityGate.LogSummary(c)
@@ -179,10 +192,14 @@ func Distribute() func(c *gin.Context) {
 					}
 					modelRequest.Model = result.ResolvedModel
 					// 透传渠道（全局或渠道级）不重建请求体而是原样转发存储的字节，
-					// 所以请求体里的 model 也要改成解析后的模型，否则上游收到的仍是 "auto"，
-					// 而计费和日志记的是解析后的模型。
-					if err := rewriteJSONBodyModel(c, result.ResolvedModel); err != nil {
-						abortWithOpenAiMessage(c, http.StatusInternalServerError, "failed to rewrite the request model: "+err.Error())
+					// 所以 auto 定下的结论要直接写进存储的请求体：model 改成解析后的模型
+					// （否则上游收到的仍是 "auto"，而计费和日志记的是解析后的模型），
+					// 推理档位写进入站协议自己的字段。非透传渠道也读这份请求体。
+					protocol, _ := service.AutoRouterProtocol(c.Request.URL.Path)
+					if err := rewriteJSONBody(c, func(body []byte) ([]byte, error) {
+						return autorouter.PatchBody(body, protocol, result.ResolvedModel, result.EffortAction, result.AppliedEffort)
+					}); err != nil {
+						abortWithOpenAiMessage(c, http.StatusInternalServerError, "failed to rewrite the auto routed request: "+err.Error())
 						return
 					}
 				}

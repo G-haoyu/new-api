@@ -92,6 +92,12 @@ type ReasoningSpec struct {
 	OutputField string `json:"output_field,omitempty"`
 }
 
+// Declared 报告声明里是否写了推理维度的任何一项。
+// 什么都没写表示该模型不做推理校验，也就不知道它能不能思考。
+func (r ReasoningSpec) Declared() bool {
+	return r.Supported != nil || r.Mandatory != nil || len(r.Efforts) > 0 || r.BudgetTokens != nil
+}
+
 // ParamsSpec 采样参数值域。这里只登记值域，不做裁剪。
 type ParamsSpec struct {
 	Temperature      *FloatRange `json:"temperature,omitempty"`

@@ -420,10 +420,10 @@ func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels m
 }
 
 // serveAutoRoutingRequest 让请求经过真实的 Distribute，返回处理器看到的存储请求体。
-func serveAutoRoutingRequest(t *testing.T, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
+func serveAutoRoutingRequest(t *testing.T, path string, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
 	t.Helper()
 	router := gin.New()
-	router.POST("/v1/chat/completions", RequestId(), func(c *gin.Context) {
+	router.POST(path, RequestId(), func(c *gin.Context) {
 		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
 		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
@@ -436,7 +436,7 @@ func serveAutoRoutingRequest(t *testing.T, tokenID int, body string) (stored str
 		originalModel = c.GetString("original_model")
 		c.Status(http.StatusNoContent)
 	})
-	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
@@ -446,7 +446,7 @@ func serveAutoRoutingRequest(t *testing.T, tokenID int, body string) (stored str
 func TestDistributeAutoRewritesStoredBodyModel(t *testing.T) {
 	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
 
-	stored, originalModel, recorder := serveAutoRoutingRequest(t, 9601,
+	stored, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9601,
 		`{"model":"auto","messages":[{"role":"user","content":"hello"}],"temperature":0.2}`)
 
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
@@ -459,7 +459,7 @@ func TestDistributeNonAutoRequestKeepsStoredBody(t *testing.T) {
 	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
 	body := `{"model":"general","messages":[{"role":"user","content":"hello"}]}`
 
-	stored, originalModel, recorder := serveAutoRoutingRequest(t, 9602, body)
+	stored, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9602, body)
 
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "general", originalModel)
@@ -494,7 +494,7 @@ func TestDistributeAutoSkipsModelWhoseChannelsAreAllNarrowed(t *testing.T) {
 	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
 	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a"})
 
-	_, originalModel, recorder := serveAutoRoutingRequest(t, 9603, autoRoutingToolsBody)
+	_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9603, autoRoutingToolsBody)
 
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "m-b", originalModel, "m-a 唯一的渠道把 tools 收窄掉了，auto 应该改选 m-b 而不是选中 m-a 再 503")
@@ -504,9 +504,118 @@ func TestDistributeAutoRejectsWhenEveryCandidateIsNarrowed(t *testing.T) {
 	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
 	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a", 2: "m-b"})
 
-	_, _, recorder := serveAutoRoutingRequest(t, 9604, autoRoutingToolsBody)
+	_, _, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9604, autoRoutingToolsBody)
 
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "no auto candidate model satisfies the request")
 	assert.Contains(t, recorder.Body.String(), "tools.supported")
+}
+
+// useReasoningModels 声明两个模型并把门控切到 enforce：
+//   - reasoner：支持 tools 和推理，档位 none..xhigh。渠道 1 收窄到 low/medium，渠道 2 收窄到
+//     low/medium/high，渠道 3 收窄成不支持 tools 且只留 xhigh。
+//   - no-think：明确不支持推理，由渠道 4 服务。
+func useReasoningModels(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Create(&[]model.Model{
+		{ModelName: "reasoner", NameRule: model.NameRuleExact, Status: 1,
+			Capabilities: `{"tools":{"supported":true},"reasoning":{"supported":true,"efforts":["none","low","medium","high","xhigh"]}}`},
+		{ModelName: "no-think", NameRule: model.NameRuleExact, Status: 1, Capabilities: `{"reasoning":{"supported":false}}`},
+	}).Error)
+	require.NoError(t, model.InitCapabilityCache())
+	for channelID, narrowing := range map[int]string{
+		1: `{"reasoning":{"efforts":["low","medium"]}}`,
+		2: `{"reasoning":{"efforts":["low","medium","high"]}}`,
+		3: `{"tools":{"supported":false},"reasoning":{"efforts":["xhigh"]}}`,
+	} {
+		require.NoError(t, model.SetChannelModelCapability(channelID, "reasoner", narrowing))
+	}
+	gate := operation_setting.GetCapabilityGateSetting()
+	previous := gate.Mode
+	gate.Mode = operation_setting.CapabilityGateModeEnforce
+	t.Cleanup(func() { gate.Mode = previous })
+}
+
+// fakeJevFor 返回一个把任务判成 taskType、难度 3（对应第 4 档 xhigh）的 jev 桩地址。
+func fakeJevFor(t *testing.T, taskType string) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{` +
+			`"task_type":{"type":"choice","choice":"` + taskType + `","probabilities":{"` + taskType + `":0.9}},` +
+			`"difficulty":{"type":"score","probabilities":{"3":0.8}},` +
+			`"task_change":{"type":"noul","noul":0.1},` +
+			`"larger_model_benefit":{"type":"noul","noul":0.1}}}`))
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
+	const (
+		chatTool      = `{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}`
+		anthropicTool = `{"name":"lookup","description":"d","input_schema":{"type":"object"}}`
+		responsesTool = `{"type":"function","name":"lookup","parameters":{"type":"object"}}`
+	)
+	chatMessages := `[{"role":"user","content":"fix the bug"}]`
+	tests := []struct {
+		name      string
+		path      string
+		taskType  string // jev 判成的任务类型；空表示 jev 不可用，走兜底
+		body      string
+		wantModel string
+		wantBody  string
+	}{
+		{
+			// 请求带 tools，渠道 3 不支持 tools，剩下的渠道最高声明到 high；难度要 xhigh，收敛到 high。
+			name: "chat: a trusted decision overrides the client's effort with the converged one",
+			path: "/v1/chat/completions", taskType: "coding", wantModel: "reasoner",
+			body:     `{"model":"auto","messages":` + chatMessages + `,"reasoning_effort":"low","tools":[` + chatTool + `]}`,
+			wantBody: `{"model":"reasoner","messages":` + chatMessages + `,"reasoning_effort":"high","tools":[` + chatTool + `]}`,
+		},
+		{
+			name: "chat: a model that does not support reasoning has the client's fields stripped",
+			path: "/v1/chat/completions", taskType: "direct_qa", wantModel: "no-think",
+			body:     `{"model":"auto","messages":` + chatMessages + `,"reasoning_effort":"high"}`,
+			wantBody: `{"model":"no-think","messages":` + chatMessages + `}`,
+		},
+		{
+			name: "chat: without a trusted decision the client's effort is kept",
+			path: "/v1/chat/completions", wantModel: "reasoner",
+			body:     `{"model":"auto","messages":` + chatMessages + `,"reasoning_effort":"low"}`,
+			wantBody: `{"model":"reasoner","messages":` + chatMessages + `,"reasoning_effort":"low"}`,
+		},
+		{
+			name: "anthropic: the thinking budget is replaced by output_config.effort",
+			path: "/v1/messages", taskType: "coding", wantModel: "reasoner",
+			body: `{"model":"auto","max_tokens":4096,"messages":` + chatMessages +
+				`,"thinking":{"type":"enabled","budget_tokens":2048},"tools":[` + anthropicTool + `]}`,
+			wantBody: `{"model":"reasoner","max_tokens":4096,"messages":` + chatMessages +
+				`,"output_config":{"effort":"high"},"tools":[` + anthropicTool + `]}`,
+		},
+		{
+			name: "responses: reasoning.effort is converged and the summary is kept",
+			path: "/v1/responses", taskType: "coding", wantModel: "reasoner",
+			body: `{"model":"auto","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]}],` +
+				`"reasoning":{"effort":"low","summary":"auto"},"tools":[` + responsesTool + `]}`,
+			wantBody: `{"model":"reasoner","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]}],` +
+				`"reasoning":{"effort":"high","summary":"auto"},"tools":[` + responsesTool + `]}`,
+		},
+	}
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := setupAutoRoutingDistribute(t, []string{"reasoner"},
+				map[int][]string{1: {"reasoner"}, 2: {"reasoner"}, 3: {"reasoner"}, 4: {"no-think"}})
+			useReasoningModels(t, db)
+			autorouter_setting.GetAutoRouterSetting().TaskModels = map[string][]string{"coding": {"reasoner"}, "direct_qa": {"no-think"}}
+			if tt.taskType != "" {
+				t.Setenv("JEV_ENDPOINT", fakeJevFor(t, tt.taskType))
+			}
+
+			stored, originalModel, recorder := serveAutoRoutingRequest(t, tt.path, 9700+index, tt.body)
+
+			require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+			assert.Equal(t, tt.wantModel, originalModel)
+			assert.JSONEq(t, tt.wantBody, stored)
+		})
+	}
 }
