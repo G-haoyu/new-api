@@ -10,9 +10,10 @@ import (
 func TestSelectRoute(t *testing.T) {
 	policy := Policy{
 		TaskModels: map[string][]string{
-			"coding":    {"coder", "coder-b"},
-			"direct_qa": {"chat"},
-			"review":    {"gone"},
+			"code.build":   {"coder", "coder-b"},
+			"code":         {"code-class"},
+			"general.chat": {"chat"},
+			"code.ops":     {"gone"},
 		},
 		DefaultModels:          []string{"general"},
 		DifficultyEfforts:      []string{"low", "medium", "high", "xhigh"},
@@ -25,7 +26,18 @@ func TestSelectRoute(t *testing.T) {
 	decide := func(taskType string, difficulty int, taskChange, benefit float64) *Decision {
 		return &Decision{TaskType: taskType, TaskTypeProbability: 0.9, Difficulty: difficulty, TaskChange: p(taskChange), LargerModelBenefit: p(benefit)}
 	}
-	coderHigh := &Route{TaskType: "coding", Model: "coder", Effort: "high"}
+	// spread splits the probability over task types; the chosen one is the
+	// most likely.
+	spread := func(probabilities map[string]float64) *Decision {
+		d := &Decision{Difficulty: 1, TaskChange: p(1), TaskTypeProbabilities: probabilities}
+		for taskType, probability := range probabilities {
+			if probability > d.TaskTypeProbability {
+				d.TaskType, d.TaskTypeProbability = taskType, probability
+			}
+		}
+		return d
+	}
+	coderHigh := &Route{Profile: "code.build", Model: "coder", Effort: "high"}
 	tests := []struct {
 		name          string
 		decision      *Decision
@@ -35,22 +47,25 @@ func TestSelectRoute(t *testing.T) {
 		wantInherited bool
 		wantOK        bool
 	}{
-		{"task picks model, difficulty picks effort", decide("coding", 2, 1, 0.1), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "medium"}, false, true},
-		{"simple question", decide("direct_qa", 1, 1, 0.1), nil, nil, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
-		{"larger model benefit raises effort", decide("coding", 3, 1, 0.7), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
-		{"rung past the table uses the last effort", decide("coding", 6, 1, 0.1), nil, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
-		{"skips unavailable task model", decide("coding", 1, 1, 0.1), nil, []string{"coder-b-low", "general"}, Route{TaskType: "coding", Model: "coder-b", Effort: "low"}, false, true},
-		{"unconfigured task type uses defaults", decide("research", 4, 1, 0.1), nil, nil, Route{Model: "general", Effort: "xhigh"}, false, true},
-		{"unavailable task models use defaults", decide("review", 1, 1, 0.1), nil, []string{"general"}, Route{Model: "general", Effort: "low"}, false, true},
-		{"continuation keeps model and effort", decide("direct_qa", 1, 0.1, 0.1), coderHigh, nil, *coderHigh, false, true},
-		{"continuation may raise effort", decide("debugging", 4, 0.1, 0.1), coderHigh, nil, Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, false, true},
-		{"new task switches model", decide("direct_qa", 1, 0.9, 0.1), coderHigh, nil, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
-		{"continuation leaves an unavailable model", decide("direct_qa", 1, 0.1, 0.1), coderHigh, []string{"chat"}, Route{TaskType: "direct_qa", Model: "chat", Effort: "low"}, false, true},
+		{"task picks model, difficulty picks effort", decide("code.build", 2, 1, 0.1), nil, nil, Route{Profile: "code.build", Model: "coder", Effort: "medium"}, false, true},
+		{"simple question", decide("general.chat", 1, 1, 0.1), nil, nil, Route{Profile: "general.chat", Model: "chat", Effort: "low"}, false, true},
+		{"larger model benefit raises effort", decide("code.build", 3, 1, 0.7), nil, nil, Route{Profile: "code.build", Model: "coder", Effort: "xhigh"}, false, true},
+		{"rung past the table uses the last effort", decide("code.build", 6, 1, 0.1), nil, nil, Route{Profile: "code.build", Model: "coder", Effort: "xhigh"}, false, true},
+		{"skips unavailable task model", decide("code.build", 1, 1, 0.1), nil, []string{"coder-b-low", "general"}, Route{Profile: "code.build", Model: "coder-b", Effort: "low"}, false, true},
+		{"unavailable task models use the class", decide("code.ops", 1, 1, 0.1), nil, []string{"code-class", "general"}, Route{Profile: "code", Model: "code-class", Effort: "low"}, false, true},
+		{"task type without a list uses the class", decide("code.frontend", 1, 1, 0.1), nil, nil, Route{Profile: "code", Model: "code-class", Effort: "low"}, false, true},
+		{"class without a list uses defaults", decide("general.research", 4, 1, 0.1), nil, nil, Route{Model: "general", Effort: "xhigh"}, false, true},
+		{"split task types trust their class", spread(map[string]float64{"code.build": 0.35, "code.ops": 0.3, "general.chat": 0.35}), nil, nil, Route{Profile: "code", Model: "code-class", Effort: "low"}, false, true},
+		{"no trusted class inherits", spread(map[string]float64{"code.build": 0.4, "general.chat": 0.4, "unknown": 0.2}), coderHigh, nil, *coderHigh, true, true},
+		{"continuation keeps model and effort", decide("general.chat", 1, 0.1, 0.1), coderHigh, nil, *coderHigh, false, true},
+		{"continuation may raise effort", decide("code.ops", 4, 0.1, 0.1), coderHigh, nil, Route{Profile: "code.build", Model: "coder", Effort: "xhigh"}, false, true},
+		{"new task switches model", decide("general.chat", 1, 0.9, 0.1), coderHigh, nil, Route{Profile: "general.chat", Model: "chat", Effort: "low"}, false, true},
+		{"continuation leaves an unavailable model", decide("general.chat", 1, 0.1, 0.1), coderHigh, []string{"chat"}, Route{Profile: "general.chat", Model: "chat", Effort: "low"}, false, true},
 		{"unknown inherits previous", decide(TaskTypeUnknown, 1, 0.1, 0.1), coderHigh, nil, *coderHigh, true, true},
-		{"low probability inherits previous", &Decision{TaskType: "direct_qa", TaskTypeProbability: 0.3, Difficulty: 1}, coderHigh, nil, *coderHigh, true, true},
+		{"low probability inherits previous", &Decision{TaskType: "general.chat", TaskTypeProbability: 0.3, Difficulty: 1}, coderHigh, nil, *coderHigh, true, true},
 		{"jev failure without previous uses defaults", nil, nil, nil, Route{Model: "general", Effort: "medium"}, true, true},
 		{"unavailable previous uses defaults", nil, coderHigh, []string{"general"}, Route{Model: "general", Effort: "medium"}, true, true},
-		{"nothing available", decide("coding", 1, 1, 0.1), nil, []string{}, Route{}, false, false},
+		{"nothing available", decide("code.build", 1, 1, 0.1), nil, []string{}, Route{}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,6 +78,12 @@ func TestSelectRoute(t *testing.T) {
 			assert.Equal(t, tt.wantInherited, inherited)
 		})
 	}
+}
+
+func TestRouteFallback(t *testing.T) {
+	assert.Equal(t, "leaf", Route{Profile: "code.build"}.Fallback())
+	assert.Equal(t, "class", Route{Profile: "code"}.Fallback())
+	assert.Equal(t, "default", Route{}.Fallback())
 }
 
 func TestResolveVariant(t *testing.T) {

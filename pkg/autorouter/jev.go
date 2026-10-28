@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -16,11 +18,57 @@ import (
 // so results from different templates are never compared or cached together.
 // v2: state carries the previous human instruction next to the current one.
 // v3: state is an object with separate current_task/previous_task fields.
-const QuestionsVersion = "autorouter_v3"
+// v4: task types are <class>.<leaf> under the code/data/general classes.
+const QuestionsVersion = "autorouter_v4"
+
+// TaxonomyVersion changes whenever the task types change, so a stored ranking
+// keyed by older task types is never used for the new ones.
+const TaxonomyVersion = "2"
 
 // TaskTypeUnknown means the instruction cannot be classified on its own
 // ("继续", "ok", a choice among options from earlier context).
 const TaskTypeUnknown = "unknown"
+
+// taskTypeCriteria are the leaf task types jev chooses among. A task type is
+// <class>.<leaf>; the class is not asked, its probability is the sum of its
+// leaves'. Each description follows how the leaderboards behind the task
+// type describe the tasks they measure.
+var taskTypeCriteria = map[string]string{
+	"code.build":        "编写或修改程序逻辑与配置：实现功能、按问题报告修复缺陷、审查代码，保证改动后程序行为正确",
+	"code.frontend":     "按需求开发或修改用户界面：网页、App、小程序、桌面客户端的页面、UI 组件、样式、交互与渲染性能，以用户看到的外观与操作体验为准",
+	"code.ops":          "在终端或服务器上执行命令，完成部署、环境配置、服务运维与线上故障排查",
+	"data.analysis":     "对给定的表格或数据求出确定的答案：统计、筛选、去重、关联、识别趋势，或在 CSV、JSON、Markdown 等格式间转换",
+	"data.business":     "运用业务与管理知识做判断：分析经营或运营数据、比较方案、制定计划，给出可执行的商业决策建议",
+	"general.research":  "围绕需要最新信息或多方来源的问题检索、核实并整合资料，给出带来源的结论或报告",
+	"general.browser":   "在网页应用里逐步点击、填写、核对，完成跨多个页面的操作任务，如汇总多页记录、批量修改订单、合并重复工单",
+	"general.writing":   "产出或加工文字内容：撰写文案、文章、邮件、故事、诗歌等，或对给定文本总结、改写、润色、翻译",
+	"general.design":    "制作或改版成品文件：Word 文档、PDF、幻灯片的版式、排版、配色、图表与品牌样式",
+	"general.knowledge": "解释概念、原理或某领域的专业事实，说明某件事是什么、为什么或如何运作",
+	"general.chat":      "日常对话与生活类求助：寒暄、闲聊、家常做法、个人化的推荐或经验分享",
+	TaskTypeUnknown:     "离开前文完全无法判断要做什么：如“继续”“ok”“好的”、对前文方案的确认或选择、只用“这个”“上面”指代前文且没有说明动作",
+}
+
+// TaskClass returns the class of a task type: "code" for "code.build", empty
+// for unknown.
+func TaskClass(taskType string) string {
+	class, _, found := strings.Cut(taskType, ".")
+	if !found {
+		return ""
+	}
+	return class
+}
+
+// TaskTypes lists the leaf task types in sorted order, without unknown.
+func TaskTypes() []string {
+	var types []string
+	for taskType := range taskTypeCriteria {
+		if taskType != TaskTypeUnknown {
+			types = append(types, taskType)
+		}
+	}
+	slices.Sort(types)
+	return types
+}
 
 type jevQuestion struct {
 	Type         string `json:"type"`
@@ -34,17 +82,7 @@ var questions = map[string]jevQuestion{
 	"task_type": {
 		Type:         "choice",
 		Instructions: "只根据这条用户消息本身判断用户要完成的任务类型，不要猜测消息之外的上下文。只要能判断出类型就选具体类型，即使缺少细节。",
-		Criteria: map[string]string{
-			"coding":         "要求编写、修改、重构代码或配置",
-			"debugging":      "要求定位错误、分析根因、修复故障",
-			"operations":     "要求部署、运维、监控，或处理基础设施、线上故障",
-			"research":       "要求查资料、核实事实、比较方案或做技术调研",
-			"review":         "要求审查代码、测试、报告或验收结果",
-			"data_operation": "要求清洗、转换、统计、导入或导出数据",
-			"summarization":  "要求总结、改写、提取、翻译或转换格式",
-			"direct_qa":      "知识问答、概念解释、寒暄，或可以直接给出的建议",
-			TaskTypeUnknown:  "离开前文完全无法判断要做什么：如“继续”“ok”“好的”、对前文方案的确认或选择、只用“这个”“上面”指代前文且没有说明动作",
-		},
+		Criteria:     taskTypeCriteria,
 	},
 	"difficulty": {
 		Type:         "score",
@@ -153,6 +191,9 @@ type Decision struct {
 	TaskTypeConfidence *float64 `json:"task_type_confidence,omitempty"`
 	// TaskTypeProbability is the probability of the chosen task type.
 	TaskTypeProbability float64 `json:"task_type_probability"`
+	// TaskTypeProbabilities holds every task type's probability; a class's
+	// probability is the sum over its task types.
+	TaskTypeProbabilities map[string]float64 `json:"task_type_probabilities,omitempty"`
 	// Difficulty is the most likely rung, 1-based; DifficultyScore is jev's
 	// probability-weighted position, 0-based.
 	Difficulty         int      `json:"difficulty"`
@@ -168,12 +209,13 @@ func (r *JevResponse) Decision(hasPrevious bool) Decision {
 	taskType := r.Answers["task_type"]
 	difficulty := r.Answers["difficulty"]
 	decision := Decision{
-		TaskType:            taskType.Choice,
-		TaskTypeConfidence:  taskType.Confidence,
-		TaskTypeProbability: taskType.Probabilities[taskType.Choice],
-		DifficultyScore:     difficulty.Score,
-		TaskChange:          r.Answers["task_change"].Noul,
-		LargerModelBenefit:  r.Answers["larger_model_benefit"].Noul,
+		TaskType:              taskType.Choice,
+		TaskTypeConfidence:    taskType.Confidence,
+		TaskTypeProbability:   taskType.Probabilities[taskType.Choice],
+		TaskTypeProbabilities: taskType.Probabilities,
+		DifficultyScore:       difficulty.Score,
+		TaskChange:            r.Answers["task_change"].Noul,
+		LargerModelBenefit:    r.Answers["larger_model_benefit"].Noul,
 	}
 	bestRung, bestProbability := -1, -1.0
 	for key, probability := range difficulty.Probabilities {

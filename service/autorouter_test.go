@@ -42,10 +42,10 @@ func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.S
 		require.NoError(t, common.DecodeJson(r.Body, &payload))
 		assert.Equal(t, "Bearer "+testJevAPIKey, r.Header.Get("Authorization"))
 		assert.Equal(t, testJevModel, payload.Model)
-		taskType, difficulty := "direct_qa", "0"
+		taskType, difficulty := "general.chat", "0"
 		switch payload.State["current_task"] {
 		case "hard":
-			taskType, difficulty = "coding", "3"
+			taskType, difficulty = "code.build", "3"
 		case "ok":
 			taskType = autorouter.TaskTypeUnknown
 		}
@@ -69,10 +69,11 @@ func useAutoRouterSetting(t *testing.T, endpoint string, timeoutMs int) {
 	setting.Enabled = true
 	setting.JevTimeoutMs = timeoutMs
 	setting.TaskModels = map[string][]string{
-		"coding":    {"coder"},
-		"direct_qa": {"chat"},
+		"code.build":   {"coder"},
+		"general.chat": {"chat"},
 	}
 	setting.DefaultModels = []string{"general"}
+	setting.RankSources = map[string]string{"taxonomy_version": autorouter.TaxonomyVersion}
 	setting.DifficultyEfforts = []string{"low", "medium", "high", "xhigh"}
 	setting.DefaultEffort = "medium"
 }
@@ -94,7 +95,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	first, err := ResolveAutoModel(newAutoRouterContext(9101, body), allModelsAvailable)
 	require.NoError(t, err)
 	assert.Equal(t, "coder-xhigh", first.ResolvedModel)
-	assert.Equal(t, autorouter.Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, first.Route)
+	assert.Equal(t, autorouter.Route{Profile: "code.build", Model: "coder", Effort: "xhigh"}, first.Route)
 	assert.Equal(t, autorouter.SourceJev, first.Source)
 	require.NotNil(t, first.Jev)
 	assert.NotEmpty(t, first.Jev.Response)
@@ -106,7 +107,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	assert.Equal(t, autorouter.SourceCache, second.Source)
 	assert.Nil(t, second.Jev, "a cache hit must not carry jev output")
 	assert.Equal(t, int32(1), calls.Load())
-	assert.Equal(t, "coding", common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload))
+	assert.Equal(t, "code.build", common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload))
 
 	_, err = ResolveAutoModel(newAutoRouterContext(9102, body), allModelsAvailable)
 	require.NoError(t, err)
@@ -133,7 +134,7 @@ func TestResolveAutoModelFollowsPreviousRoute(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "coder-xhigh", continued.ResolvedModel, "a continuation keeps the model and never lowers the effort")
 	assert.Equal(t, autorouter.SourceJev, continued.Source)
-	assert.Equal(t, "direct_qa", continued.Decision.TaskType)
+	assert.Equal(t, "general.chat", continued.Decision.TaskType)
 }
 
 func TestResolveAutoModelEncryptedSubAgentInheritsSessionRoute(t *testing.T) {
@@ -249,6 +250,8 @@ func TestResolveAutoModelTraceSpans(t *testing.T) {
 		assert.Equal(t, "coder-xhigh", attr(route, "langfuse.observation.metadata.resolved_model"))
 		assert.Equal(t, "coder", attr(route, "langfuse.trace.metadata.auto_router_model"))
 		assert.Equal(t, "xhigh", attr(route, "langfuse.trace.metadata.auto_router_effort"))
+		assert.Equal(t, "code.build", attr(route, "langfuse.observation.metadata.route_profile"))
+		assert.Equal(t, "leaf", attr(route, "langfuse.trace.metadata.auto_router_fallback"))
 		assert.Empty(t, attr(route, "langfuse.observation.level"))
 
 		c, exporter = newTracedContext(t, 9601, body)

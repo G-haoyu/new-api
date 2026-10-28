@@ -1,6 +1,9 @@
 package autorouter
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // AutoModel is the model name a client sends to let the gateway pick one.
 const AutoModel = "auto"
@@ -13,7 +16,8 @@ var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh",
 // Policy holds the tunable routing rules: the task type picks the model, the
 // difficulty picks the reasoning effort.
 type Policy struct {
-	// TaskModels maps a jev task type to its models in preference order.
+	// TaskModels maps a task type or task class to its models in preference
+	// order.
 	TaskModels map[string][]string
 	// DefaultModels serve a task type with no available model in TaskModels
 	// and a request with no usable classification.
@@ -36,10 +40,53 @@ type Policy struct {
 
 // Route is a routing choice before it is resolved to a usable model name.
 type Route struct {
-	// TaskType is the task type the model was chosen for, empty for defaults.
-	TaskType string `json:"task_type,omitempty"`
-	Model    string `json:"model"`
-	Effort   string `json:"effort"`
+	// Profile is the ranking the model came from: a task type, its class, or
+	// empty for the default models.
+	Profile string `json:"profile,omitempty"`
+	Model   string `json:"model"`
+	Effort  string `json:"effort"`
+}
+
+// Fallback names the level of Profile: leaf, class or default.
+func (r Route) Fallback() string {
+	switch {
+	case r.Profile == "":
+		return "default"
+	case TaskClass(r.Profile) == "":
+		return "class"
+	default:
+		return "leaf"
+	}
+}
+
+// trustedProfiles returns the rankings a decision may route by, most specific
+// first: the chosen task type and its class when the task type is trusted,
+// else the most probable class when that is trusted. The class of a task type
+// sums the probabilities of its task types. Nil means the decision is not
+// trusted.
+func trustedProfiles(decision *Decision, policy Policy) []string {
+	if decision == nil || decision.Difficulty <= 0 {
+		return nil
+	}
+	if class := TaskClass(decision.TaskType); class != "" && decision.TaskTypeProbability >= policy.MinTaskTypeProbability {
+		return []string{decision.TaskType, class}
+	}
+	classes := map[string]float64{}
+	for taskType, probability := range decision.TaskTypeProbabilities {
+		if class := TaskClass(taskType); class != "" {
+			classes[class] += probability
+		}
+	}
+	best, bestProbability := "", 0.0
+	for _, class := range slices.Sorted(maps.Keys(classes)) {
+		if classes[class] > bestProbability {
+			best, bestProbability = class, classes[class]
+		}
+	}
+	if best == "" || bestProbability < policy.MinTaskTypeProbability {
+		return nil
+	}
+	return []string{best}
 }
 
 // SelectRoute maps a jev decision to a route. decision is nil when jev failed;
@@ -47,9 +94,8 @@ type Route struct {
 // inherited reports that the decision was not used and the route came from
 // previous or the defaults. ok is false when no model is available at all.
 func SelectRoute(decision *Decision, previous *Route, policy Policy, available func(model string) bool) (route Route, inherited, ok bool) {
-	trusted := decision != nil && decision.TaskType != "" && decision.TaskType != TaskTypeUnknown &&
-		decision.TaskTypeProbability >= policy.MinTaskTypeProbability && decision.Difficulty > 0
-	if !trusted {
+	profiles := trustedProfiles(decision, policy)
+	if profiles == nil {
 		if previous != nil && ModelAvailable(previous.Model, available) {
 			return *previous, true, true
 		}
@@ -72,11 +118,13 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, available f
 		if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
 			effort = previous.Effort
 		}
-		return Route{TaskType: previous.TaskType, Model: previous.Model, Effort: effort}, false, true
+		return Route{Profile: previous.Profile, Model: previous.Model, Effort: effort}, false, true
 	}
 
-	if model, found := firstAvailable(policy.TaskModels[decision.TaskType], available); found {
-		return Route{TaskType: decision.TaskType, Model: model, Effort: effort}, false, true
+	for _, profile := range profiles {
+		if model, found := firstAvailable(policy.TaskModels[profile], available); found {
+			return Route{Profile: profile, Model: model, Effort: effort}, false, true
+		}
 	}
 	model, found := firstAvailable(policy.DefaultModels, available)
 	return Route{Model: model, Effort: effort}, false, found

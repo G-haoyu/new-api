@@ -2,67 +2,58 @@ package modelrank
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 )
 
 type ranker struct {
-	pool        *pool
-	minCoverage float64
-	// defaultFloor is the share of the best general score the cheap leading
+	pool *pool
+	// defaultFloor is the share of the best default score the cheap leading
 	// default models need.
 	defaultFloor float64
-	usageBonus   float64
-	// latencyTolerance is the latency ratio below which two models count as
-	// equally fast.
-	latencyTolerance float64
-	// ranked holds, per scoring profile, the models with enough coverage in
-	// descending score order.
+	// ranked holds, per profile, the models with enough coverage in descending
+	// score order.
 	ranked map[string][]*scored
 }
 
 type scored struct {
-	c        *candidate
-	Quality  float64 // weighted mean of the covered metrics
-	Coverage float64 // covered share of the profile's metric weight
-	Usage    float64 // bonus from OpenRouter task usage
-	Score    float64 // Quality + Usage
+	c       *candidate
+	Score   float64 // mean of the covered metrics
+	Covered int     // metrics of the profile the model has data for
 }
 
-// score ranks every candidate under every profile. The usage bonus scales
-// with the model's share of the profile's busiest tag relative to the most
-// used model there, so popularity only reorders models of similar quality.
+// minCovered is the number of a profile's metrics a model needs data for to
+// be ranked under it: half of them, rounded up.
+func minCovered(metrics int) int {
+	return (metrics + 1) / 2
+}
+
+// score ranks every candidate under every profile. Ties go to the cheaper
+// model, then to the id.
 func (r *ranker) score() {
 	r.ranked = map[string][]*scored{}
-	for profile, weights := range taskWeights {
-		topShare := 0.0
-		for _, c := range r.pool.list {
-			topShare = max(topShare, usageShare(c, profile))
-		}
+	for profile, metrics := range profiles {
 		var list []*scored
 		for _, c := range r.pool.list {
-			var sum, covered float64
-			for metric, w := range weights {
+			s := &scored{c: c}
+			for _, metric := range metrics {
 				if v, ok := c.Norm[metric]; ok {
-					sum += w * v
-					covered += w
+					s.Score += v
+					s.Covered++
 				}
 			}
-			if covered < r.minCoverage-1e-9 {
+			if s.Covered < minCovered(len(metrics)) {
 				continue
 			}
-			s := &scored{c: c, Quality: sum / covered, Coverage: covered}
-			if topShare > 0 {
-				s.Usage = r.usageBonus * usageShare(c, profile) / topShare
-			}
-			s.Score = s.Quality + s.Usage
+			s.Score /= float64(s.Covered)
 			list = append(list, s)
 		}
 		slices.SortFunc(list, func(a, b *scored) int {
 			if c := cmp.Compare(b.Score, a.Score); c != 0 {
+				return c
+			}
+			if c := cmp.Compare(a.c.Price, b.c.Price); c != 0 {
 				return c
 			}
 			return cmp.Compare(a.c.ID, b.c.ID)
@@ -71,46 +62,17 @@ func (r *ranker) score() {
 	}
 }
 
-func usageShare(c *candidate, profile string) float64 {
-	share := 0.0
-	for _, tag := range usageTags[profile] {
-		share = max(share, c.Usage[tag])
-	}
-	return share
-}
-
-// evidenceCandidates are the models any profile ranks; their latency feeds
-// the frontier and is recorded with them.
-func (r *ranker) evidenceCandidates() []*candidate {
-	seen := map[*candidate]bool{}
-	var list []*candidate
-	for _, profile := range slices.Sorted(maps.Keys(r.ranked)) {
-		for _, s := range r.ranked[profile] {
-			if !seen[s.c] {
-				seen[s.c] = true
-				list = append(list, s.c)
-			}
-		}
-	}
-	return list
-}
-
-// dominates reports whether a is at least as good as b on score, price and
-// latency and better on one of them. Latency is a 30-minute snapshot, so it
-// only counts when both are known and differ by more than latencyTolerance
-// times.
-func (r *ranker) dominates(a, b *scored) bool {
-	latencyKnown := a.c.LatencyMs > 0 && b.c.LatencyMs > 0
-	slower := latencyKnown && a.c.LatencyMs > b.c.LatencyMs*r.latencyTolerance
-	faster := latencyKnown && a.c.LatencyMs*r.latencyTolerance < b.c.LatencyMs
-	if a.Score < b.Score || a.c.Price > b.c.Price || slower {
+// dominates reports whether a is at least as good as b on score and price and
+// better on one of them.
+func dominates(a, b *scored) bool {
+	if a.Score < b.Score || a.c.Price > b.c.Price {
 		return false
 	}
-	return a.Score > b.Score || a.c.Price < b.c.Price || faster
+	return a.Score > b.Score || a.c.Price < b.c.Price
 }
 
 // frontier returns the profile's models within defaultFloor of the best that
-// are on the score / price / latency Pareto frontier.
+// are on the score / price Pareto frontier.
 func (r *ranker) frontier(profile string) map[*candidate]bool {
 	list := r.ranked[profile]
 	on := map[*candidate]bool{}
@@ -118,7 +80,7 @@ func (r *ranker) frontier(profile string) map[*candidate]bool {
 		if s.Score < list[0].Score*r.defaultFloor {
 			break
 		}
-		if !slices.ContainsFunc(list, func(o *scored) bool { return r.dominates(o, s) }) {
+		if !slices.ContainsFunc(list, func(o *scored) bool { return dominates(o, s) }) {
 			on[s.c] = true
 		}
 	}
@@ -129,63 +91,62 @@ func (r *ranker) frontier(profile string) map[*candidate]bool {
 // default_models are autorouter setting values; the rest records how they
 // were derived.
 type Mapping struct {
-	Sources       map[string]string             `json:"rank_sources"`
-	Weights       map[string]map[string]float64 `json:"weights"`
-	TaskModels    map[string][]string           `json:"task_models"`
-	DefaultModels []string                      `json:"default_models"`
-	Evidence      map[string][]evidence         `json:"evidence"`
-	Models        map[string]modelInfo          `json:"models"`
+	Sources       map[string]string     `json:"rank_sources"`
+	Profiles      map[string][]string   `json:"profiles"`
+	TaskModels    map[string][]string   `json:"task_models"`
+	DefaultModels []string              `json:"default_models"`
+	StaleMetrics  []string              `json:"stale_metrics,omitempty"`
+	Evidence      map[string][]evidence `json:"evidence"`
+	Models        map[string]modelInfo  `json:"models"`
 }
 
 type evidence struct {
 	Model    string  `json:"model"`
 	Score    float64 `json:"score"`
-	Quality  float64 `json:"quality"`
-	Coverage float64 `json:"coverage"`
-	Usage    float64 `json:"usage,omitempty"`
+	Covered  int     `json:"covered"`
 	Frontier bool    `json:"frontier,omitempty"`
 }
 
 type modelInfo struct {
 	OpenRouterID string             `json:"openrouter_id"`
 	Price        float64            `json:"price_per_mtok"`
-	LatencyMs    float64            `json:"latency_p50_ms,omitempty"`
 	Efforts      []string           `json:"efforts,omitempty"`
 	Metrics      map[string]float64 `json:"metrics"`
+	Normalized   map[string]float64 `json:"normalized"`
 }
 
 func round(v float64) float64 {
 	return math.Round(v*1e4) / 1e4
 }
 
-// mapping routes each task to every model covering it in score order: the
+// mapping routes each profile to every model covering it in score order: the
 // router takes the first one the caller can use, so whatever the deployment
-// carries, the task lands on its best deployed model by the task's own
-// ranking. Score order already puts every model after the ones dominating it.
-// Default models serve unknown and unmapped tasks: the general-profile
-// frontier, cheapest first, then every other general model in score order.
+// carries, a task lands on its best deployed model by its own ranking. Score
+// order already puts every model after the ones dominating it. The default
+// profile becomes the default list: its frontier, cheapest first, then every
+// other model in score order.
 func (r *ranker) mapping(sources map[string]string) (*Mapping, error) {
 	m := &Mapping{
 		Sources:    sources,
-		Weights:    taskWeights,
+		Profiles:   profiles,
 		TaskModels: map[string][]string{},
 		Evidence:   map[string][]evidence{},
 		Models:     map[string]modelInfo{},
 	}
-	for _, task := range TaskOrder {
-		for _, s := range r.ranked[task] {
-			m.TaskModels[task] = append(m.TaskModels[task], s.c.Name)
+	for profile := range profiles {
+		if len(r.ranked[profile]) == 0 {
+			return nil, fmt.Errorf("profile %s has no model covering half of its metrics", profile)
 		}
-		if len(m.TaskModels[task]) == 0 {
-			return nil, fmt.Errorf("task %s has no model with coverage >= %.2f", task, r.minCoverage)
+		if profile == DefaultProfile {
+			continue
+		}
+		for _, s := range r.ranked[profile] {
+			m.TaskModels[profile] = append(m.TaskModels[profile], s.c.Name)
 		}
 	}
 
-	general := r.ranked[generalProfile]
-	if len(general) == 0 {
-		return nil, errors.New("no model covers the general profile")
-	}
-	frontier := r.frontier(generalProfile)
+	general := r.ranked[DefaultProfile]
+	frontier := r.frontier(DefaultProfile)
 	var defaults []*scored
 	for _, s := range general {
 		if frontier[s.c] {
@@ -202,28 +163,29 @@ func (r *ranker) mapping(sources map[string]string) (*Mapping, error) {
 		m.DefaultModels = append(m.DefaultModels, s.c.Name)
 	}
 
-	for _, profile := range append(slices.Clone(TaskOrder), generalProfile) {
+	for profile, list := range r.ranked {
 		frontier := r.frontier(profile)
-		for _, s := range r.ranked[profile] {
+		for _, s := range list {
 			m.Evidence[profile] = append(m.Evidence[profile], evidence{
 				Model:    s.c.Name,
 				Score:    round(s.Score),
-				Quality:  round(s.Quality),
-				Coverage: round(s.Coverage),
-				Usage:    round(s.Usage),
+				Covered:  s.Covered,
 				Frontier: frontier[s.c],
 			})
-			metrics := map[string]float64{}
-			for metric, v := range s.c.Raw {
-				metrics[metric] = round(v)
-			}
-			m.Models[s.c.Name] = modelInfo{
+			info := modelInfo{
 				OpenRouterID: s.c.ID,
 				Price:        round(s.c.Price),
-				LatencyMs:    round(s.c.LatencyMs),
 				Efforts:      s.c.Efforts,
-				Metrics:      metrics,
+				Metrics:      map[string]float64{},
+				Normalized:   map[string]float64{},
 			}
+			for metric, v := range s.c.Raw {
+				info.Metrics[metric] = round(v)
+			}
+			for metric, v := range s.c.Norm {
+				info.Normalized[metric] = round(v)
+			}
+			m.Models[s.c.Name] = info
 		}
 	}
 	return m, nil

@@ -209,13 +209,14 @@ func TestBuildState(t *testing.T) {
 func TestDecisionPicksMostLikelyDifficultyRung(t *testing.T) {
 	confidence, score, change := 0.7, 1.4, 0.2
 	resp := JevResponse{Answers: map[string]JevAnswer{
-		"task_type":   {Type: "choice", Choice: "coding", Confidence: &confidence, Probabilities: map[string]float64{"coding": 0.8, "debugging": 0.2}},
+		"task_type":   {Type: "choice", Choice: "code.build", Confidence: &confidence, Probabilities: map[string]float64{"code.build": 0.8, "code.ops": 0.2}},
 		"difficulty":  {Type: "score", Score: &score, Probabilities: map[string]float64{"0": 0.1, "1": 0.5, "2": 0.4}},
 		"task_change": {Type: "noul", Noul: &change},
 	}}
 	decision := resp.Decision(true)
-	assert.Equal(t, "coding", decision.TaskType)
+	assert.Equal(t, "code.build", decision.TaskType)
 	assert.Equal(t, 0.8, decision.TaskTypeProbability)
+	assert.Equal(t, map[string]float64{"code.build": 0.8, "code.ops": 0.2}, decision.TaskTypeProbabilities)
 	assert.Equal(t, 2, decision.Difficulty)
 	assert.Equal(t, &change, decision.TaskChange)
 	assert.Nil(t, decision.LargerModelBenefit)

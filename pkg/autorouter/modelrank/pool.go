@@ -1,7 +1,9 @@
 package modelrank
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -18,12 +20,12 @@ type candidate struct {
 	Name    string
 	Price   float64 // USD per 1M tokens at 3 prompt : 1 completion
 	Efforts []string
+	// Vision reports image input support; vision metrics need it.
+	Vision bool
+	// Created is when OpenRouter listed the model, in unix seconds.
+	Created int64
 	Raw     map[string]float64
 	Norm    map[string]float64
-	Usage   map[string]float64 // tag → share of the tag's requests
-	// LatencyMs is the lowest p50 time to first token over the model's
-	// endpoints in the last 30 minutes; 0 when unknown.
-	LatencyMs float64
 }
 
 type pool struct {
@@ -40,7 +42,6 @@ func newPool() *pool {
 
 func (p *pool) add(c *candidate) {
 	c.Raw = map[string]float64{}
-	c.Usage = map[string]float64{}
 	p.list = append(p.list, c)
 	p.bySlug[c.Slug] = c
 	p.bySlug[c.ID] = c
@@ -146,9 +147,54 @@ func (c *candidate) record(metric string, value float64) {
 	if _, ok := metricScales[metric]; !ok {
 		panic(fmt.Sprintf("metric %s has no scale", metric))
 	}
+	if visionMetrics[metric] && !c.Vision {
+		return
+	}
 	if old, ok := c.Raw[metric]; !ok || value > old {
 		c.Raw[metric] = value
 	}
+}
+
+// dropStale removes the metrics that stopped tracking new models: a metric is
+// stale when none of the probe newest candidates its source rates has it.
+// Vision metrics only probe candidates that take images. It returns the stale
+// metrics in sorted order.
+func (p *pool) dropStale(probe int) []string {
+	newest := slices.Clone(p.list)
+	slices.SortStableFunc(newest, func(a, b *candidate) int { return cmp.Compare(b.Created, a.Created) })
+	var stale []string
+	for _, metric := range slices.Sorted(maps.Keys(metricScales)) {
+		source, _, _ := strings.Cut(metric, ".")
+		rated, covered := 0, false
+		for _, c := range newest {
+			if rated == probe || covered {
+				break
+			}
+			if !c.ratedBy(source) || visionMetrics[metric] && !c.Vision {
+				continue
+			}
+			rated++
+			_, covered = c.Raw[metric]
+		}
+		if covered || rated < probe {
+			continue
+		}
+		stale = append(stale, metric)
+		for _, c := range p.list {
+			delete(c.Raw, metric)
+		}
+	}
+	return stale
+}
+
+// ratedBy reports whether any metric of source has a value for the model.
+func (c *candidate) ratedBy(source string) bool {
+	for metric := range c.Raw {
+		if strings.HasPrefix(metric, source+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // normalize maps every metric to 0..1 across the candidates that have it.
