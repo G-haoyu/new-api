@@ -64,7 +64,7 @@ Artificial Analysis 免费接口只返回指数，不含单项 benchmark 分数�
 
 ## 4. 任务分类
 
-两级分类：3 个一级类（`code`、`data`、`general`）、11 个二级类，外加 `unknown`。一级类参照 OpenRouter 任务分类的 `code:*`、`data:*` 与通用标签划分。jev 只在二级类和 `unknown` 中单选；一级类不单独提问，它的概率等于下属二级类概率之和。
+两级分类：3 个一级类（`code`、`data`、`general`）、12 个二级类，外加 `unknown`。一级类参照 OpenRouter 任务分类的 `code:*`、`data:*` 与通用标签划分。jev 只在二级类和 `unknown` 中单选；一级类不单独提问，它的概率等于下属二级类概率之和。
 
 每个一级类和二级类都有自己的画像（指标集），一级类画像用于二级类不可信或二级列表无可用模型时（见第 7 节）。`general` 的一级画像就是默认画像，对应 `default_models`。
 
@@ -80,11 +80,12 @@ Artificial Analysis 免费接口只返回指数，不含单项 benchmark 分数�
 | | `data.analysis` | 对给定的表格或数据求出确定的答案：统计、筛选、去重、关联、识别趋势，或在 CSV、JSON、Markdown 等格式间转换 | `lb.data_analysis`，`lma.math` |
 | | `data.business` | 运用业务与管理知识做判断：分析经营或运营数据、比较方案、制定计划，给出可执行的商业决策建议 | `aa.strategy_ops`，`lma.business_industry` |
 | `general` 通用 | — | — | `aa.intelligence`，`lma.overall`，`lb.reasoning` |
-| | `general.research` | 围绕需要最新信息或多方来源的问题检索、核实并整合资料，给出带来源的结论或报告 | `lb.research`，`lma.search`，`lma.factuality` |
+| | `general.search` | 联网查询一个具体问题的当前答案：天气、新闻、价格、版本发布、某个事实或链接，简短作答并给出出处 | `lma.search`，`lma.factuality` |
+| | `general.research` | 围绕一个开放主题广泛检索多方资料，比较、核实并综合，产出带引用的调研结论或报告 | `lb.research` |
 | | `general.browser` | 在网页应用里逐步点击、填写、核对，完成跨多个页面的操作任务，如汇总多页记录、批量修改订单、合并重复工单 | `lb.browser` |
 | | `general.writing` | 产出或加工文字内容：撰写文案、文章、邮件、故事、诗歌等，或对给定文本总结、改写、润色、翻译 | `lma.writing_industry`，`lma.creative_writing`，`lma.document` |
 | | `general.design` | 制作或改版成品文件：Word 文档、PDF、幻灯片的版式、排版、配色、图表与品牌样式 | `lb.design`，`da.slides` |
-| | `general.knowledge` | 解释概念、原理或某领域的专业事实，说明某件事是什么、为什么或如何运作 | `lma.factuality`，`lma.expert`，`aa.intelligence` |
+| | `general.knowledge` | 解释概念、原理或某领域的专业事实，说明某件事是什么、为什么或如何运作 | `lma.expert`，`aa.intelligence` |
 | | `general.chat` | 日常对话与生活类求助：寒暄、闲聊、家常做法、个人化的推荐或经验分享 | `lma.overall`，`lma.multi_turn` |
 | — | `unknown` | 离开前文完全无法判断要做什么：如"继续""ok""好的"、对前文方案的确认或选择、只用"这个""上面"指代前文且没有说明动作 | — |
 
@@ -95,7 +96,7 @@ Artificial Analysis 免费接口只返回指数，不含单项 benchmark 分数�
 - **`code.build` 同时覆盖开发、修复和审查**：公开榜单没有把这几类工作测出不同排序的指标，`lb.coding`（按 bug 报告修复真实缺陷）、`lb.long_agentic`（多轮变更需求下扩展应用）、`lma.coding`（编程对话的人类偏好）共同代表后端代码能力。
 - **`code.frontend` 单列**：`lma.webdev`、`da.website`、`da.uicomponent` 都按人类对前端产出的偏好排序，与后端开发的排序差异明显。
 - **`data.analysis` 与 `data.business` 分开**：前者是对数据本身的处理与计算，后者是在数据和信息上推理并给出决策（`aa.strategy_ops`）。
-- **`general.research` 与 `general.knowledge` 分开**：前者要搜集外部信息并成文（`lb.research`、`lma.search`），后者直接凭模型知识回答。
+- **`general.search`、`general.research`、`general.knowledge` 分开**：`general.search` 是联网查一个确定问题的当前答案，`lma.search` 按人类对联网作答的偏好排序，`lma.factuality` 衡量事实是否答对；`general.research` 是多来源的长链路调研，由 LiveBench 2.0 的 `lb.research` 衡量；`general.knowledge` 不联网、凭模型知识解释，由 `lma.expert` 与 `aa.intelligence` 衡量。
 - **`general.design` 用 `lb.design` 与 `da.slides`**：前者按渲染后的视觉与结构检查打分，后者是人类对幻灯片的偏好，两者都直接测量成品文档。
 - **Design Arena 其余分类不用**：`gamedev`、`3d`、`svg`、`logo` 等不属于互联网公司的常规工作；`dataviz` 测的是图表页面生成，与 `data.analysis` 的统计、清洗、SQL 不是同一能力。
 - **不用语言类榜单**：中文、英文等分榜按提问语言切分，测的不是任务能力，任何画像都不使用。
@@ -133,7 +134,7 @@ LiveBench、LMArena、Artificial Analysis 的模型名统一走同一套匹配�
 
 ### 7.1 列表
 
-`task_models` 以画像名为键，共 13 个列表（11 个二级类 + `code`、`data` 两个一级类）。每个列表包含所有满足覆盖要求的模型，按分数降序；同分时价格低的在前，再相同按 id。列表不截断，运行时取第一个当前可用的模型。
+`task_models` 以画像名为键，共 14 个列表（12 个二级类 + `code`、`data` 两个一级类）。每个列表包含所有满足覆盖要求的模型，按分数降序；同分时价格低的在前，再相同按 id。列表不截断，运行时取第一个当前可用的模型。
 
 `default_models` 按 `general` 一级画像生成，同时充当 `general` 的一级列表：
 
@@ -182,7 +183,7 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 
 | 位置 | 改动 |
 | --- | --- |
-| `pkg/autorouter/jev.go` | `task_type` 选项换成 11 个二级类 + `unknown`，判定标准用第 4.1 节的文案；二级类名的前缀即一级类 |
+| `pkg/autorouter/jev.go` | `task_type` 选项换成 12 个二级类 + `unknown`，判定标准用第 4.1 节的文案；二级类名的前缀即一级类 |
 | `pkg/autorouter/modelrank/metrics.go` | 指标目录换成第 3 节；`taskWeights` 换成画像 → 指标列表；`code`、`data` 一级画像，`general` 一级画像即默认画像；`designArenaCategories` 只保留 `website`、`uicomponent`、`slides`；删除 `usageTags`、`openRouterBenchmarks` |
 | `pkg/autorouter/modelrank/sources.go` | 新增 Artificial Analysis 免费接口与 Design Arena 接口加载，无 Design Arena key 时经 OpenRouter `/benchmarks` 读取；新增指标新鲜度统计；LMArena 增加 `creative_writing` 与两个 `industry_*` 分类；删除 OpenRouter 自测 benchmark（GPQA、τ-bench）、AA 指数转发、任务用量、端点延迟的加载 |
 | `pkg/autorouter/modelrank/rank.go` | 等权平均与按指标数的覆盖要求；删除用量加分；帕累托比较只看分数与价格 |
@@ -195,4 +196,4 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 - **小榜覆盖有限**：`lb.*` 只含最新版本跑过的模型（`20261025` 为 31 个），`lma.document`、`lma.search` 各四十余个；两指标画像只要有其中一项即可上榜；`general.browser` 只用 `lb.browser`，只覆盖 LiveBench 收录的模型。未收录模型落到一级列表。
 - **Artificial Analysis 免费接口只有指数**：单项 benchmark（如 Terminal-Bench、FrontierCode）需要付费接口，因此 `aa.*` 只用 Intelligence 指数（v5）和 Strategy & Ops 能力指数。接口仍返回 `coding_index`、`agentic_index` 字段，但它们已不在 v5 指数体系中、不再随新模型更新，不使用。Intelligence v5 只覆盖 2026-03 之后发布的模型。
 - **LMArena 分榜新旧不一**：文档、搜索榜可能比文本榜旧一个月以上，以 `rank_sources` 记录的日期为准。
-- **分类准确率待校准**：11 个二级类的判定标准需要用标注集验证 jev 的选择准确率，`min_task_type_probability` 随之调整；一级类兜底保证二级类判错时仍落在相近的榜单上。
+- **分类准确率待校准**：12 个二级类的判定标准需要用标注集验证 jev 的选择准确率，`min_task_type_probability` 随之调整；一级类兜底保证二级类判错时仍落在相近的榜单上。
