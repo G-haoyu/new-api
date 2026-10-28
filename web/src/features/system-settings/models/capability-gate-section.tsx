@@ -334,7 +334,7 @@ export function CapabilityGateSection(props: {
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Gate events older than this are removed by the channel test task.'
+                        'Gate events older than this are removed hourly by a scheduled task. ClickHouse log databases expire them through the table TTL instead.'
                       )}
                     </FormDescription>
                     <FormMessage />
@@ -357,7 +357,7 @@ export function CapabilityGateSection(props: {
                   </FormControl>
                   <FormDescription>
                     {t(
-                      'When on, every channel-level decision is logged, including requests where all channels satisfy the declaration. Turn it off to keep only violations.'
+                      'When on, every request writes one event, including requests where all channels satisfy the declaration. Use it briefly for troubleshooting; leave it off to keep only violations.'
                     )}
                   </FormDescription>
                 </FormItem>

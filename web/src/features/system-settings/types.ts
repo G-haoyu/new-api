@@ -43,11 +43,18 @@ export type CapabilityGateEvent = {
   action: CapabilityGateEventAction
   /** 本次判定评估的渠道数。 */
   channels_evaluated: number
-  /** 逗号分隔的被淘汰渠道 ID；通过/soft 事件为空。 */
+  /** 逗号分隔的被淘汰渠道 ID；通过/soft 事件为空。过长时会被截断。 */
   rejected_channels: string
+  /** 被淘汰渠道的准确数量；历史事件没有这一列，此时为 0。 */
+  rejected_count: number
   /** JSON 字符串：CapabilityGateEventDimension[] */
   dimensions: string
   created_at: number
+  /** 与使用日志、请求尝试记录同源，可用来对上请求的真实结果；历史事件为空。 */
+  request_id: string
+  user_id: number
+  token_id: number
+  using_group: string
 }
 
 export type CapabilityGateEventQuery = {
@@ -55,6 +62,7 @@ export type CapabilityGateEventQuery = {
   page_size: number
   model?: string
   action?: CapabilityGateEventAction
+  request_id?: string
   start_time?: number
   end_time?: number
 }

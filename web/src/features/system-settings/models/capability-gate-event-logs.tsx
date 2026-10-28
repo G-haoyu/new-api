@@ -21,6 +21,7 @@ import { RefreshCw } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { CopyButton } from '@/components/copy-button'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -113,20 +114,29 @@ export function CapabilityGateEventLogs() {
   const [actionDraft, setActionDraft] = useState<
     CapabilityGateEventAction | typeof ALL_ACTIONS
   >(ALL_ACTIONS)
+  const [requestDraft, setRequestDraft] = useState('')
   const [modelFilter, setModelFilter] = useState('')
   const [actionFilter, setActionFilter] = useState<
     CapabilityGateEventAction | typeof ALL_ACTIONS
   >(ALL_ACTIONS)
+  const [requestFilter, setRequestFilter] = useState('')
   const [page, setPage] = useState(1)
 
   const eventsQuery = useQuery({
-    queryKey: ['capability-gate-events', page, modelFilter, actionFilter],
+    queryKey: [
+      'capability-gate-events',
+      page,
+      modelFilter,
+      actionFilter,
+      requestFilter,
+    ],
     queryFn: async () => {
       const response = await getCapabilityGateEvents({
         p: page,
         page_size: PAGE_SIZE,
         model: modelFilter || undefined,
         action: actionFilter === ALL_ACTIONS ? undefined : actionFilter,
+        request_id: requestFilter || undefined,
       })
       if (!response.success || !response.data) {
         throw new Error(response.message || t('Failed to load event logs'))
@@ -167,7 +177,7 @@ export function CapabilityGateEventLogs() {
   } else {
     content = (
       <div className='overflow-hidden rounded-md border'>
-        <Table className='min-w-[900px]'>
+        <Table className='min-w-[1100px]'>
           <TableHeader>
             <TableRow className='bg-muted/40 hover:bg-muted/40'>
               <TableHead>{t('Time')}</TableHead>
@@ -178,11 +188,15 @@ export function CapabilityGateEventLogs() {
               <TableHead className='min-w-[320px]'>
                 {t('Violated dimensions')}
               </TableHead>
+              <TableHead className='min-w-[220px]'>{t('Request ID')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {events.map((event) => {
               const dimensions = parseDimensions(event.dimensions)
+              // 渠道 ID 列表过长时会被截断，准确数量以 rejected_count 为准。
+              const shownRejected = countRejected(event.rejected_channels)
+              const rejectedTotal = Math.max(event.rejected_count, shownRejected)
               return (
                 <TableRow key={event.id}>
                   <TableCell>
@@ -198,11 +212,17 @@ export function CapabilityGateEventLogs() {
                   </TableCell>
                   <TableCell className='tabular-nums'>
                     {event.channels_evaluated
-                      ? `${event.channels_evaluated - countRejected(event.rejected_channels)} / ${event.channels_evaluated}`
+                      ? `${event.channels_evaluated - rejectedTotal} / ${event.channels_evaluated}`
                       : '-'}
                   </TableCell>
                   <TableCell className='font-mono text-xs'>
                     {event.rejected_channels || '-'}
+                    {rejectedTotal > shownRejected && (
+                      <span className='text-muted-foreground'>
+                        {' '}
+                        +{rejectedTotal - shownRejected}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <ul className='space-y-1 text-xs'>
@@ -235,6 +255,32 @@ export function CapabilityGateEventLogs() {
                       ))}
                     </ul>
                   </TableCell>
+                  <TableCell>
+                    {event.request_id ? (
+                      <div className='flex items-center gap-1'>
+                        <span className='font-mono text-xs break-all'>
+                          {event.request_id}
+                        </span>
+                        <CopyButton
+                          value={event.request_id}
+                          size='icon'
+                          className='size-7'
+                          tooltip={t('Copy request ID')}
+                          aria-label={t('Copy request ID')}
+                        />
+                      </div>
+                    ) : (
+                      '-'
+                    )}
+                    {event.user_id > 0 && (
+                      <p className='text-muted-foreground mt-0.5 text-xs'>
+                        {t('User')} {event.user_id} · {t('Token')}{' '}
+                        {event.token_id}
+                        {event.using_group &&
+                          ` · ${t('Group')} ${event.using_group}`}
+                      </p>
+                    )}
+                  </TableCell>
                 </TableRow>
               )
             })}
@@ -251,7 +297,7 @@ export function CapabilityGateEventLogs() {
           <h3 className='text-sm font-semibold'>{t('Capability gate logs')}</h3>
           <p className='text-muted-foreground mt-0.5 text-xs'>
             {t(
-              'Decisions are recorded only when a request violates a declared capability.'
+              'Violations are always recorded. Passed decisions are recorded only when Record passed decisions is on.'
             )}
           </p>
         </div>
@@ -272,7 +318,7 @@ export function CapabilityGateEventLogs() {
       </div>
 
       <div className='space-y-4 p-4 sm:p-5'>
-        <div className='grid gap-3 md:grid-cols-3'>
+        <div className='grid gap-3 md:grid-cols-4'>
           <div className='space-y-1.5'>
             <Label htmlFor='capability-gate-model'>{t('Model')}</Label>
             <Input
@@ -309,6 +355,15 @@ export function CapabilityGateEventLogs() {
               </SelectContent>
             </Select>
           </div>
+          <div className='space-y-1.5'>
+            <Label htmlFor='capability-gate-request-id'>{t('Request ID')}</Label>
+            <Input
+              id='capability-gate-request-id'
+              value={requestDraft}
+              placeholder={t('Exact request ID')}
+              onChange={(event) => setRequestDraft(event.target.value)}
+            />
+          </div>
           <div className='flex items-end gap-2'>
             <Button
               type='button'
@@ -316,6 +371,7 @@ export function CapabilityGateEventLogs() {
                 setPage(1)
                 setModelFilter(modelDraft.trim())
                 setActionFilter(actionDraft)
+                setRequestFilter(requestDraft.trim())
               }}
             >
               {t('Search')}
@@ -326,8 +382,10 @@ export function CapabilityGateEventLogs() {
               onClick={() => {
                 setModelDraft('')
                 setActionDraft(ALL_ACTIONS)
+                setRequestDraft('')
                 setModelFilter('')
                 setActionFilter(ALL_ACTIONS)
+                setRequestFilter('')
                 setPage(1)
               }}
             >
