@@ -28,6 +28,9 @@ func SsoHoidcLogin(c *gin.Context) {
 	}
 
 	serverAddr := strings.TrimRight(system_setting.ServerAddress, "/")
+	if serverAddr == "" && common.HoidcRedirectOrigin != "" {
+		serverAddr = strings.TrimRight(common.HoidcRedirectOrigin, "/")
+	}
 	if serverAddr == "" {
 		scheme := "http"
 		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
