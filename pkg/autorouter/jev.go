@@ -19,11 +19,12 @@ import (
 // v2: state carries the previous human instruction next to the current one.
 // v3: state is an object with separate current_task/previous_task fields.
 // v4: task types are <class>.<leaf> under the code/data/general classes.
-const QuestionsVersion = "autorouter_v4"
+// v5: general.search covers live fact lookups apart from general.research.
+const QuestionsVersion = "autorouter_v5"
 
 // TaxonomyVersion changes whenever the task types change, so a stored ranking
 // keyed by older task types is never used for the new ones.
-const TaxonomyVersion = "2"
+const TaxonomyVersion = "3"
 
 // TaskTypeUnknown means the instruction cannot be classified on its own
 // ("继续", "ok", a choice among options from earlier context).
@@ -39,7 +40,8 @@ var taskTypeCriteria = map[string]string{
 	"code.ops":          "在终端或服务器上执行命令，完成部署、环境配置、服务运维与线上故障排查",
 	"data.analysis":     "对给定的表格或数据求出确定的答案：统计、筛选、去重、关联、识别趋势，或在 CSV、JSON、Markdown 等格式间转换",
 	"data.business":     "运用业务与管理知识做判断：分析经营或运营数据、比较方案、制定计划，给出可执行的商业决策建议",
-	"general.research":  "围绕需要最新信息或多方来源的问题检索、核实并整合资料，给出带来源的结论或报告",
+	"general.search":    "联网查询一个具体问题的当前答案：天气、新闻、价格、版本发布、某个事实或链接，简短作答并给出出处",
+	"general.research":  "围绕一个开放主题广泛检索多方资料，比较、核实并综合，产出带引用的调研结论或报告",
 	"general.browser":   "在网页应用里逐步点击、填写、核对，完成跨多个页面的操作任务，如汇总多页记录、批量修改订单、合并重复工单",
 	"general.writing":   "产出或加工文字内容：撰写文案、文章、邮件、故事、诗歌等，或对给定文本总结、改写、润色、翻译",
 	"general.design":    "制作或改版成品文件：Word 文档、PDF、幻灯片的版式、排版、配色、图表与品牌样式",
