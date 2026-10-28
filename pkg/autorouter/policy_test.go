@@ -176,6 +176,8 @@ func TestPickByQualityCostBandAndProbing(t *testing.T) {
 	pick, ok, _ := runPick(debugging, 0.05, 0.02)
 	require.True(t, ok)
 	require.Len(t, pick.Band, 4)
+	assert.Equal(t, 0.05, pick.Lambda)
+	assert.Equal(t, 0.02, pick.Delta)
 	// 价格在带内按对数位置打折：最便宜的折 0，最贵的折满 λ=0.05，8 美元折 0.05*ln2/ln5。
 	wantUtility := map[string]float64{"opus": 0.986 - 0.05*math.Log(2)/math.Log(5), "fable": 0.919, "sonnet": 0.948, "astra": 0.896}
 	wantTied := map[string]bool{"opus": true, "sonnet": true}

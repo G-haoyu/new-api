@@ -30,6 +30,9 @@ type Candidate struct {
 // Pick 是一次质量/成本选择的过程，写进决策留痕。
 type Pick struct {
 	Chosen string `json:"chosen"`
+	// Lambda 和 Delta 是这次比较用的 CostLambda 与 ScoreTieDelta（已限制到合法范围）。
+	Lambda float64 `json:"lambda"`
+	Delta  float64 `json:"delta"`
 	// Band 是进入比较的候选：分数不低于最高分减去 CostLambda 与 ScoreTieDelta 之和的可用模型。
 	Band []Candidate `json:"band"`
 }
@@ -104,7 +107,7 @@ func pickByQualityCost(models []string, scores map[string]float64, lambda, delta
 			chosen, tied = i, true
 		}
 	}
-	return Pick{Chosen: band[chosen].Model, Band: band}, true
+	return Pick{Chosen: band[chosen].Model, Lambda: lambda, Delta: delta, Band: band}, true
 }
 
 // priceRange 返回带内的价格下限和上限。免费（价格为 0）的模型不拉低下限，
