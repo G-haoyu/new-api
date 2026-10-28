@@ -97,6 +97,21 @@ func ModelAvailable(model string, available func(model string) bool) bool {
 	return ok
 }
 
+// AnyModelAvailable reports whether the defaults or any task list holds a
+// usable model. Without one no classification can lead to a route, so the
+// caller rejects the request before paying for the classifier call.
+func (p Policy) AnyModelAvailable(available func(model string) bool) bool {
+	if _, found := firstAvailable(p.DefaultModels, available); found {
+		return true
+	}
+	for _, models := range p.TaskModels {
+		if _, found := firstAvailable(models, available); found {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveVariant returns the usable name of model at effort: the exact
 // effort-suffixed name, else the bare name (the provider's default effort),
 // else the nearest supported effort, preferring the stronger one on a tie so a
@@ -115,6 +130,10 @@ func ResolveVariant(model, effort string, available func(model string) bool) (st
 	start := slices.Index(effortLadder, effort)
 	if start < 0 {
 		start = slices.Index(effortLadder, "medium")
+		// 下面的循环从相邻档位找起，不会探测 medium 本身。
+		if available(model + "-medium") {
+			return model + "-medium", true
+		}
 	}
 	for distance := 1; distance < len(effortLadder); distance++ {
 		for _, rank := range []int{start + distance, start - distance} {
@@ -129,7 +148,7 @@ func ResolveVariant(model, effort string, available func(model string) bool) (st
 // Where a route came from.
 const (
 	SourceJev     = "jev"     // jev ran and its decision was trusted
-	SourceCache   = "cache"   // the same instruction was routed before
+	SourceCache   = "cache"   // the trusted decision came from the cache; the route is recomputed
 	SourceInherit = "inherit" // jev was untrusted or failed; previous route kept
 	SourceDefault = "default" // no usable signal and no previous route
 )

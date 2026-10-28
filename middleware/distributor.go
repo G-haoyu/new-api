@@ -156,9 +156,13 @@ func Distribute() func(c *gin.Context) {
 							return ok
 						}
 						ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
-							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)]) &&
-							len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0 &&
-							(capabilityGate == nil || capabilityGate.Allows(candidate))
+							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)])
+						if ok {
+							// 候选按"模型+渠道"判定：至少有一个可用渠道的生效能力满足请求。
+							// 渠道级收窄在这里就生效，不会选中一个渠道全被收窄淘汰的模型再 503。
+							channelIDs := usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
+							ok = len(channelIDs) > 0 && (capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs))
+						}
 						usable[candidate] = ok
 						return ok
 					})

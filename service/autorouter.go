@@ -25,15 +25,24 @@ import (
 )
 
 const (
-	autoRouterCacheNamespace = "new-api:autorouter:v2"
+	autoRouterCacheNamespace = "new-api:autorouter:v3"
 	ginKeyAutoRouterResult   = "autorouter_result"
+	// autoRouterFailureTTL 是 jev 调用失败后不再重试的时长。agent 循环里同一条指令会
+	// 连发很多请求，jev 故障时不记一下，每个请求都要白等一次超时；
+	// 时间取得短，是为了 jev 恢复后能很快重新分类，而不是把兜底结果钉住整个缓存周期。
+	autoRouterFailureTTL = 60 * time.Second
 )
 
-// autoRouterEntry is cached per instruction so every call of one agent loop
-// resolves to the same route without calling jev again.
+// autoRouterEntry 按键的用途存不同的字段：
+//   - d: 键只存 jev 的判断（Decision），或"刚失败过"的标记（Failed）。
+//     同一条指令的后续请求不再调 jev，但路由每次按各自的可用集合重新算，
+//     所以一次带图请求因为能力不满足换了模型，不会影响之后的纯文本请求。
+//   - r: 和 s: 键存最近一次算出的路由（Route），供下一条指令"沿用上一轮模型"，
+//     以及没有可读文字的子 agent 继承会话路由。
 type autoRouterEntry struct {
 	Route    autorouter.Route     `json:"route"`
 	Decision *autorouter.Decision `json:"decision,omitempty"`
+	Failed   bool                 `json:"failed,omitempty"`
 }
 
 var (
@@ -132,6 +141,8 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 	cache := getAutoRouterCache()
 	ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
 	switch {
+	case !policy.AnyModelAvailable(available):
+		// 一个可用模型都没有时，分类得出什么都选不出路由，不必先花一次 jev 调用。
 	case instruction.Auxiliary:
 	case instruction.Text == "" && instruction.Session != "":
 		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found && autorouter.ModelAvailable(entry.Route.Model, available) {
@@ -148,19 +159,22 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		decisionKey := autoRouterCacheKey("d", tokenID, autorouter.QuestionsVersion, state["current_task"], state["previous_task"])
 		routeKey := autoRouterCacheKey("r", tokenID, instruction.Text)
 
-		// A cached route whose model is no longer usable is routed again.
-		if entry, found, _ := cache.Get(decisionKey); found && autorouter.ModelAvailable(entry.Route.Model, available) {
-			result.Route, result.Decision, result.Source = entry.Route, entry.Decision, autorouter.SourceCache
-			ok = true
-		} else {
-			var previous *autorouter.Route
-			if instruction.Previous != "" {
-				if entry, found, _ := cache.Get(autoRouterCacheKey("r", tokenID, instruction.Previous)); found {
-					previous = &entry.Route
-				}
+		var previous *autorouter.Route
+		if instruction.Previous != "" {
+			if entry, found, _ := cache.Get(autoRouterCacheKey("r", tokenID, instruction.Previous)); found {
+				previous = &entry.Route
 			}
-			routeInput["previous_route"] = previous
+		}
+		routeInput["previous_route"] = previous
 
+		var decision *autorouter.Decision
+		fromCache := false
+		if entry, found, _ := cache.Get(decisionKey); found && (entry.Decision != nil || entry.Failed) {
+			decision, fromCache = entry.Decision, entry.Decision != nil
+			if entry.Failed {
+				route.Warning = "jev failed recently, not retried"
+			}
+		} else {
 			client := autorouter.JevClient{
 				Endpoint:   os.Getenv("JEV_ENDPOINT"),
 				Model:      os.Getenv("JEV_MODEL"),
@@ -183,38 +197,40 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 			if err != nil {
 				result.Jev.Error = err.Error()
 				route.Warning = "jev failed: " + err.Error()
+				_ = cache.SetWithTTL(decisionKey, autoRouterEntry{Failed: true}, autoRouterFailureTTL)
 			} else {
 				result.Jev.Response = response.ResponseBody
-				decision := response.Decision(instruction.Previous != "")
-				result.Decision = &decision
+				decided := response.Decision(instruction.Previous != "")
+				decision = &decided
 				jev.Model = response.Model
 				jevOutput := map[string]any{"answers": response.Answers}
 				if response.LatencyMs != nil {
 					jevOutput["server_latency_ms"] = *response.LatencyMs
 				}
 				jev.Output = jevOutput
+				_ = cache.SetWithTTL(decisionKey, autoRouterEntry{Decision: decision}, ttl)
 			}
 			otelRuntime.FinishObservation(jevSpan, jev)
+		}
 
-			var inherited bool
-			result.Route, inherited, ok = autorouter.SelectRoute(result.Decision, previous, policy, available)
-			if inherited && err == nil {
-				route.Warning = "jev decision untrusted"
-			}
-			switch {
-			case !inherited:
-				result.Source = autorouter.SourceJev
-			case previous != nil && result.Route == *previous:
-				result.Source = autorouter.SourceInherit
-			}
-			// A fallback is cached too, so a jev outage costs one timeout per
-			// instruction rather than one per agent-loop call, and the loop
-			// keeps one model.
-			if ok {
-				entry := autoRouterEntry{Route: result.Route, Decision: result.Decision}
-				_ = cache.SetWithTTL(decisionKey, entry, ttl)
-				_ = cache.SetWithTTL(routeKey, entry, ttl)
-			}
+		// 路由每次按本次请求自己的可用集合重新算，缓存里只有 jev 的判断。
+		var inherited bool
+		result.Decision = decision
+		result.Route, inherited, ok = autorouter.SelectRoute(decision, previous, policy, available)
+		if inherited && decision != nil {
+			route.Warning = "jev decision untrusted"
+		}
+		switch {
+		case !inherited && fromCache:
+			result.Source = autorouter.SourceCache
+		case !inherited:
+			result.Source = autorouter.SourceJev
+		case previous != nil && result.Route == *previous:
+			result.Source = autorouter.SourceInherit
+		}
+		// 兜底路由也记下来，下一条指令才能沿用同一个模型，agent 循环不会来回换模型。
+		if ok {
+			_ = cache.SetWithTTL(routeKey, autoRouterEntry{Route: result.Route}, ttl)
 		}
 		// The session remembers its latest human instruction's route for the
 		// sub-agents whose task arrives without readable text.

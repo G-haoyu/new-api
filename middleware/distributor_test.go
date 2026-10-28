@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -369,7 +370,7 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 // setupAutoRoutingDistribute 建一个内存库，每个渠道服务 models 里的全部模型（分组 default），
 // 并打开内存渠道缓存。auto 配置里不设 JEV_ENDPOINT，分类立即失败，
 // 路由固定走 default_models 的第一个可用模型，不需要起 jev 桩。
-func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels map[int][]string) {
+func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels map[int][]string) *gorm.DB {
 	t.Helper()
 	require.NoError(t, i18n.Init())
 
@@ -415,6 +416,7 @@ func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels m
 			require.NoError(t, sqlDB.Close())
 		}
 	})
+	return db
 }
 
 // serveAutoRoutingRequest 让请求经过真实的 Distribute，返回处理器看到的存储请求体。
@@ -462,4 +464,49 @@ func TestDistributeNonAutoRequestKeepsStoredBody(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "general", originalModel)
 	assert.Equal(t, body, stored)
+}
+
+// useEnforcedToolCapabilities 给 models 里每个模型声明"支持 tools"，并把门控切到 enforce。
+// narrowed 里的 (渠道, 模型) 再被渠道收窄成不支持 tools。
+func useEnforcedToolCapabilities(t *testing.T, db *gorm.DB, models []string, narrowed map[int]string) {
+	t.Helper()
+	for _, modelName := range models {
+		require.NoError(t, db.Create(&model.Model{
+			ModelName: modelName, NameRule: model.NameRuleExact, Status: 1,
+			Capabilities: `{"tools":{"supported":true},"streaming":{"supported":true}}`,
+		}).Error)
+	}
+	require.NoError(t, model.InitCapabilityCache())
+	for channelID, modelName := range narrowed {
+		require.NoError(t, model.SetChannelModelCapability(channelID, modelName, `{"tools":{"supported":false}}`))
+	}
+
+	gate := operation_setting.GetCapabilityGateSetting()
+	previous := gate.Mode
+	gate.Mode = operation_setting.CapabilityGateModeEnforce
+	t.Cleanup(func() { gate.Mode = previous })
+}
+
+const autoRoutingToolsBody = `{"model":"auto","messages":[{"role":"user","content":"hello"}],` +
+	`"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`
+
+func TestDistributeAutoSkipsModelWhoseChannelsAreAllNarrowed(t *testing.T) {
+	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
+	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a"})
+
+	_, originalModel, recorder := serveAutoRoutingRequest(t, 9603, autoRoutingToolsBody)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "m-b", originalModel, "m-a 唯一的渠道把 tools 收窄掉了，auto 应该改选 m-b 而不是选中 m-a 再 503")
+}
+
+func TestDistributeAutoRejectsWhenEveryCandidateIsNarrowed(t *testing.T) {
+	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
+	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a", 2: "m-b"})
+
+	_, _, recorder := serveAutoRoutingRequest(t, 9604, autoRoutingToolsBody)
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "no auto candidate model satisfies the request")
+	assert.Contains(t, recorder.Body.String(), "tools.supported")
 }

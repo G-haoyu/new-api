@@ -53,16 +53,21 @@ func setupCapabilityGateTest(t *testing.T) {
 	})
 }
 
-func TestCapabilityGateModelLevelShadowAndEnforce(t *testing.T) {
+// 渠道 1 把 tools 收窄成不支持，渠道 2 没有收窄记录、沿用模型级声明（支持 tools）。
+func TestCapabilityGateCandidateNeedsOneSatisfyingChannel(t *testing.T) {
 	setupCapabilityGateTest(t)
 	needs := &capability.Needs{ToolsCount: 1}
+	newGate := func(mode CapabilityGateMode) *CapabilityGate {
+		return &CapabilityGate{mode: mode, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
+	}
 
-	shadow := &CapabilityGate{mode: CapabilityGateShadow, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
-	assert.True(t, shadow.Allows("gated-model"))
+	assert.True(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1, 2}), "渠道 2 满足就够了")
+	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("gated-model", []int{1}), "唯一的渠道被收窄淘汰，模型不可选")
+	assert.False(t, newGate(CapabilityGateEnforce).AllowsAnyChannel("unregistered-model", []int{1, 2}))
 
-	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
-	assert.True(t, enforce.Allows("gated-model"))
-	assert.False(t, enforce.Allows("unregistered-model"))
+	shadow := newGate(CapabilityGateShadow)
+	assert.True(t, shadow.AllowsAnyChannel("gated-model", []int{1}), "shadow 只记录不拦截")
+	assert.Equal(t, []string{"gated-model"}, shadow.Summary().WouldReject)
 }
 
 func TestCapabilityGateChannelFilter(t *testing.T) {
@@ -82,7 +87,7 @@ func TestCapabilityGateExplainsModelRejection(t *testing.T) {
 	setupCapabilityGateTest(t)
 	needs := &capability.Needs{BuiltinTools: []string{"web_search"}}
 	enforce := &CapabilityGate{mode: CapabilityGateEnforce, needs: needs, modelVerdicts: map[string]capabilityVerdict{}}
-	assert.False(t, enforce.Allows("gated-model"))
+	assert.False(t, enforce.AllowsAnyChannel("gated-model", []int{1, 2}))
 	assert.True(t, enforce.AllEvaluatedRejected())
 	message := enforce.ExplainModelRejection()
 	assert.Contains(t, message, "tools.builtin")
@@ -369,6 +374,24 @@ func TestCapabilityGateEventsCarryRequestIdentityAndSkipPassedByDefault(t *testi
 	assert.Equal(t, model.CapabilityGateEventPassed, passed.Action)
 	assert.Empty(t, passed.RejectedChannels)
 	assert.Zero(t, passed.RejectedCount)
+}
+
+func TestCapabilityGateCandidateJudgementWritesNoEvent(t *testing.T) {
+	setupCapabilityGateTest(t)
+	batches := captureCapabilityGateEvents(t)
+	gate := &CapabilityGate{mode: CapabilityGateEnforce, needs: &capability.Needs{ToolsCount: 1}, modelVerdicts: map[string]capabilityVerdict{}}
+
+	// 候选阶段会判定很多模型，但都不留痕；事件只给最终选中的模型写一条。
+	gate.AllowsAnyChannel("unregistered-model", []int{1})
+	gate.AllowsAnyChannel("gated-model", []int{1})
+	gate.AllowsAnyChannel("gated-model", []int{1, 2})
+	assert.Equal(t, []int{2}, gate.FilterChannels(&gin.Context{}, "gated-model", []int{1, 2}))
+
+	event := receiveWithin(t, batches)[0]
+	assert.Equal(t, "gated-model", event.Model)
+	assert.Equal(t, model.CapabilityGateEventFiltered, event.Action)
+	assert.Equal(t, 2, event.ChannelsEvaluated)
+	assert.Equal(t, 1, event.RejectedCount)
 }
 
 func TestCapabilityGateEventTruncatesRejectedChannelsOnAWholeChannelId(t *testing.T) {

@@ -65,6 +65,28 @@ func TestSelectRoute(t *testing.T) {
 	}
 }
 
+func TestPolicyAnyModelAvailable(t *testing.T) {
+	policy := Policy{
+		TaskModels:    map[string][]string{"coding": {"coder"}, "review": {"gone"}},
+		DefaultModels: []string{"general"},
+	}
+	tests := []struct {
+		name      string
+		available []string
+		want      bool
+	}{
+		{"a default model is enough", []string{"general"}, true},
+		{"a task model is enough", []string{"coder-high"}, true},
+		{"only models outside both lists", []string{"other"}, false},
+		{"nothing available", []string{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, policy.AnyModelAvailable(func(model string) bool { return slices.Contains(tt.available, model) }))
+		})
+	}
+}
+
 func TestResolveVariant(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -79,6 +101,8 @@ func TestResolveVariant(t *testing.T) {
 		{"tie prefers stronger", "medium", []string{"m-low", "m-high"}, "m-high", true},
 		{"walks several rungs", "none", []string{"m-max"}, "m-max", true},
 		{"unknown effort searches from medium", "", []string{"m-low", "m-xhigh"}, "m-low", true},
+		{"unknown effort finds a model listed only as medium", "", []string{"m-medium"}, "m-medium", true},
+		{"unknown effort prefers medium over its neighbours", "", []string{"m-low", "m-medium", "m-high"}, "m-medium", true},
 		{"other models do not count", "high", []string{"other-high"}, "", false},
 	}
 	for _, tt := range tests {

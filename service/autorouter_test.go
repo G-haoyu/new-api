@@ -186,12 +186,62 @@ func TestResolveAutoModelOnlyPicksAvailableModels(t *testing.T) {
 
 	result, err = ResolveAutoModel(newAutoRouterContext(9401, body), func(model string) bool { return model == "general" })
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), calls.Load(), "a cached route whose model is gone is routed again")
+	assert.Equal(t, int32(1), calls.Load(), "the cached decision is reused, only the route is recomputed")
 	assert.Equal(t, "general", result.ResolvedModel, "the bare model runs at the provider default effort")
 	assert.Equal(t, "xhigh", result.Effort)
 
 	_, err = ResolveAutoModel(newAutoRouterContext(9401, body), func(string) bool { return false })
 	require.Error(t, err)
+}
+
+func TestResolveAutoModelRecomputesRouteFromCachedDecision(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	body := `{"messages":[{"role":"user","content":"hard"}]}`
+
+	// 第一次只有兜底模型可用（比如这次请求带图，别的模型能力不满足）。
+	first, err := ResolveAutoModel(newAutoRouterContext(9411, body), func(model string) bool { return model == "general" })
+	require.NoError(t, err)
+	assert.Equal(t, "general", first.ResolvedModel)
+
+	// 同一条指令的下一次请求所有模型都可用：不能被上一次的选择钉住，也不必再调 jev。
+	second, err := ResolveAutoModel(newAutoRouterContext(9411, body), allModelsAvailable)
+	require.NoError(t, err)
+	assert.Equal(t, "coder-xhigh", second.ResolvedModel)
+	assert.Equal(t, autorouter.SourceCache, second.Source)
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestResolveAutoModelSkipsJevWhenNothingIsRoutable(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+
+	_, err := ResolveAutoModel(newAutoRouterContext(9412, `{"messages":[{"role":"user","content":"hard"}]}`), func(string) bool { return false })
+	require.Error(t, err)
+	assert.Equal(t, int32(0), calls.Load(), "没有任何可用模型时不该花一次 jev 调用")
+}
+
+func TestResolveAutoModelRemembersJevFailureBriefly(t *testing.T) {
+	var calls atomic.Int32
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(failing.Close)
+	useAutoRouterSetting(t, failing.URL, 1000)
+	body := `{"messages":[{"role":"user","content":"hard"}]}`
+
+	first, err := ResolveAutoModel(newAutoRouterContext(9413, body), allModelsAvailable)
+	require.NoError(t, err, "a jev failure must not fail the request")
+	assert.Equal(t, "general-medium", first.ResolvedModel)
+	require.NotNil(t, first.Jev)
+	assert.NotEmpty(t, first.Jev.Error)
+
+	second, err := ResolveAutoModel(newAutoRouterContext(9413, body), allModelsAvailable)
+	require.NoError(t, err)
+	assert.Equal(t, "general-medium", second.ResolvedModel)
+	assert.Nil(t, second.Jev, "刚失败过的指令不再调 jev")
+	assert.Equal(t, int32(1), calls.Load())
 }
 
 func TestResolveAutoModelAuxiliarySkipsJev(t *testing.T) {
