@@ -13,6 +13,9 @@ const (
 
 	// 选路阶段共用的输入 token 估算器，见 service.RoutingInputTokens。
 	ContextKeyRoutingInputEstimator ContextKey = "routing_input_estimator"
+	// 选路阶段估算的输入 token 数，调度器的 decide、reserve 和 attempt 读它；
+	// 不复用 ContextKeyEstimatedTokens，那个会被 GenRelayInfo 当作计费用的初值。
+	ContextKeyRoutingInputTokens ContextKey = "routing_input_tokens"
 
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"

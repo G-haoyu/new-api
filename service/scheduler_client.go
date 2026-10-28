@@ -969,7 +969,7 @@ func ReserveSchedulerCandidate(c *gin.Context, candidate SchedulerCandidate, att
 	}
 	estimatedTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerEstimatedTokens)
 	if estimatedTokens <= 0 {
-		estimatedTokens = common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+		estimatedTokens = common.GetContextKeyInt(c, constant.ContextKeyRoutingInputTokens)
 	}
 	body := schedulerReserveRequest{RequestID: c.GetString(common.RequestIdKey), DecisionID: common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID), AttemptNo: attemptNo, EndpointID: candidate.EndpointID, EstimatedTokens: estimatedTokens}
 	payload, err := common.Marshal(body)
@@ -1136,7 +1136,9 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) (err error) {
 		requestID = common.NewRequestId()
 		c.Set(common.RequestIdKey, requestID)
 	}
-	estimatedInput := common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+	// RoutingInputTokens 已限制在 int32 范围内，转 int 不会溢出。后面重试预留和尝试遥测读同一个值。
+	estimatedInput := int(RoutingInputTokens(c, modelName))
+	common.SetContextKey(c, constant.ContextKeyRoutingInputTokens, estimatedInput)
 	maxOutput := schedulerMaxOutputTokens(c)
 	body := schedulerRequest{RequestID: requestID, UserID: int64(c.GetInt("id")), TokenID: int64(c.GetInt("token_id")), Group: group, Model: modelName, Workload: common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload), Capabilities: schedulerCapabilities(c), Policy: policy, EstimatedInputTokens: estimatedInput, MaxOutputTokens: maxOutput, PreferredChannelID: common.GetContextKeyInt(c, constant.ContextKeySchedulerAffinityChannelID)}
 	if affinity, ok := GetChannelAffinityStatsContext(c); ok {
@@ -1460,7 +1462,7 @@ func schedulerEstimatedTokens(c *gin.Context) int {
 	if estimate := common.GetContextKeyInt(c, constant.ContextKeySchedulerEstimatedTokens); estimate > 0 {
 		return estimate
 	}
-	return common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+	return common.GetContextKeyInt(c, constant.ContextKeyRoutingInputTokens)
 }
 
 func postSchedulerAttempt(c *gin.Context, config SchedulerClientConfig, attempt schedulerAttempt) error {
