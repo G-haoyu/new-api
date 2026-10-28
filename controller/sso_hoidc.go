@@ -92,6 +92,9 @@ func SsoHoidcCallback(c *gin.Context) {
 
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
 
+	c.Set("login_method", "sso_hoidc")
+	recordLoginAudit(user, c)
+
 	redirectUrl := redirect
 	if strings.Contains(redirectUrl, "?") {
 		redirectUrl += "&access_token=" + url.QueryEscape(bundle.AccessToken)
