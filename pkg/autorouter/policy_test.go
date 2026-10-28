@@ -1,10 +1,12 @@
 package autorouter
 
 import (
+	"math"
 	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSelectRoute(t *testing.T) {
@@ -55,7 +57,8 @@ func TestSelectRoute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			available := func(model string) bool { return tt.available == nil || slices.Contains(tt.available, model) }
-			route, inherited, ok := SelectRoute(tt.decision, tt.previous, policy, available, available)
+			route, inherited, ok, pick := SelectRoute(tt.decision, tt.previous, policy, Candidates{Available: available, Overridable: available})
+			assert.Nil(t, pick, "没有价格和榜单分时不做质量/成本选择")
 			assert.Equal(t, tt.wantOK, ok)
 			if ok {
 				assert.Equal(t, tt.want, route)
@@ -84,15 +87,171 @@ func TestSelectRouteJudgesTrustedAndFallbackCandidatesSeparately(t *testing.T) {
 	available := func(model string) bool { return model == "coder-b" || model == "general-b" }
 	overridable := func(string) bool { return true }
 
-	route, inherited, ok := SelectRoute(trusted, nil, policy, available, overridable)
+	candidates := Candidates{Available: available, Overridable: overridable}
+	route, inherited, ok, _ := SelectRoute(trusted, nil, policy, candidates)
 	assert.True(t, ok)
 	assert.False(t, inherited)
 	assert.Equal(t, "coder", route.Model, "可信判断按 overridable 选模")
 
-	route, inherited, ok = SelectRoute(nil, nil, policy, available, overridable)
+	route, inherited, ok, _ = SelectRoute(nil, nil, policy, candidates)
 	assert.True(t, ok)
 	assert.True(t, inherited)
 	assert.Equal(t, "general-b", route.Model, "兜底按客户端原样的请求选模，跳过 general")
+}
+
+// pickEntry 描述质量/成本选择里的一个候选。
+type pickEntry struct {
+	name     string
+	score    float64
+	price    float64
+	down     bool // 不可用
+	unpriced bool // 没有可比较的价格
+	unscored bool // 榜单里没有分数
+}
+
+func runPick(entries []pickEntry, lambda, delta float64) (Pick, bool, []string) {
+	byName := map[string]pickEntry{}
+	scores := map[string]float64{}
+	var models, probed []string
+	for _, entry := range entries {
+		byName[entry.name] = entry
+		models = append(models, entry.name)
+		if !entry.unscored {
+			scores[entry.name] = entry.score
+		}
+	}
+	pick, ok := pickByQualityCost(models, scores, lambda, delta,
+		func(name string) bool { probed = append(probed, name); return !byName[name].down },
+		func(name string) (float64, bool) { return byName[name].price, !byName[name].unpriced })
+	return pick, ok, probed
+}
+
+func TestPickByQualityCost(t *testing.T) {
+	// 榜单分和 OpenRouter 混合价取自内嵌排名文件里的 debugging / coding 两个任务。
+	debugging := []pickEntry{{name: "opus", score: 0.986, price: 8}, {name: "fable", score: 0.969, price: 20},
+		{name: "sonnet", score: 0.948, price: 4}, {name: "astra", score: 0.946, price: 20}}
+	coding := []pickEntry{{name: "opus", score: 0.989, price: 8}, {name: "fable", score: 0.950, price: 20},
+		{name: "astra", score: 0.944, price: 20}, {name: "sonnet", score: 0.928, price: 4}}
+	tests := []struct {
+		name          string
+		entries       []pickEntry
+		lambda, delta float64
+		want          string
+		wantOK        bool
+	}{
+		{"a cheaper model close enough in utility wins", debugging, 0.05, 0.02, "sonnet", true},
+		{"a clear leader stays", coding, 0.05, 0.02, "opus", true},
+		{"with only the two left the leader pays the full price penalty", []pickEntry{coding[0], coding[3]}, 0.05, 0.02, "sonnet", true},
+		{"lambda and delta zero: the best score always wins", debugging, 0, 0, "opus", true},
+		{"delta alone ties near-equal scores and price decides",
+			[]pickEntry{{name: "a", score: 0.95, price: 10}, {name: "b", score: 0.94, price: 2}}, 0, 0.02, "b", true},
+		{"a score gap beyond delta is not traded for price",
+			[]pickEntry{{name: "a", score: 0.95, price: 10}, {name: "b", score: 0.90, price: 2}}, 0, 0.02, "a", true},
+		{"an unavailable top: the best servable model becomes the reference",
+			[]pickEntry{{name: "a", score: 0.99, price: 10, down: true}, {name: "b", score: 0.95, price: 8}, {name: "c", score: 0.90, price: 2}}, 0.05, 0.02, "c", true},
+		{"unpriced models are skipped like unavailable ones",
+			[]pickEntry{{name: "a", score: 0.99, price: 10, unpriced: true}, {name: "b", score: 0.95, price: 8}, {name: "c", score: 0.90, price: 2}}, 0.05, 0.02, "c", true},
+		{"models without a score do not take part",
+			[]pickEntry{{name: "x", price: 0.1, unscored: true}, {name: "a", score: 0.95, price: 8}, {name: "b", score: 0.94, price: 4}}, 0.05, 0.02, "b", true},
+		{"a free model is the cheapest among the tied",
+			[]pickEntry{{name: "a", score: 0.95, price: 8}, {name: "b", score: 0.94, price: 4}, {name: "c", score: 0.93, price: 0}}, 0.05, 0.02, "c", true},
+		{"all free: no price signal, the best score wins",
+			[]pickEntry{{name: "a", score: 0.95}, {name: "b", score: 0.94}}, 0.05, 0.02, "a", true},
+		{"a negative delta still picks the best utility", debugging, 0.05, -1, "opus", true},
+		{"a NaN delta still picks the best utility", debugging, 0.05, math.NaN(), "opus", true},
+		{"nothing servable", []pickEntry{{name: "a", score: 0.9, price: 1, down: true}}, 0.05, 0.02, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pick, ok, _ := runPick(tt.entries, tt.lambda, tt.delta)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, pick.Chosen)
+		})
+	}
+}
+
+func TestPickByQualityCostBandAndProbing(t *testing.T) {
+	debugging := []pickEntry{{name: "opus", score: 0.986, price: 8}, {name: "fable", score: 0.969, price: 20},
+		{name: "sonnet", score: 0.948, price: 4}, {name: "astra", score: 0.946, price: 20}}
+	pick, ok, _ := runPick(debugging, 0.05, 0.02)
+	require.True(t, ok)
+	require.Len(t, pick.Band, 4)
+	// 价格在带内按对数位置打折：最便宜的折 0，最贵的折满 λ=0.05，8 美元折 0.05*ln2/ln5。
+	wantUtility := map[string]float64{"opus": 0.986 - 0.05*math.Log(2)/math.Log(5), "fable": 0.919, "sonnet": 0.948, "astra": 0.896}
+	wantTied := map[string]bool{"opus": true, "sonnet": true}
+	for _, candidate := range pick.Band {
+		assert.InDelta(t, wantUtility[candidate.Model], candidate.Utility, 1e-9, candidate.Model)
+		assert.Equal(t, wantTied[candidate.Model], candidate.Tied, candidate.Model)
+	}
+
+	// 掉出候选带的模型不再探测可用性（没有内存缓存时每次探测都是一次查询）。
+	_, _, probed := runPick([]pickEntry{{name: "a", score: 0.99, price: 5}, {name: "b", score: 0.97, price: 3},
+		{name: "c", score: 0.50, price: 1}, {name: "d", score: 0.40, price: 1}}, 0.05, 0.02)
+	assert.Equal(t, []string{"a", "b"}, probed)
+}
+
+// 可信的判断在同一任务类型的候选里一次比较质量和价格；沿用上一轮模型、
+// 兜底和没有价格时都不做这个比较。
+func TestSelectRoutePicksByQualityAndPrice(t *testing.T) {
+	policy := Policy{
+		TaskModels:             map[string][]string{"debugging": {"opus", "fable", "sonnet", "astra"}, "review": {"opus", "legacy"}},
+		TaskScores:             map[string]map[string]float64{"debugging": {"opus": 0.986, "fable": 0.969, "sonnet": 0.948, "astra": 0.946}, "review": {"opus": 0.9}},
+		DefaultModels:          []string{"general"},
+		DifficultyEfforts:      []string{"low", "medium", "high", "xhigh"},
+		DefaultEffort:          "medium",
+		UpgradeBenefit:         0.5,
+		MinTaskTypeProbability: 0.5,
+		ContinuationTaskChange: 0.5,
+		CostLambda:             0.05,
+		ScoreTieDelta:          0.02,
+	}
+	prices := map[string]float64{"opus": 8, "fable": 20, "sonnet": 4, "astra": 20, "general": 1, "legacy": 3}
+	all := func(string) bool { return true }
+	priced := Candidates{Available: all, Overridable: all, Price: func(model string) (float64, bool) {
+		price, ok := prices[model]
+		return price, ok
+	}}
+	zero := 0.0
+	decide := func(taskType string, taskChange float64) *Decision {
+		return &Decision{TaskType: taskType, TaskTypeProbability: 0.9, Difficulty: 2, TaskChange: &taskChange, LargerModelBenefit: &zero}
+	}
+
+	t.Run("a trusted decision picks by quality and price", func(t *testing.T) {
+		route, inherited, ok, pick := SelectRoute(decide("debugging", 1), nil, policy, priced)
+		assert.True(t, ok)
+		assert.False(t, inherited)
+		assert.Equal(t, Route{TaskType: "debugging", Model: "sonnet", Effort: "medium"}, route)
+		require.NotNil(t, pick)
+		assert.Equal(t, "sonnet", pick.Chosen)
+	})
+	t.Run("without prices the first available model in list order wins", func(t *testing.T) {
+		route, _, ok, pick := SelectRoute(decide("debugging", 1), nil, policy, Candidates{Available: all, Overridable: all})
+		assert.True(t, ok)
+		assert.Equal(t, "opus", route.Model)
+		assert.Nil(t, pick)
+	})
+	t.Run("a continuation keeps the previous model whatever it costs", func(t *testing.T) {
+		previous := &Route{TaskType: "debugging", Model: "opus", Effort: "medium"}
+		route, _, ok, pick := SelectRoute(decide("debugging", 0.1), previous, policy, priced)
+		assert.True(t, ok)
+		assert.Equal(t, "opus", route.Model)
+		assert.Nil(t, pick)
+	})
+	t.Run("an untrusted decision falls back without comparing prices", func(t *testing.T) {
+		route, inherited, ok, pick := SelectRoute(nil, nil, policy, priced)
+		assert.True(t, ok)
+		assert.True(t, inherited)
+		assert.Equal(t, "general", route.Model)
+		assert.Nil(t, pick)
+	})
+	t.Run("unscored models are a fallback in list order", func(t *testing.T) {
+		candidates := priced
+		candidates.Overridable = func(model string) bool { return model == "legacy" }
+		route, _, ok, pick := SelectRoute(decide("review", 1), nil, policy, candidates)
+		assert.True(t, ok)
+		assert.Equal(t, "legacy", route.Model)
+		assert.Nil(t, pick)
+	})
 }
 
 func TestPolicyAnyModelAvailable(t *testing.T) {

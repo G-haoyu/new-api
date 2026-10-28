@@ -235,6 +235,50 @@ func TestResolveAutoModelSkipsJevWhenNothingIsRoutable(t *testing.T) {
 	assert.Equal(t, int32(0), calls.Load(), "没有任何可用模型时不该花一次 jev 调用")
 }
 
+// 候选的用户价格从 AutoCandidates.Price 进来，可信的判断在榜单分接近的模型里选更便宜的。
+func TestResolveAutoModelPicksByQualityAndPrice(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	setting := autorouter_setting.GetAutoRouterSetting()
+	setting.TaskModels = map[string][]string{"coding": {"opus-m", "sonnet-m"}}
+	setting.TaskScores = map[string]map[string]float64{"coding": {"opus-m": 0.97, "sonnet-m": 0.96}}
+	setting.CostLambda, setting.ScoreTieDelta = 0.05, 0.02
+	prices := map[string]float64{"opus-m": 8, "sonnet-m": 4}
+	candidates := func(withPrice func(string) (float64, bool)) AutoCandidates {
+		candidates := candidatesFrom(func(string) bool { return true })
+		candidates.Price = withPrice
+		return candidates
+	}
+	body := `{"messages":[{"role":"user","content":"hard"}]}`
+
+	t.Run("the cheaper model wins when the scores are close", func(t *testing.T) {
+		result, err := ResolveAutoModel(newAutoRouterContext(9801, body), candidates(func(model string) (float64, bool) {
+			price, ok := prices[model]
+			return price, ok
+		}))
+		require.NoError(t, err)
+		assert.Equal(t, "sonnet-m-xhigh", result.ResolvedModel)
+		require.NotNil(t, result.Pick)
+		assert.Equal(t, "sonnet-m", result.Pick.Chosen)
+		assert.Len(t, result.Pick.Band, 2)
+	})
+
+	t.Run("a model without a comparable price does not take part", func(t *testing.T) {
+		result, err := ResolveAutoModel(newAutoRouterContext(9802, body), candidates(func(model string) (float64, bool) {
+			return prices[model], model == "opus-m"
+		}))
+		require.NoError(t, err)
+		assert.Equal(t, "opus-m-xhigh", result.ResolvedModel)
+	})
+
+	t.Run("without a price source the first available model in list order wins", func(t *testing.T) {
+		result, err := ResolveAutoModel(newAutoRouterContext(9803, body), candidates(nil))
+		require.NoError(t, err)
+		assert.Equal(t, "opus-m-xhigh", result.ResolvedModel)
+		assert.Nil(t, result.Pick)
+	})
+}
+
 func TestResolveAutoModelRemembersJevFailureBriefly(t *testing.T) {
 	var calls atomic.Int32
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

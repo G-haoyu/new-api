@@ -14,9 +14,11 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -422,9 +424,15 @@ func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels m
 // serveAutoRoutingRequest 让请求经过真实的 Distribute，返回处理器看到的存储请求体。
 func serveAutoRoutingRequest(t *testing.T, path string, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
 	t.Helper()
+	return serveAutoRoutingRequestIn(t, path, "default", tokenID, body)
+}
+
+// serveAutoRoutingRequestIn 同 serveAutoRoutingRequest，但令牌分组可指定（例如 "auto"）。
+func serveAutoRoutingRequestIn(t *testing.T, path, usingGroup string, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
+	t.Helper()
 	router := gin.New()
 	router.POST(path, RequestId(), func(c *gin.Context) {
-		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
 		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
 		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
 	}, Distribute(), func(c *gin.Context) {
@@ -445,6 +453,7 @@ func serveAutoRoutingRequest(t *testing.T, path string, tokenID int, body string
 
 func TestDistributeAutoRewritesStoredBodyModel(t *testing.T) {
 	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
+	useModelPrices(t, map[string]float64{"general": 1})
 
 	stored, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9601,
 		`{"model":"auto","messages":[{"role":"user","content":"hello"}],"temperature":0.2}`)
@@ -492,6 +501,7 @@ const autoRoutingToolsBody = `{"model":"auto","messages":[{"role":"user","conten
 
 func TestDistributeAutoSkipsModelWhoseChannelsAreAllNarrowed(t *testing.T) {
 	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
+	useModelPrices(t, map[string]float64{"m-a": 1, "m-b": 1})
 	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a"})
 
 	_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9603, autoRoutingToolsBody)
@@ -502,6 +512,7 @@ func TestDistributeAutoSkipsModelWhoseChannelsAreAllNarrowed(t *testing.T) {
 
 func TestDistributeAutoRejectsWhenEveryCandidateIsNarrowed(t *testing.T) {
 	db := setupAutoRoutingDistribute(t, []string{"m-a", "m-b"}, map[int][]string{1: {"m-a"}, 2: {"m-b"}})
+	useModelPrices(t, map[string]float64{"m-a": 1, "m-b": 1})
 	useEnforcedToolCapabilities(t, db, []string{"m-a", "m-b"}, map[int]string{1: "m-a", 2: "m-b"})
 
 	_, _, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9604, autoRoutingToolsBody)
@@ -606,6 +617,7 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 			db := setupAutoRoutingDistribute(t, []string{"reasoner"},
 				map[int][]string{1: {"reasoner"}, 2: {"reasoner"}, 3: {"reasoner"}, 4: {"no-think"}})
 			useReasoningModels(t, db)
+			useModelPrices(t, map[string]float64{"reasoner": 1, "no-think": 1})
 			autorouter_setting.GetAutoRouterSetting().TaskModels = map[string][]string{"coding": {"reasoner"}, "direct_qa": {"no-think"}}
 			if tt.taskType != "" {
 				t.Setenv("JEV_ENDPOINT", fakeJevFor(t, tt.taskType))
@@ -618,4 +630,114 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 			assert.JSONEq(t, tt.wantBody, stored)
 		})
 	}
+}
+
+// useModelPrices 把模型倍率换成测试值：补全倍率统一为 1，混合价就等于输入价
+// （倍率 1 是每百万 token 2 美元）。同时关掉自用模式，没配倍率的模型才是真的没价格。
+func useModelPrices(t *testing.T, ratios map[string]float64) {
+	t.Helper()
+	savedRatios, savedCompletions := ratio_setting.ModelRatio2JSONString(), ratio_setting.CompletionRatio2JSONString()
+	savedSelfUse := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = false
+	t.Cleanup(func() {
+		operation_setting.SelfUseModeEnabled = savedSelfUse
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(savedCompletions))
+	})
+	currentRatios, currentCompletions := map[string]float64{}, map[string]float64{}
+	require.NoError(t, common.UnmarshalJsonStr(savedRatios, &currentRatios))
+	require.NoError(t, common.UnmarshalJsonStr(savedCompletions, &currentCompletions))
+	for modelName, ratio := range ratios {
+		currentRatios[modelName], currentCompletions[modelName] = ratio, 1
+	}
+	encodedRatios, err := common.Marshal(currentRatios)
+	require.NoError(t, err)
+	encodedCompletions, err := common.Marshal(currentCompletions)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(encodedRatios)))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(string(encodedCompletions)))
+}
+
+func TestDistributeAutoPicksByQualityAndUserPrice(t *testing.T) {
+	prepare := func(t *testing.T, channels map[int][]string, defaults []string) {
+		setupAutoRoutingDistribute(t, defaults, channels)
+		// opus-x 每百万 token 8 美元，sonnet-x 4 美元；ghost-x 榜单分最高但没有配价格。
+		useModelPrices(t, map[string]float64{"opus-x": 4, "sonnet-x": 2})
+		s := autorouter_setting.GetAutoRouterSetting()
+		s.TaskModels = map[string][]string{"coding": {"ghost-x", "opus-x", "sonnet-x"}}
+		s.TaskScores = map[string]map[string]float64{"coding": {"ghost-x": 0.99, "opus-x": 0.97, "sonnet-x": 0.96}}
+		s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
+	}
+	pool := map[int][]string{1: {"opus-x"}, 2: {"sonnet-x"}, 3: {"ghost-x"}}
+	body := `{"model":"auto","messages":[{"role":"user","content":"fix the bug"}]}`
+
+	t.Run("a trusted decision takes the cheaper of the close models and skips the unpriced one", func(t *testing.T) {
+		prepare(t, pool, []string{"opus-x"})
+		t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+		_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9801, body)
+		require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "sonnet-x", originalModel)
+	})
+
+	t.Run("the fallback never picks an unpriced model either", func(t *testing.T) {
+		prepare(t, pool, []string{"ghost-x", "opus-x"})
+		_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9802, body)
+		require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "opus-x", originalModel)
+	})
+
+	t.Run("a pool of unpriced models is rejected up front", func(t *testing.T) {
+		prepare(t, map[int][]string{3: {"ghost-x"}}, []string{"ghost-x"})
+		_, _, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9803, body)
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "no available model")
+	})
+}
+
+// 令牌分组是 auto 时，计费分组是第一个对该模型有可用渠道的自动分组，倍率因模型而异。
+// 两个模型基础价格相同、榜单分接近：服务在高倍率分组里的那个实际更贵，应该选另一个。
+func TestDistributeAutoPricesCandidatesInTheirOwnBillingGroup(t *testing.T) {
+	setupAutoRoutingDistribute(t, []string{"exp-x"}, nil)
+	useModelPrices(t, map[string]float64{"exp-x": 2, "cheap-y": 2})
+
+	savedAutoGroups, savedUsable, savedGroupRatios := setting.AutoGroups2JsonString(), setting.UserUsableGroups2JSONString(), ratio_setting.GroupRatio2JSONString()
+	savedMaxAutoGroups, savedRetry := setting.GetMaxTokenAutoGroups(), common.RetryTimes
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(savedAutoGroups))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(savedUsable))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(savedGroupRatios))
+		require.NoError(t, setting.UpdateMaxTokenAutoGroups(fmt.Sprintf("%d", savedMaxAutoGroups)))
+		common.RetryTimes = savedRetry
+	})
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["cheap","pricey"]`))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","cheap":"Cheap","pricey":"Pricey"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"cheap":1,"pricey":4}`))
+	require.NoError(t, setting.UpdateMaxTokenAutoGroups("2"))
+	common.RetryTimes = 0
+
+	// exp-x 只有 pricey 分组有渠道（实际价格 4 倍），cheap-y 在 cheap 分组。
+	priority, weight := int64(0), uint(100)
+	for id, group := range map[int]string{1: "pricey", 2: "cheap"} {
+		modelName := map[int]string{1: "exp-x", 2: "cheap-y"}[id]
+		require.NoError(t, model.DB.Create(&model.Channel{
+			Id: id, Type: constant.ChannelTypeOpenAI, Key: fmt.Sprintf("key-%d", id), Status: common.ChannelStatusEnabled,
+			Name: fmt.Sprintf("channel-%d", id), Weight: &weight, Priority: &priority, Group: group, Models: modelName,
+		}).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{
+			Group: group, Model: modelName, ChannelId: id, Enabled: true, Priority: &priority, Weight: weight,
+		}).Error)
+	}
+	model.InitChannelCache()
+
+	s := autorouter_setting.GetAutoRouterSetting()
+	s.TaskModels = map[string][]string{"coding": {"exp-x", "cheap-y"}}
+	s.TaskScores = map[string]map[string]float64{"coding": {"exp-x": 0.97, "cheap-y": 0.96}}
+	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
+	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+
+	_, originalModel, recorder := serveAutoRoutingRequestIn(t, "/v1/chat/completions", "auto", 9804,
+		`{"model":"auto","messages":[{"role":"user","content":"fix the bug"}]}`)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "cheap-y", originalModel, "exp-x 的计费分组倍率是 4，实际价格是 cheap-y 的 4 倍")
 }

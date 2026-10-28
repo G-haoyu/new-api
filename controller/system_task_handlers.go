@@ -68,11 +68,19 @@ func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, ru
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
+	taskScores := make(map[string]map[string]float64, len(mapping.Evidence))
+	for taskType, entries := range mapping.Evidence {
+		taskScores[taskType] = make(map[string]float64, len(entries))
+		for _, entry := range entries {
+			taskScores[taskType][entry.Model] = entry.Score
+		}
+	}
 	options := []struct {
 		key   string
 		value any
 	}{
 		{"autorouter_setting.task_models", mapping.TaskModels},
+		{"autorouter_setting.task_scores", taskScores},
 		{"autorouter_setting.default_models", mapping.DefaultModels},
 		{"autorouter_setting.rank_sources", mapping.Sources},
 	}

@@ -182,6 +182,14 @@ func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int, ig
 	return false
 }
 
+// EstimatedInputTokens 返回请求体粗估的输入 token 数；门控关闭或没有解析出诉求时为 0。
+func (g *CapabilityGate) EstimatedInputTokens() int64 {
+	if g == nil || g.needs == nil {
+		return 0
+	}
+	return g.needs.EstimatedInputTokens
+}
+
 // withoutClientReasoning 返回撇开客户端推理字段的诉求副本，推理维度不参与判定。
 func (g *CapabilityGate) withoutClientReasoning() *capability.Needs {
 	if g.needs == nil {

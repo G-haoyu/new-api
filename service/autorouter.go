@@ -134,6 +134,9 @@ type AutoCandidates struct {
 	Serves func(name string, ignoreClientReasoning bool) bool
 	// Channels 返回候选模型的可用渠道，用来把期望档位收敛到渠道声明过的档位。
 	Channels func(name string) []int
+	// Price 返回候选模型的混合用户价（美元/百万 token）；ok 为 false 表示没有价格
+	// 或按次计价，没法按 token 比较。为 nil 时不比价，按榜单顺序取第一个可用的。
+	Price func(name string) (price float64, ok bool)
 }
 
 // ResolveAutoModel picks the model and reasoning effort for an "auto" request.
@@ -148,6 +151,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 	result := &autorouter.Result{Source: autorouter.SourceDefault}
 	available := func(name string) bool { return candidates.Serves(name, false) }
 	overridable := func(name string) bool { return candidates.Serves(name, true) }
+	routing := autorouter.Candidates{Available: available, Overridable: overridable, Price: candidates.Price}
 
 	otelRuntime := observability.FromContext(c.Request.Context())
 	routeCtx, routeSpan := otelRuntime.StartAutoRouter(c.Request.Context())
@@ -251,7 +255,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		// 路由每次按本次请求自己的可用集合重新算，缓存里只有 jev 的判断。
 		var inherited bool
 		result.Decision = decision
-		result.Route, inherited, ok = autorouter.SelectRoute(decision, previous, policy, available, overridable)
+		result.Route, inherited, ok, result.Pick = autorouter.SelectRoute(decision, previous, policy, routing)
 		result.EffortOverride = !inherited
 		if inherited && decision != nil {
 			route.Warning = "jev decision untrusted"
@@ -275,7 +279,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		}
 	}
 	if !ok {
-		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available, overridable)
+		result.Route, _, ok, result.Pick = autorouter.SelectRoute(nil, nil, policy, routing)
 		result.EffortOverride = false
 	}
 

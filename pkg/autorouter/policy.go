@@ -32,6 +32,16 @@ type Policy struct {
 	// continues the previous task: the model stays, so the prompt cache
 	// survives, and the effort may go up but never down.
 	ContinuationTaskChange float64
+	// TaskScores maps a task type to the quality score of its models. A trusted
+	// decision picks among the scored models by quality and price; models
+	// without a score are only a fallback in TaskModels order.
+	TaskScores map[string]map[string]float64
+	// CostLambda is the largest quality score a model may give up for being
+	// cheaper than the priciest candidate, and ScoreTieDelta the score gap below
+	// which two candidates count as equally good (the cheaper one wins).
+	// Together they bound how far the pick can fall below the best score.
+	CostLambda    float64
+	ScoreTieDelta float64
 }
 
 // Route is a routing choice before it is resolved to a usable model name.
@@ -47,19 +57,22 @@ type Route struct {
 // inherited reports that the decision was not used and the route came from
 // previous or the defaults. ok is false when no model is available at all.
 //
-// available judges a model against the request exactly as the client sent it;
-// the inherited fallbacks use it because they leave the client's reasoning
-// fields alone. overridable judges a model with the client's reasoning fields
-// set aside, because a trusted decision picks the effort itself and rewrites them.
-func SelectRoute(decision *Decision, previous *Route, policy Policy, available, overridable func(model string) bool) (route Route, inherited, ok bool) {
+// candidates.Available judges a model against the request exactly as the client
+// sent it; the inherited fallbacks use it because they leave the client's
+// reasoning fields alone. candidates.Overridable judges a model with the
+// client's reasoning fields set aside, because a trusted decision picks the
+// effort itself and rewrites them. pick is set when the model was chosen by
+// quality and price among several candidates.
+func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates Candidates) (route Route, inherited, ok bool, pick *Pick) {
+	available, overridable := candidates.Available, candidates.Overridable
 	trusted := decision != nil && decision.TaskType != "" && decision.TaskType != TaskTypeUnknown &&
 		decision.TaskTypeProbability >= policy.MinTaskTypeProbability && decision.Difficulty > 0
 	if !trusted {
 		if previous != nil && ModelAvailable(previous.Model, available) {
-			return *previous, true, true
+			return *previous, true, true, nil
 		}
 		model, found := firstAvailable(policy.DefaultModels, available)
-		return Route{Model: model, Effort: policy.DefaultEffort}, true, found
+		return Route{Model: model, Effort: policy.DefaultEffort}, true, found, nil
 	}
 
 	effort := policy.DefaultEffort
@@ -77,14 +90,20 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, available, 
 		if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
 			effort = previous.Effort
 		}
-		return Route{TaskType: previous.TaskType, Model: previous.Model, Effort: effort}, false, true
+		return Route{TaskType: previous.TaskType, Model: previous.Model, Effort: effort}, false, true, nil
 	}
 
+	if scores := policy.TaskScores[decision.TaskType]; len(scores) > 0 && candidates.Price != nil {
+		servable := func(model string) bool { return ModelAvailable(model, overridable) }
+		if picked, found := pickByQualityCost(policy.TaskModels[decision.TaskType], scores, policy.CostLambda, policy.ScoreTieDelta, servable, candidates.Price); found {
+			return Route{TaskType: decision.TaskType, Model: picked.Chosen, Effort: effort}, false, true, &picked
+		}
+	}
 	if model, found := firstAvailable(policy.TaskModels[decision.TaskType], overridable); found {
-		return Route{TaskType: decision.TaskType, Model: model, Effort: effort}, false, true
+		return Route{TaskType: decision.TaskType, Model: model, Effort: effort}, false, true, nil
 	}
 	model, found := firstAvailable(policy.DefaultModels, overridable)
-	return Route{Model: model, Effort: effort}, false, found
+	return Route{Model: model, Effort: effort}, false, found, nil
 }
 
 func firstAvailable(models []string, available func(model string) bool) (string, bool) {
@@ -170,6 +189,9 @@ type Result struct {
 	// EffortOverride 表示这条路由来自可信的 jev 判断，可以覆盖客户端自己写的推理字段；
 	// 兜底路径（辅助请求、jev 失败或不可信）为 false，不碰客户端字段。
 	EffortOverride bool `json:"effort_override,omitempty"`
+	// Pick 是模型按质量和价格在多个候选里选出时的比较过程；沿用上一轮模型、
+	// 兜底和按榜单顺序取第一个时为 nil。
+	Pick *Pick `json:"pick,omitempty"`
 	// AppliedEffort 和 EffortAction 是按模型的推理声明收敛后真正写进请求体的结果。
 	AppliedEffort string       `json:"applied_effort,omitempty"`
 	EffortAction  EffortAction `json:"effort_action,omitempty"`

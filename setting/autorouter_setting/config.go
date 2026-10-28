@@ -2,6 +2,7 @@ package autorouter_setting
 
 import (
 	_ "embed"
+	"math"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -45,6 +46,16 @@ type AutoRouterSetting struct {
 	UpgradeBenefit         float64  `json:"upgrade_benefit"`
 	MinTaskTypeProbability float64  `json:"min_task_type_probability"`
 	ContinuationTaskChange float64  `json:"continuation_task_change"`
+	// TaskScores maps a task type to the leaderboard score of each of its
+	// models, the quality side of the quality/price choice. It is generated
+	// together with TaskModels and overwritten by every ranking refresh.
+	TaskScores map[string]map[string]float64 `json:"task_scores"`
+	// CostLambda is the largest score a model may give up for being cheaper, and
+	// ScoreTieDelta the score gap below which two models count as equally good
+	// and the cheaper one wins. The pick never falls below the best score by
+	// more than their sum; zero for both means the best-scored model always wins.
+	CostLambda    float64 `json:"cost_lambda"`
+	ScoreTieDelta float64 `json:"score_tie_delta"`
 }
 
 var autoRouterSetting = AutoRouterSetting{
@@ -59,11 +70,31 @@ var autoRouterSetting = AutoRouterSetting{
 	UpgradeBenefit:           0.5,
 	MinTaskTypeProbability:   0.5,
 	ContinuationTaskChange:   0.5,
+	CostLambda:               0.05,
+	ScoreTieDelta:            0.02,
 }
 
 func init() {
 	if err := common.Unmarshal(taskModelsJSON, &autoRouterSetting); err != nil {
 		panic("autorouter_setting: task_models.json: " + err.Error())
+	}
+	// 内嵌文件里每个任务类型的 evidence 带着各模型的榜单分，就是 task_scores 的初始值。
+	var seed struct {
+		Evidence map[string][]struct {
+			Model string  `json:"model"`
+			Score float64 `json:"score"`
+		} `json:"evidence"`
+	}
+	if err := common.Unmarshal(taskModelsJSON, &seed); err != nil {
+		panic("autorouter_setting: task_models.json evidence: " + err.Error())
+	}
+	autoRouterSetting.TaskScores = make(map[string]map[string]float64, len(seed.Evidence))
+	for task, entries := range seed.Evidence {
+		scores := make(map[string]float64, len(entries))
+		for _, entry := range entries {
+			scores[entry.Model] = entry.Score
+		}
+		autoRouterSetting.TaskScores[task] = scores
 	}
 	config.GlobalConfig.Register("autorouter_setting", &autoRouterSetting)
 }
@@ -81,5 +112,17 @@ func (s *AutoRouterSetting) Policy() autorouter.Policy {
 		UpgradeBenefit:         s.UpgradeBenefit,
 		MinTaskTypeProbability: s.MinTaskTypeProbability,
 		ContinuationTaskChange: s.ContinuationTaskChange,
+		TaskScores:             s.TaskScores,
+		CostLambda:             scoreWeight(s.CostLambda),
+		ScoreTieDelta:          scoreWeight(s.ScoreTieDelta),
 	}
+}
+
+// scoreWeight 把榜单分尺度（0 到 1）上的权重限制在 [0, 1]。
+// strconv.ParseFloat 接受 "NaN"，而 NaN 会让质量/成本选择的比较全部为假，必须在这里挡住。
+func scoreWeight(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	return min(max(value, 0), 1)
 }

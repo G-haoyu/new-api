@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -153,9 +154,37 @@ func Distribute() func(c *gin.Context) {
 					}
 					usable := map[string]bool{}
 					channels := map[string][]int{}
+					// 选路阶段估价：只读价格配置，不预扣、不写额度。
+					userSetting, _ := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
+					pricer := helper.NewRoutingPricer(c, capabilityGate.EstimatedInputTokens(), userSetting.AcceptUnsetRatioModel)
+					quotes := map[string]helper.RoutingQuote{}
+					quoteOf := func(candidate string) helper.RoutingQuote {
+						if quote, seen := quotes[candidate]; seen {
+							return quote
+						}
+						// 令牌分组是 auto 时，计费分组是第一个对该模型有可用渠道的自动分组，倍率因模型而异；
+						// 固定分组下所有候选的倍率相同，在归一化里抵消。
+						userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+						billingGroup := usingGroup
+						if usingGroup == "auto" {
+							for _, group := range service.GetRequestAutoGroups(c, userGroup) {
+								if len(model.GetEnabledChannelIDsForGroupModel(group, candidate)) > 0 {
+									billingGroup = group
+									break
+								}
+							}
+						}
+						groupRatio, special := ratio_setting.GetGroupGroupRatio(userGroup, billingGroup)
+						if !special {
+							groupRatio = ratio_setting.GetGroupRatio(billingGroup)
+						}
+						quotes[candidate] = pricer.Quote(candidate, groupRatio)
+						return quotes[candidate]
+					}
 					result, err := service.ResolveAutoModel(c, service.AutoCandidates{
 						// 候选按"模型+渠道"判定：至少有一个可用渠道的生效能力满足请求。
 						// 渠道级收窄在这里就生效，不会选中一个渠道全被收窄淘汰的模型再 503。
+						// 没有价格的模型计费时会直接失败，所以任何路径都不选它们。
 						Serves: func(candidate string, ignoreClientReasoning bool) bool {
 							key := candidate
 							if ignoreClientReasoning {
@@ -172,12 +201,17 @@ func Distribute() func(c *gin.Context) {
 									channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
 									channels[candidate] = channelIDs
 								}
-								ok = len(channelIDs) > 0 && (capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs, ignoreClientReasoning))
+								ok = len(channelIDs) > 0 && quoteOf(candidate).Kind != helper.RoutingUnpriced &&
+									(capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs, ignoreClientReasoning))
 							}
 							usable[key] = ok
 							return ok
 						},
 						Channels: func(candidate string) []int { return channels[candidate] },
+						Price: func(candidate string) (float64, bool) {
+							quote := quoteOf(candidate)
+							return quote.PricePerMillion, quote.Kind == helper.RoutingPerToken
+						},
 					})
 					if capabilityGate != nil {
 						capabilityGate.LogSummary(c)
