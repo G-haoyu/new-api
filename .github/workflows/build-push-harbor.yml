@@ -2,10 +2,13 @@ name: Build & push image (Harbor)
 
 # Releases are cut on demand: merging to prod builds nothing; pushing a
 # release-* tag on a prod commit builds and pushes that version.
+# Every push to dev builds dev-<sha12> and dev-latest for the test environment.
 # Runs on the self-hosted Tokyo runner. Never add pull_request triggers here:
 # the repository is public and fork PRs must not execute on this machine.
 on:
   push:
+    branches:
+      - dev
     tags:
       - 'release-*'
   workflow_dispatch:
@@ -13,9 +16,10 @@ on:
 permissions:
   contents: read
 
+# A newer dev push supersedes the build in progress; release builds always finish.
 concurrency:
   group: build-push-harbor-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 env:
   HARBOR_HOST: registry.intsig.net
@@ -35,7 +39,7 @@ jobs:
           fetch-depth: 0
 
       # Release tags must point at a commit on prod and become the image tag
-      # as-is. Manual runs build <branch>-<sha12> for testing.
+      # as-is. Branch pushes and manual runs build <branch>-<sha12>.
       - name: Resolve tag & write VERSION
         id: version
         env:
