@@ -10,9 +10,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// rewriteTaskPluginJSONModel patches the top-level JSON "model" field and
-// replaces BodyStorage. Non-JSON bodies are left untouched.
-func rewriteTaskPluginJSONModel(c *gin.Context, spelling string) error {
+// rewriteJSONBodyModel patches the top-level JSON "model" field and replaces
+// BodyStorage. Non-JSON bodies are left untouched.
+func rewriteJSONBodyModel(c *gin.Context, spelling string) error {
 	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
 	if err != nil {
 		return nil

@@ -14,10 +14,13 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
@@ -361,4 +364,102 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "alpha", c.GetString("task_plugin_key"), "the first bound candidate executes regardless of the earlier pin")
 	assert.Equal(t, "alpha", c.MustGet(jsplugin.ContextKeyPinnedEndpoint).(jsplugin.PinnedEndpoint).Plugin.Meta.Key)
+}
+
+// setupAutoRoutingDistribute 建一个内存库，每个渠道服务 models 里的全部模型（分组 default），
+// 并打开内存渠道缓存。auto 配置里不设 JEV_ENDPOINT，分类立即失败，
+// 路由固定走 default_models 的第一个可用模型，不需要起 jev 桩。
+func setupAutoRoutingDistribute(t *testing.T, defaultModels []string, channels map[int][]string) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
+
+	previousDB := model.DB
+	previousCache := common.MemoryCacheEnabled
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Model{}, &model.Channel{}, &model.Ability{}, &model.ChannelModelStatus{}, &model.ChannelModelCapability{}))
+	model.DB = db
+	common.MemoryCacheEnabled = true
+
+	priority := int64(0)
+	weight := uint(100)
+	for channelID, models := range channels {
+		require.NoError(t, db.Create(&model.Channel{
+			Id: channelID, Type: constant.ChannelTypeOpenAI, Key: fmt.Sprintf("key-%d", channelID),
+			Status: common.ChannelStatusEnabled, Name: fmt.Sprintf("channel-%d", channelID),
+			Weight: &weight, Priority: &priority, Group: "default", Models: strings.Join(models, ","),
+		}).Error)
+		for _, modelName := range models {
+			require.NoError(t, db.Create(&model.Ability{
+				Group: "default", Model: modelName, ChannelId: channelID, Enabled: true, Priority: &priority, Weight: weight,
+			}).Error)
+		}
+	}
+	model.InitChannelCache()
+
+	setting := autorouter_setting.GetAutoRouterSetting()
+	saved := *setting
+	t.Setenv("JEV_ENDPOINT", "")
+	setting.Enabled = true
+	setting.TaskModels = map[string][]string{}
+	setting.DefaultModels = defaultModels
+	setting.DefaultEffort = "medium"
+
+	t.Cleanup(func() {
+		*setting = saved
+		model.DB = previousDB
+		common.MemoryCacheEnabled = previousCache
+		model.InvalidateCapabilityCache()
+		if sqlDB, dbErr := db.DB(); dbErr == nil {
+			require.NoError(t, sqlDB.Close())
+		}
+	})
+}
+
+// serveAutoRoutingRequest 让请求经过真实的 Distribute，返回处理器看到的存储请求体。
+func serveAutoRoutingRequest(t *testing.T, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	router := gin.New()
+	router.POST("/v1/chat/completions", RequestId(), func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
+	}, Distribute(), func(c *gin.Context) {
+		storage, err := common.GetBodyStorage(c)
+		require.NoError(t, err)
+		raw, err := storage.Bytes()
+		require.NoError(t, err)
+		stored = string(raw)
+		originalModel = c.GetString("original_model")
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	return stored, originalModel, recorder
+}
+
+func TestDistributeAutoRewritesStoredBodyModel(t *testing.T) {
+	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
+
+	stored, originalModel, recorder := serveAutoRoutingRequest(t, 9601,
+		`{"model":"auto","messages":[{"role":"user","content":"hello"}],"temperature":0.2}`)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "general", originalModel)
+	assert.JSONEq(t, `{"model":"general","messages":[{"role":"user","content":"hello"}],"temperature":0.2}`, stored,
+		"透传渠道原样转发存储的请求体，里面的 model 必须是解析后的模型而不是 auto")
+}
+
+func TestDistributeNonAutoRequestKeepsStoredBody(t *testing.T) {
+	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
+	body := `{"model":"general","messages":[{"role":"user","content":"hello"}]}`
+
+	stored, originalModel, recorder := serveAutoRoutingRequest(t, 9602, body)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "general", originalModel)
+	assert.Equal(t, body, stored)
 }

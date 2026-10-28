@@ -174,6 +174,13 @@ func Distribute() func(c *gin.Context) {
 						return
 					}
 					modelRequest.Model = result.ResolvedModel
+					// 透传渠道（全局或渠道级）不重建请求体而是原样转发存储的字节，
+					// 所以请求体里的 model 也要改成解析后的模型，否则上游收到的仍是 "auto"，
+					// 而计费和日志记的是解析后的模型。
+					if err := rewriteJSONBodyModel(c, result.ResolvedModel); err != nil {
+						abortWithOpenAiMessage(c, http.StatusInternalServerError, "failed to rewrite the request model: "+err.Error())
+						return
+					}
 				}
 			}
 		}
