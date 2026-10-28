@@ -29,9 +29,10 @@ const (
 )
 
 // fakeJev answers by the current task: "hard" is a very difficult coding task,
-// "ok" is unclassifiable, anything else is a simple question. Every answer
-// continues the previous task. It expects the key and model that
-// useAutoRouterSetting configures.
+// "ok" is unclassifiable, "split" spreads the task type over several leaves
+// without any single one reaching the trust threshold, anything else is a
+// simple question. Every answer continues the previous task. It expects the key
+// and model that useAutoRouterSetting configures.
 func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -44,14 +45,22 @@ func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.S
 		assert.Equal(t, "Bearer "+testJevAPIKey, r.Header.Get("Authorization"))
 		assert.Equal(t, testJevModel, payload.Model)
 		taskType, difficulty := "general.chat", "0"
+		probabilities := ""
 		switch payload.State["current_task"] {
 		case "hard":
 			taskType, difficulty = "code.build", "3"
 		case "ok":
 			taskType = autorouter.TaskTypeUnknown
+		case "split":
+			// 概率最高的叶子是 general.chat，但只有 0.4；code 下的两个叶子加起来 0.6。
+			difficulty = "3"
+			probabilities = `"general.chat":0.4,"code.build":0.35,"code.ops":0.25`
+		}
+		if probabilities == "" {
+			probabilities = `"` + taskType + `":0.9`
 		}
 		_, _ = w.Write([]byte(`{"answers":{
-			"task_type":{"type":"choice","choice":"` + taskType + `","probabilities":{"` + taskType + `":0.9}},
+			"task_type":{"type":"choice","choice":"` + taskType + `","probabilities":{` + probabilities + `}},
 			"difficulty":{"type":"score","probabilities":{"` + difficulty + `":0.8}},
 			"task_change":{"type":"noul","noul":0.1},
 			"larger_model_benefit":{"type":"noul","noul":0.1}}}`))
@@ -147,6 +156,24 @@ func TestResolveAutoModelFollowsPreviousRoute(t *testing.T) {
 	assert.Equal(t, autorouter.SourceJev, continued.Source)
 	assert.Equal(t, "general.chat", continued.Decision.TaskType)
 	assert.True(t, continued.EffortOverride)
+}
+
+// 没有任何一个叶子的概率过半，但同一大类下各叶子的概率之和过半：按大类的榜单选模型，
+// 这仍然是一次可信的判断，档位由 auto 定，会覆盖客户端自己写的推理字段。
+func TestResolveAutoModelTrustsTheClassWhenNoSingleLeafIsTrusted(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	autorouter_setting.GetAutoRouterSetting().TaskModels["code"] = []string{"class-coder"}
+
+	result, err := ResolveAutoModel(newAutoRouterContext(9451, `{"messages":[{"role":"user","content":"split"}]}`), allModelsAvailable)
+	require.NoError(t, err)
+	require.NotNil(t, result.Decision)
+	assert.Less(t, result.Decision.TaskTypeProbability, 0.5, "概率最高的叶子没有过半")
+	assert.Equal(t, autorouter.Route{Profile: "code", Model: "class-coder", Effort: "xhigh"}, result.Route)
+	assert.Equal(t, "class", result.Fallback())
+	assert.Equal(t, autorouter.SourceJev, result.Source)
+	assert.True(t, result.EffortOverride)
+	assert.Equal(t, "class-coder-xhigh", result.ResolvedModel)
 }
 
 func TestResolveAutoModelEncryptedSubAgentInheritsSessionRoute(t *testing.T) {
