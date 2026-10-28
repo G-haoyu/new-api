@@ -582,13 +582,13 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 		{
 			// 请求带 tools，渠道 3 不支持 tools，剩下的渠道最高声明到 high；难度要 xhigh，收敛到 high。
 			name: "chat: a trusted decision overrides the client's effort with the converged one",
-			path: "/v1/chat/completions", taskType: "coding", wantModel: "reasoner",
+			path: "/v1/chat/completions", taskType: "code.build", wantModel: "reasoner",
 			body:     `{"model":"auto","messages":` + chatMessages + `,"reasoning_effort":"low","tools":[` + chatTool + `]}`,
 			wantBody: `{"model":"reasoner","messages":` + chatMessages + `,"reasoning_effort":"high","tools":[` + chatTool + `]}`,
 		},
 		{
 			name: "chat: a model that does not support reasoning has the client's fields stripped",
-			path: "/v1/chat/completions", taskType: "direct_qa", wantModel: "no-think",
+			path: "/v1/chat/completions", taskType: "general.chat", wantModel: "no-think",
 			body:     `{"model":"auto","messages":` + chatMessages + `,"reasoning_effort":"high"}`,
 			wantBody: `{"model":"no-think","messages":` + chatMessages + `}`,
 		},
@@ -600,7 +600,7 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 		},
 		{
 			name: "anthropic: the thinking budget is replaced by output_config.effort",
-			path: "/v1/messages", taskType: "coding", wantModel: "reasoner",
+			path: "/v1/messages", taskType: "code.build", wantModel: "reasoner",
 			body: `{"model":"auto","max_tokens":4096,"messages":` + chatMessages +
 				`,"thinking":{"type":"enabled","budget_tokens":2048},"tools":[` + anthropicTool + `]}`,
 			wantBody: `{"model":"reasoner","max_tokens":4096,"messages":` + chatMessages +
@@ -608,7 +608,7 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 		},
 		{
 			name: "responses: reasoning.effort is converged and the summary is kept",
-			path: "/v1/responses", taskType: "coding", wantModel: "reasoner",
+			path: "/v1/responses", taskType: "code.build", wantModel: "reasoner",
 			body: `{"model":"auto","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]}],` +
 				`"reasoning":{"effort":"low","summary":"auto"},"tools":[` + responsesTool + `]}`,
 			wantBody: `{"model":"reasoner","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"fix the bug"}]}],` +
@@ -621,7 +621,7 @@ func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {
 				map[int][]string{1: {"reasoner"}, 2: {"reasoner"}, 3: {"reasoner"}, 4: {"no-think"}})
 			useReasoningModels(t, db)
 			useModelPrices(t, map[string]float64{"reasoner": 1, "no-think": 1})
-			autorouter_setting.GetAutoRouterSetting().TaskModels = map[string][]string{"coding": {"reasoner"}, "direct_qa": {"no-think"}}
+			autorouter_setting.GetAutoRouterSetting().TaskModels = map[string][]string{"code.build": {"reasoner"}, "general.chat": {"no-think"}}
 			if tt.taskType != "" {
 				t.Setenv("JEV_ENDPOINT", fakeJevFor(t, tt.taskType))
 			}
@@ -667,8 +667,8 @@ func TestDistributeAutoPicksByQualityAndUserPrice(t *testing.T) {
 		// opus-x 每百万 token 8 美元，sonnet-x 4 美元；ghost-x 榜单分最高但没有配价格。
 		useModelPrices(t, map[string]float64{"opus-x": 4, "sonnet-x": 2})
 		s := autorouter_setting.GetAutoRouterSetting()
-		s.TaskModels = map[string][]string{"coding": {"ghost-x", "opus-x", "sonnet-x"}}
-		s.TaskScores = map[string]map[string]float64{"coding": {"ghost-x": 0.99, "opus-x": 0.97, "sonnet-x": 0.96}}
+		s.TaskModels = map[string][]string{"code.build": {"ghost-x", "opus-x", "sonnet-x"}}
+		s.TaskScores = map[string]map[string]float64{"code.build": {"ghost-x": 0.99, "opus-x": 0.97, "sonnet-x": 0.96}}
 		s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
 	}
 	pool := map[int][]string{1: {"opus-x"}, 2: {"sonnet-x"}, 3: {"ghost-x"}}
@@ -676,7 +676,7 @@ func TestDistributeAutoPicksByQualityAndUserPrice(t *testing.T) {
 
 	t.Run("a trusted decision takes the cheaper of the close models and skips the unpriced one", func(t *testing.T) {
 		prepare(t, pool, []string{"opus-x"})
-		t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+		t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
 		_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9801, body)
 		require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 		assert.Equal(t, "sonnet-x", originalModel)
@@ -733,10 +733,10 @@ func TestDistributeAutoPricesCandidatesInTheirOwnBillingGroup(t *testing.T) {
 	model.InitChannelCache()
 
 	s := autorouter_setting.GetAutoRouterSetting()
-	s.TaskModels = map[string][]string{"coding": {"exp-x", "cheap-y"}}
-	s.TaskScores = map[string]map[string]float64{"coding": {"exp-x": 0.97, "cheap-y": 0.96}}
+	s.TaskModels = map[string][]string{"code.build": {"exp-x", "cheap-y"}}
+	s.TaskScores = map[string]map[string]float64{"code.build": {"exp-x": 0.97, "cheap-y": 0.96}}
 	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
-	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
 
 	_, originalModel, recorder := serveAutoRoutingRequestIn(t, "/v1/chat/completions", "auto", 9804,
 		`{"model":"auto","messages":[{"role":"user","content":"fix the bug"}]}`)
@@ -790,10 +790,10 @@ func TestDistributeAutoPricesTieredModelsAtTheirOwnEstimatedLength(t *testing.T)
 	useTieredExpressions(t, map[string]string{"claude-opus-4-7-tier": expression, "claude-sonnet-4-5-tier": expression})
 
 	s := autorouter_setting.GetAutoRouterSetting()
-	s.TaskModels = map[string][]string{"coding": {"claude-opus-4-7-tier", "claude-sonnet-4-5-tier"}}
-	s.TaskScores = map[string]map[string]float64{"coding": {"claude-opus-4-7-tier": 0.97, "claude-sonnet-4-5-tier": 0.96}}
+	s.TaskModels = map[string][]string{"code.build": {"claude-opus-4-7-tier", "claude-sonnet-4-5-tier"}}
+	s.TaskScores = map[string]map[string]float64{"code.build": {"claude-opus-4-7-tier": 0.97, "claude-sonnet-4-5-tier": 0.96}}
 	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
-	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
 
 	_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9805, body)
 

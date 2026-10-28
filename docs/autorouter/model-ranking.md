@@ -1,238 +1,380 @@
-# 智能路由模型榜单
+# 智能路由任务分类与模型榜单
 
-`model: "auto"` 的请求由 jev 判断任务类型（`task_type`）和难度（`difficulty`），网关再按任务类型从**模型榜单**里挑模型、按难度定思考强度。本文说明这份榜单从哪来、怎么算、怎么在线更新。
+`model: "auto"` 的请求由 jev 判断任务类型（`task_type`）和难度（`difficulty`），网关按任务类型从模型榜单里挑模型、按难度定思考强度。任务类型的唯一用途是选榜单，所以分类从榜单反推：先确定有哪些可信的公开榜单，再按"能用不同榜单区分"来划分任务。
 
-相关代码：
+## 1. 设计原则
 
-| 位置 | 作用 |
-| --- | --- |
-| `pkg/autorouter/modelrank/` | 榜单生成库：拉数据、匹配模型名、打分、排序 |
-| `pkg/autorouter/modelrank/cmd/modelrank/` | 命令行：离线生成带完整证据的榜单文件 |
-| `controller/system_task_handlers.go` 中的 `autoRouterRankHandler` | 网关内定时刷新任务 |
-| `setting/autorouter_setting/task_models.json` | 内置榜单，首次启动、尚未刷新时使用 |
-| `pkg/autorouter/policy.go` | 运行时按榜单选模型 |
+- **每个任务类型必须落到榜单上**：一个类型对应 1–3 个直接测量该类工作的公开指标。找不到对应指标的类型不单独设立，归入上级或默认画像。
+- **指标集相同就合并**：两个类型选出的指标完全一样时，它们的模型排序必然相同，分开只会增加 jev 的判错机会，因此合并为一个类型。
+- **少而准，不凑权重**：每个画像最多 3 个指标，等权平均。不为"覆盖更全"加入只间接相关的指标。
+- **场景聚焦互联网公司**：软件开发、运维自动化、数据与业务分析、写作、日常问答。法律、医疗、金融等行业专项不设类型。
+- **只用独立第三方榜单**：LiveBench、LMArena、Artificial Analysis、Design Arena，OpenRouter 只作为模型目录（价格、上下文长度、工具调用支持），自身的评分、用量、延迟都不使用。
 
-## 1. 数据来源
+## 2. 数据来源
 
-榜单只使用公开数据，不使用网关自身的流量或日志。每次生成都实时拉取下列来源，并把各来源的快照日期写进 `rank_sources`。
-
-| 来源 | 地址 | 取用内容 | 指标键 |
+| 来源 | 地址 | 取用内容 | 指标前缀 |
 | --- | --- | --- | --- |
-| OpenRouter 模型列表 | `GET /api/v1/models` | 候选模型、价格、上下文长度、工具调用支持、可选思考强度 | — |
-| OpenRouter benchmarks | `GET /api/v1/benchmarks`（需 key） | Artificial Analysis 三项指数；Design Arena（arena=models）Elo；OpenRouter 自测 GPQA Diamond、τ-bench airline 准确率 | `aa.*`、`da.*`、`or.*` |
-| OpenRouter 任务用量 | `GET /api/v1/classifications/task`（需 key） | 近 7 天 29 个任务标签各自前 10 名模型及用量占比 | 仅用于加分 |
-| OpenRouter 端点 | `GET /api/v1/models/{id}/endpoints` | 近 30 分钟各端点 p50 首 token 延迟，取最小值 | 仅用于帕累托比较 |
-| LiveBench | `https://livebench.ai/data/<release>/table.csv` | 各大类平均分 | `lb.*` |
-| LMArena | `hf-mirror.com/datasets/lmarena-ai/leaderboard-dataset` 下 7 个榜单的 `latest` parquet | 文本竞技场各分类 Elo、事实性、WebDev、文档、搜索、Agent 榜 | `lma.*` |
+| LiveBench | `https://livebench.ai/data/<release>/table.csv` | 最新版本的 7 个大类平均分 | `lb.` |
+| LMArena | `hf-mirror.com/datasets/lmarena-ai/leaderboard-dataset` 下各榜单的 `latest` parquet | 文本竞技场分类 Elo、事实性、WebDev、文档、搜索、Agent bash 可靠性 | `lma.` |
+| Artificial Analysis | `GET https://artificialanalysis.ai/api/v2/language/models/free`（`x-api-key`） | Intelligence 指数，Strategy & Ops 能力指数 | `aa.` |
+| Design Arena | `GET https://www.designarena.ai/api/v1/leaderboard/models/{category}`（`Authorization: Bearer sk_live_...`） | Models Arena 的 `website`、`uicomponent`、`slides` 三个分类 Elo | `da.` |
+| OpenRouter 模型列表 | `GET https://openrouter.ai/api/v1/models`（无需 key） | 候选模型、价格、上下文长度、`tools` 支持、可选思考强度 | — |
 
-说明：
+LMArena 镜像与 429 退避沿用现有实现。
 
-- OpenRouter benchmarks 的行以 `model_permaslug`（即模型的 canonical slug）为键，直接对应候选模型，不需要做名称匹配。
-- LiveBench 没有公开的版本索引。生成器读取官网首页引用的 `static/js/main.<hash>.js`，取出其中所有 `"YYYYMMDD"` 形式的版本目录，从新到旧尝试，选第一个存在 `table.csv` 的版本。也可以用 `-livebench-release` 固定某个版本。
-- LMArena 原始数据托管在 Hugging Face。由于 `huggingface.co` 在内网不可达，默认走 `hf-mirror.com` 镜像。镜像会限流（429），生成器按 `Retry-After` 退避，最多重试 5 次。
+**LiveBench 只读最新版本**：从官网首页 bundle 列出的版本中取最新一个存在 `table.csv` 的版本，不与旧版本合并；新版本没有重跑的模型视为无 LiveBench 数据。`browser` 需要截图输入，OpenRouter 目录中不支持图像输入的模型在该项记为无数据，不按 0 分计。
 
-LMArena 读取的榜单与分类：
+Artificial Analysis 免费接口只返回指数，不含单项 benchmark 分数；按 `name` / `slug` 走第 5 节的名称匹配。Design Arena 每行带 `openRouterId`，有值时直接对应候选模型，为 `null` 时按 `displayName` 匹配。
 
-| 榜单（config） | 分类 → 指标 |
-| --- | --- |
-| `text_style_control` | overall → `lma.overall`，coding → `lma.coding`，hard_prompts → `lma.hard_prompts`，math → `lma.math`，instruction_following → `lma.if`，multi_turn → `lma.multi_turn`，longer_query → `lma.longer_query`，chinese → `lma.chinese`，expert → `lma.expert` |
-| `text_factuality` | overall → `lma.factuality` |
-| `webdev` | webdev → `lma.webdev` |
-| `document_style_control` | overall → `lma.document` |
-| `search_style_control` | overall → `lma.search` |
-| `agent` | overall → `lma.agent` |
-| `agent_bash_reliability` | overall → `lma.agent_bash` |
+**Design Arena 的取数方式**：设置了 `DESIGN_ARENA_API_KEY` 时直连官方接口；未设置时改读 OpenRouter `GET /api/v1/benchmarks`（需 `OPENROUTER_API_KEY`）中 `source=design-arena`、`arena=models` 的行，按 `model_permaslug` 对应候选。OpenRouter 转发的数据不含 `slides`，此时 `da.slides` 被停更检测剔除，`general.design` 只按 `lb.design` 排序。`rank_sources.design_arena` 记为 `openrouter@<as_of>` 以示区分。
 
-## 2. 候选模型
+## 3. 指标目录
 
-候选集来自 OpenRouter 模型列表，必须同时满足：
+只采集被画像用到的指标。
 
-- 输入包含文本，输出只有文本；
-- `supported_parameters` 包含 `tools`（能做 agent 后端）；
-- 上下文长度 ≥ 128k（`-min-context`）；
-- 没有 `expiration_date`（不在下线计划中）；
-- 有正价格；
-- id 不含 `:`（`:free`、`:batch` 等变体）和 `~`（路由别名），也不以 `openrouter/` 开头（OpenRouter 自己的路由器）。
+| 指标键 | 来源与原始字段 | 测什么 | 刻度 |
+| --- | --- | --- | --- |
+| `lb.long_agentic` | LiveBench `long_agentic` | 多轮变更需求下扩展业务应用、在代码库上跑模拟数月的运维、长时间编码优化 | ratio |
+| `lb.coding` | LiveBench `coding` | 在冻结的大型生产代码库上按 bug 报告修复真实缺陷，引入回归记 0 分 | ratio |
+| `lb.browser` | LiveBench `browser` | 通过真实浏览器在商城、看板、工单、Wiki 等 Web 应用里完成多步操作 | ratio |
+| `lb.data_analysis` | LiveBench `data_analysis` | 小表格上的连续事件识别、表连接列映射、CSV/JSON/Markdown 等格式互转 | ratio |
+| `lb.research` | LiveBench `research` | 按真实业务简报调研并写出带来源的报告，按评分细则打分 | ratio |
+| `lb.design` | LiveBench `design` | 按要求生成或改版 Word、PDF、PPT，渲染后按视觉与结构检查打分 | ratio |
+| `lb.reasoning` | LiveBench `reasoning` | 逻辑、空间、心智理论短题 | ratio |
+| `da.website` | Design Arena `models/website` | 按需求生成完整网页的人类偏好 | elo |
+| `da.uicomponent` | Design Arena `models/uicomponent` | 生成单个 UI 组件的人类偏好 | elo |
+| `da.slides` | Design Arena `models/slides` | 生成演示文稿的人类偏好 | elo |
+| `aa.intelligence` | AA `artificial_analysis_intelligence_index` | 综合智力指数 | ratio |
+| `aa.strategy_ops` | AA `artificial_analysis_strategy_and_ops_index` | 商业与管理知识、业务应用中的智能体工具使用、长上下文分析 | ratio |
+| `lma.overall` | `text_style_control` / `overall` | 文本对话总体人类偏好 | elo |
+| `lma.coding` | `text_style_control` / `coding` | 编程类对话偏好 | elo |
+| `lma.math` | `text_style_control` / `math` | 数学类对话偏好 | elo |
+| `lma.multi_turn` | `text_style_control` / `multi_turn` | 多轮对话 | elo |
+| `lma.expert` | `text_style_control` / `expert` | 专家级难题 | elo |
+| `lma.creative_writing` | `text_style_control` / `creative_writing` | 创意写作 | elo |
+| `lma.writing_industry` | `text_style_control` / `industry_writing_and_literature_and_language` | 写作、文学与语言类职业场景 | elo |
+| `lma.business_industry` | `text_style_control` / `industry_business_and_management_and_financial_operations` | 商业、管理与财务运营类职业场景 | elo |
+| `lma.factuality` | `text_factuality` / `overall` | 事实准确性 | elo |
+| `lma.webdev` | `webdev` / `webdev` | 前端页面生成的人类偏好 | elo |
+| `lma.document` | `document_style_control` / `overall` | 基于上传文档作答 | elo |
+| `lma.search` | `search_style_control` / `overall` | 联网搜索作答 | elo |
+| `lma.agent_bash` | `agent_bash_reliability` / `overall` | Agent 执行 bash 的可靠性 | spread |
 
-多个 id 共用同一个 canonical slug 时，保留最短的那个。
+刻度含义见第 6.1 节。
 
-**网关模型名**：去掉 OpenRouter id 的厂商前缀，并改成厂商原生 API 的写法。目前只有 Anthropic 需要转换：版本号中的点换成横杠，例如 `anthropic/claude-opus-5.5` → `claude-opus-5-5`；其余厂商与 OpenRouter 一致，例如 `openai/gpt-6.1-sol` → `gpt-6.1-sol`。榜单里写的是基础名。带思考强度后缀的变体（如 `gpt-5-high`）由运行时自动解析，见第 6 节。
+## 4. 任务分类
 
-**价格**：输入、输出单价按 3 : 1 混合，单位为 USD / 1M tokens。
+两级分类：3 个一级类（`code`、`data`、`general`）、12 个二级类，外加 `unknown`。一级类参照 OpenRouter 任务分类的 `code:*`、`data:*` 与通用标签划分。jev 只在二级类和 `unknown` 中单选；一级类不单独提问，它的概率等于下属二级类概率之和。
 
-## 3. 排行榜名称匹配
+每个一级类和二级类都有自己的画像（指标集），一级类画像用于二级类不可信或二级列表无可用模型时（见第 7 节）。`general` 的一级画像就是默认画像，对应 `default_models`。
 
-LiveBench 和 LMArena 用的是各自的模型名，例如 `Claude Opus 5.5 (Max)`、`DeepSeek-V4-Pro (High, 20260813)`、`o4-mini (2025-04-16)`。按下面的顺序匹配到候选模型：
+### 4.1 分类与画像
 
-1. **精确匹配**：小写，取最后一个 `/` 之后的部分，去掉 `:` 之后的部分，只保留字母和数字，再与候选的 id 和 canonical slug 比较。slug 带快照日期，所以带日期的名称能命中对应快照。
-2. **去后缀匹配**：先去掉括号内容，再去掉末尾的思考强度、`thinking`、`reasoning`、日期等后缀。`max` 同时也是产品档位名（如 `qwen3.8-max`），只在第二轮才去掉。如果名称里带日期，优先匹配"基础名 + 日期"的快照。
-3. **补发布后缀**：对第 1 步得到的基础名，依次尝试补上 OpenRouter id 常带、而排行榜名称常省略的尾巴：`preview`、`it`、`instruct`、`0`、`exp`、`latest`。
+| 一级 | 二级 | jev 判定标准 | 指标（等权） |
+| --- | --- | --- | --- |
+| `code` 代码 | — | — | `lb.coding`，`lb.long_agentic`，`lma.agent_bash` |
+| | `code.build` | 编写或修改程序逻辑与配置：实现功能、按问题报告修复缺陷、审查代码，保证改动后程序行为正确 | `lb.coding`，`lb.long_agentic`，`lma.coding` |
+| | `code.frontend` | 按需求开发或修改用户界面：网页、App、小程序、桌面客户端的页面、UI 组件、样式、交互与渲染性能，以用户看到的外观与操作体验为准 | `lma.webdev`，`da.website`，`da.uicomponent` |
+| | `code.ops` | 在终端或服务器上执行命令，完成部署、环境配置、服务运维与线上故障排查 | `lma.agent_bash`，`lb.long_agentic` |
+| `data` 数据 | — | — | `lb.data_analysis`，`aa.strategy_ops` |
+| | `data.analysis` | 对给定的表格或数据求出确定的答案：统计、筛选、去重、关联、识别趋势，或在 CSV、JSON、Markdown 等格式间转换 | `lb.data_analysis`，`lma.math` |
+| | `data.business` | 运用业务与管理知识做判断：分析经营或运营数据、比较方案、制定计划，给出可执行的商业决策建议 | `aa.strategy_ops`，`lma.business_industry` |
+| `general` 通用 | — | — | `aa.intelligence`，`lma.overall`，`lb.reasoning` |
+| | `general.search` | 联网查询一个具体问题的当前答案：天气、新闻、价格、版本发布、某个事实或链接，简短作答并给出出处 | `lma.search`，`lma.factuality` |
+| | `general.research` | 围绕一个开放主题广泛检索多方资料，比较、核实并综合，产出带引用的调研结论或报告 | `lb.research` |
+| | `general.browser` | 在网页应用里逐步点击、填写、核对，完成跨多个页面的操作任务，如汇总多页记录、批量修改订单、合并重复工单 | `lb.browser` |
+| | `general.writing` | 产出或加工文字内容：撰写文案、文章、邮件、故事、诗歌等，或对给定文本总结、改写、润色、翻译 | `lma.writing_industry`，`lma.creative_writing`，`lma.document` |
+| | `general.design` | 制作或改版成品文件：Word 文档、PDF、幻灯片的版式、排版、配色、图表与品牌样式 | `lb.design`，`da.slides` |
+| | `general.knowledge` | 解释概念、原理或某领域的专业事实，说明某件事是什么、为什么或如何运作 | `lma.expert`，`aa.intelligence` |
+| | `general.chat` | 日常对话与生活类求助：寒暄、闲聊、家常做法、个人化的推荐或经验分享 | `lma.overall`，`lma.multi_turn` |
+| — | `unknown` | 离开前文完全无法判断要做什么：如"继续""ok""好的"、对前文方案的确认或选择、只用"这个""上面"指代前文且没有说明动作 | — |
 
-所有非精确匹配都会以 `alias <榜单名> -> <OpenRouter id>` 的形式输出，便于人工复核。匹配不上的名称也会输出（`unmatched`），不参与计算。
+### 4.2 划分依据
 
-同一模型的多个思考强度变体（如 `-low`、`-high`）匹配到同一个候选时，每项指标取最好的一个，因为思考强度由路由器另行选择。
+- **智能体按任务内容归类**：agent 是执行方式，不是任务内容。命令行与运维操作归 `code.ops`，浏览器操作归 `general.browser`，其余按所做的事归类。
+- **`code.ops` 归入代码**：部署、配置、排障本质上是写命令和配置，`lma.agent_bash` 测的正是 agent 执行 bash 的可靠性。
+- **`code.build` 同时覆盖开发、修复和审查**：公开榜单没有把这几类工作测出不同排序的指标，`lb.coding`（按 bug 报告修复真实缺陷）、`lb.long_agentic`（多轮变更需求下扩展应用）、`lma.coding`（编程对话的人类偏好）共同代表后端代码能力。
+- **`code.frontend` 单列**：`lma.webdev`、`da.website`、`da.uicomponent` 都按人类对前端产出的偏好排序，与后端开发的排序差异明显。
+- **`data.analysis` 与 `data.business` 分开**：前者是对数据本身的处理与计算，后者是在数据和信息上推理并给出决策（`aa.strategy_ops`）。
+- **`general.search`、`general.research`、`general.knowledge` 分开**：`general.search` 是联网查一个确定问题的当前答案，`lma.search` 按人类对联网作答的偏好排序，`lma.factuality` 衡量事实是否答对；`general.research` 是多来源的长链路调研，由 LiveBench 2.0 的 `lb.research` 衡量；`general.knowledge` 不联网、凭模型知识解释，由 `lma.expert` 与 `aa.intelligence` 衡量。
+- **`general.design` 用 `lb.design` 与 `da.slides`**：前者按渲染后的视觉与结构检查打分，后者是人类对幻灯片的偏好，两者都直接测量成品文档。
+- **Design Arena 其余分类不用**：`gamedev`、`3d`、`svg`、`logo` 等不属于互联网公司的常规工作；`dataviz` 测的是图表页面生成，与 `data.analysis` 的统计、清洗、SQL 不是同一能力。
+- **不用语言类榜单**：中文、英文等分榜按提问语言切分，测的不是任务能力，任何画像都不使用。
+- **数学、逻辑题不单列**：互联网公司场景占比低，由 `general` 一级画像中的 `lb.reasoning` 覆盖。
+- **difficulty、task_change、larger_model_benefit 三个问题不变。**
 
-## 4. 打分
+## 5. 候选模型与名称匹配
 
-### 4.1 归一化
+候选集来自 OpenRouter 模型列表，条件不变：输入含文本、输出只有文本；支持 `tools`；上下文 ≥ 128k；无 `expiration_date`；有正价格；id 不含 `:`、`~`，不以 `openrouter/` 开头。多个 id 共用同一 canonical slug 时保留最短的。
+
+网关模型名去掉厂商前缀并改为厂商原生写法（Anthropic 版本号的点换成横杠，如 `anthropic/claude-opus-5.5` → `claude-opus-5-5`）。价格按输入 : 输出 = 3 : 1 混合，单位 USD / 1M tokens。
+
+LiveBench、LMArena、Artificial Analysis 的模型名统一走同一套匹配：精确匹配 → 去括号、思考强度、日期后缀 → 补 `preview`、`it`、`instruct` 等发布后缀。非精确匹配输出 `alias <榜单名> -> <OpenRouter id>`，未匹配输出 `unmatched`。同一模型的多个思考强度变体匹配到同一候选时，每项指标取最好的一个。
+
+## 6. 打分
+
+### 6.1 归一化
 
 每项指标在拥有该指标的候选之间归一化到 0..1：
 
-| 刻度 | 适用指标 | 公式 |
+| 刻度 | 公式 |
+| --- | --- |
+| ratio | `value / best` |
+| elo | `2 / (1 + 10^((best - value) / 400))` |
+| spread | `(value - worst) / (best - worst)` |
+
+### 6.2 画像得分
+
+- **分数**：画像内有数据的指标取算术平均。
+- **覆盖要求**：有数据的指标数 ≥ 画像指标数的一半（向上取整）。即 1–2 个指标的画像至少有 1 项，3 个指标的画像至少有 2 项。不满足的模型不进入该画像的列表。
+
+分数只来自榜单，不叠加用量、延迟等其他信号。价格不进入分数，只在运行时从分数接近的模型里挑更便宜的，见第 7.3 节。
+
+## 7. 列表与运行时选择
+
+### 7.1 列表
+
+`task_models` 以画像名为键，共 14 个列表（12 个二级类 + `code`、`data` 两个一级类）。每个列表包含所有满足覆盖要求的模型，按分数降序；同分时价格低的在前，再相同按 id。列表不截断。运行时在当前可用的模型里按第 7.3 节比较质量和价格，比不出结果时取第一个可用的模型。
+
+`default_models` 按 `general` 一级画像生成，同时充当 `general` 的一级列表：
+
+1. 先放分数 ≥ 最高分 0.9 倍、且在分数/价格帕累托前沿上的模型，按价格升序；
+2. 再放其余有 `general` 分数的模型，按分数降序。
+
+### 7.2 选择顺序
+
+jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一级类为 `parent`；一级类的概率为其下所有二级类概率之和，`best` 为概率最高的一级类：
+
+| 条件 | 画像 |
+| --- | --- |
+| `leaf` 不是 `unknown` 且 `P(leaf) ≥ min_task_type_probability` | `leaf` |
+| 否则 `P(best) ≥ min_task_type_probability` | `best` |
+| 否则 | 沿用上一次路由；没有上一次时用 `default_models` |
+
+确定画像后按 `task_models[leaf] → task_models[parent] → default_models` 依次取模型；从一级类开始时按 `task_models[best] → default_models`。`general` 没有一级列表，这一步即 `default_models`。每一级 `task_models` 列表先按第 7.3 节比较质量和价格；列表里没有带榜单分且可比价的可用模型时，取该列表第一个可用的模型；仍然没有才进入下一级。`default_models` 已按分数和价格排好序，直接取第一个可用的模型，不再比较。
+
+可信的判断要求难度大于 0，来源可以是现调 jev、判断缓存命中、延续上一任务，或可信的会话继承。可信的判断自己定思考强度，按模型的渠道声明收敛后写进请求体，覆盖客户端写的推理字段；只有一级类可信时同样如此。模型没有推理声明时不动客户端的字段。不可信的兜底（辅助请求、jev 失败、概率不够）沿用上一次路由或 `default_models`，不碰客户端的推理字段。
+
+思考强度、`larger_model_benefit` 提档、同任务延续（`task_change < continuation_task_change` 时沿用上一次的模型、思考强度不降）的规则不变。`ResolveVariant` 解析思考强度变体的规则不变，只补了一处：档位不在档位表里时也探测 `-medium` 后缀。“可用”的含义见第 7.3 节。
+
+路由日志与 trace 记录 `task_type`（jev 选中的二级类）、`route_profile`（实际使用的画像）和 `route_fallback`（`leaf` / `class` / `default`），用于复核分类和兜底的发生频率。消费日志的 `admin_info.auto_router` 带完整的决策过程，包括第 7.3 节的比较明细，成功和失败的请求都写，样例见第 7.4 节。
+
+### 7.3 质量与价格的比较
+
+榜单分只说明谁更强，不说明谁更划算：分数接近的模型，价格可以差好几倍。所以每一级 `task_models` 列表先在分数接近的模型里挑更便宜的，而不是直接取第一名。这是对整个列表做一次整体比较，不是从第一名开始逐个往下比价。
+
+**候选**：列表里同时满足下面三条的模型。
+
+- 在该画像下有榜单分（`task_scores`）。
+- 当前可用：令牌白名单允许、所在分组启用，并且至少有一个渠道可用（已启用、支持当前请求路径、没被熔断，渠道的生效能力满足请求）。判断时撇开客户端自己写的推理档位，因为可信的判断会自己定档位。
+- 有可比较的价格：按 token 计价，且用户侧价格已配置。
+
+没配置价格的模型计费时会直接失败，任何路径都不选。按次计价的模型可以被选中，但没法和按 token 计价的模型比价，所以不进入比较，只会在比较选不出结果时按列表顺序出现。
+
+**步骤**：
+
+1. 参照分：候选里最高的榜单分。它是当前可用候选的最高分，不一定是榜单第一名。
+2. 候选带：榜单分不低于 `参照分 − λ − δ` 的候选。再便宜，掉出这条线的也不选。
+3. 价格折扣：带内按价格的对数位置打折，最便宜的折 0，最贵的折满 λ，其余按对数位置插值。免费（价格为 0）的模型不拉低价格下限；带内全部免费或价格相同时不打折。
+4. 折后分：榜单分减折扣。设折后分最高的模型为 B，折后分不低于 `B 的折后分 − δ` 的算同档。
+5. 选择：同档里取价格最低的；价格相同取折后分高的。
+
+选中的模型比参照分最多低 λ + δ。候选 X 能和 B 同档，条件是 `榜单分(B) − 榜单分(X) ≤ 折扣(B) − 折扣(X) + δ`：B 比 X 贵得越多，X 能让出的分数就越多。λ 和 δ 都为 0 时，同档只剩并列最高分的模型，等于永远取榜单第一。
+
+**参数**：`autorouter_setting.cost_lambda`（λ，默认 `0.05`）和 `score_tie_delta`（δ，默认 `0.02`）。两者在库里，改动即时生效，不需要发版；负数和 NaN 按 0，大于 1 按 1。它们对所有画像相同，没有按画像或按令牌的设置。
+
+**价格**：用户侧的混合价（美元/百万 token），输入价和输出价按 3:1 混合，再乘计费分组倍率。倍率计价的模型取模型倍率和补全倍率；表达式计价的模型把预估输入长度代入表达式，取对应档位的价格，预估不出长度时按最小档。令牌分组是 `auto` 时，每个候选按自己实际会走的计费分组取倍率。这个价格不是 `task_models.json` 里的 `price_per_mtok`，后者是 OpenRouter 的价格，只用来给 `default_models` 排序和生成榜单。
+
+**不做比较的情况**：
+
+- 同任务延续，沿用上一次的模型。
+- 辅助请求、jev 失败或判断不可信，走兜底。
+- 该级列表没有带榜单分的可用模型，或者没有可比价的候选，取列表第一个可用的。
+- `default_models` 已按分数和价格排好序，直接取第一个可用的。
+
+调用 jev 之前，网关先扫一遍 `default_models` 和各 `task_models`：一个可用模型都没有就直接返回 503，不花这次 jev 调用；候选是被能力门控全部淘汰的，错误信息里会列出未满足的能力维度。
+
+### 7.4 示例
+
+下面的数字取自 2026-10-28 的内置榜单。价格用 `task_models.json` 里的 `price_per_mtok` 代替用户侧价格，只用来演示机制；线上的分数和价格以当时的榜单和计费配置为准。λ=0.05，δ=0.02，分数和折扣保留四位小数。
+
+**例 1：便宜的候选进入同档**
+
+jev 判成 `code.build`，概率 0.82，叶子可信。榜单第一名 `claude-fable-5-1` 是 0.9865 分，候选带的下限是 0.9865 − 0.05 − 0.02 = 0.9165。`claude-sonnet-5-5`（0.9052）和 `gemini-4-argon`（0.9012）低于下限，不参与。带内 4 个模型：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-fable-5-1 | 0.9865 | 20.00 | 0.0500 | 0.9365 | 是 |
+| gpt-6-astra | 0.9765 | 20.00 | 0.0500 | 0.9265 | |
+| claude-opus-5-5 | 0.9700 | 8.00 | 0.0215 | 0.9485 | 是 |
+| gpt-6.1-sol | 0.9410 | 4.00 | 0 | 0.9410 | 是 |
+
+价格最贵的 20 美元折满 0.05，最便宜的 4 美元折 0，8 美元按对数位置折 0.0215。折后分最高的是 `claude-opus-5-5`（0.9485），同档线是 0.9485 − 0.02 = 0.9285，`gpt-6-astra`（0.9265）差一点，其余三个同档，取最便宜的 `gpt-6.1-sol`。它的榜单分比 `claude-opus-5-5` 低 0.0290，不超过 0.0215 + 0.02 = 0.0415，所以同档；比第一名低 0.0455，价格是五分之一，没有超过 λ + δ = 0.07。
+
+**例 2：领先者留下**
+
+jev 的概率是 `general.chat` 0.40、`code.build` 0.35、`code.ops` 0.25。概率最高的叶子只有 0.40，没到 0.5；`code` 大类是 0.35 + 0.25 = 0.60，达到阈值，所以按 `code` 画像选，在 `task_models["code"]` 里比较。参照分 0.9734，下限 0.9034，带内 4 个模型：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-5-5 | 0.9734 | 8.00 | 0.0215 | 0.9519 | 是 |
+| claude-fable-5-1 | 0.9703 | 20.00 | 0.0500 | 0.9203 | |
+| gpt-6-astra | 0.9477 | 20.00 | 0.0500 | 0.8977 | |
+| claude-sonnet-5-5 | 0.9129 | 4.00 | 0 | 0.9129 | |
+
+`claude-opus-5-5` 的折后分最高，同档线是 0.9519 − 0.02 = 0.9319。最便宜的 `claude-sonnet-5-5` 折后分 0.9129，比同档线低 0.0190，不同档：它要同档，榜单分最多比 `claude-opus-5-5` 低 0.0215 + 0.02 = 0.0415，实际低 0.0605。所以结果仍是 `claude-opus-5-5`。同一个 `claude-sonnet-5-5`，在 `code.build` 画像里是 0.9052，在 `code` 画像里是 0.9129：画像用的指标不同，榜单分就不同，所以它在例 1 里掉出了候选带，在例 2 里进了带却不同档。
+
+**例 3：第一名不可用，参照分下移**
+
+条件和例 1 相同，但 `claude-fable-5-1` 没有可用渠道。参照分变成 `gpt-6-astra` 的 0.9765，下限随之降到 0.9765 − 0.07 = 0.9065。`claude-sonnet-5-5`（0.9052）仍差 0.0013，在带外。带内剩 3 个模型，价格范围还是 4 到 20 美元，折扣和折后分与例 1 相同，同档线 0.9285，结果仍是 `gpt-6.1-sol`。
+
+候选带跟着“当前可用的最高分”走，不是固定按榜单名次。
+
+**例 4：λ 和 δ 都设为 0**
+
+仍是 `code.build`。带内只剩 `claude-fable-5-1`，折扣为 0，结果是榜单第一名。把 `cost_lambda` 和 `score_tie_delta` 都设为 0，就等于关掉价格比较，在库里改完即时生效。
+
+**例 5：同一个窗口，在不同画像里宽窄不同**
+
+榜单分是各指标归一化值的平均，λ + δ = 0.07 对不同刻度的指标意义不同。ratio 刻度（LiveBench、Artificial Analysis）里，0.07 是比最高分低 7%；elo 刻度（Design Arena，以及 LMArena 除 `lma.agent_bash` 外的各榜）里，最高分附近的 0.07 约等于 24 个 Elo 点，窗口窄得多。所以只用 elo 指标的画像带更窄，含 ratio 指标的画像带更宽。
+
+| 画像 | 指标刻度 | 带内模型数 | 选中 |
+| --- | --- | --- | --- |
+| `code.frontend` | 全是 elo | 2 | claude-sonnet-5-5 |
+| `data.business` | ratio 和 elo 混合 | 17 | muse-spark-1.2 |
+
+`code.frontend` 带内只有 `claude-opus-5-5`（0.9426，8 美元）和 `claude-sonnet-5-5`（0.8983，4 美元）。带里只有两个模型，贵的折满 0.05，便宜的折 0，折后分是 0.8926 对 0.8983，两个同档，取便宜的 `claude-sonnet-5-5`：让出 0.0443 分，价格减半。
+
+`data.business` 带内 17 个模型，下面是其中 4 个：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-4-7 | 0.9970 | 10.00 | 0.0366 | 0.9604 | 是 |
+| muse-spark-1.2 | 0.9807 | 2.00 | 0.0056 | 0.9751 | 是 |
+| gemini-4-argon | 0.9658 | 4.00 | 0.0189 | 0.9469 | |
+| gemini-3.7-flash | 0.9290 | 1.50 | 0 | 0.9290 | |
+
+`gemini-3.7-flash` 是带内最便宜的（1.50 美元），但折后分 0.9290 低于同档线 0.9751 − 0.02 = 0.9551，不同档。最后取同档里最便宜的 `muse-spark-1.2`：比第一名低 0.0163 分，价格是五分之一。最便宜的不一定被选中。
+
+**例 6：价格相同，取折后分高的**
+
+jev 判成 `general.design`。参照分是 `claude-opus-5-5` 的 1.0000，下限 0.9300，带内 9 个模型，同档线 0.9599 − 0.02 = 0.9399，5 个模型同档。同档里价格最低的两个都是 0.20 美元：
+
+| 模型 | 榜单分 | 价格 | 折扣 | 折后分 | 同档 |
+| --- | --- | --- | --- | --- | --- |
+| claude-opus-5-5 | 1.0000 | 8.00 | 0.0401 | 0.9599 | 是 |
+| claude-haiku-5-5 | 0.9563 | 0.20 | 0 | 0.9563 | 是 |
+| gpt-6-luna | 0.9494 | 0.20 | 0 | 0.9494 | 是 |
+
+另有两个同档模型未列出。价格相同，取折后分高的 `claude-haiku-5-5`：比第一名低 0.0437 分，价格是四十分之一。这个快照里 `da.slides` 停更，`general.design` 实际只剩 `lb.design` 一个指标，拿 0.0437 分换四十倍价差，依据偏薄，见第 10 节。
+
+**例 7：从 jev 的概率到画像**
+
+阈值取默认的 0.5，没有上一次路由，所有模型都可用：
+
+| jev 的概率 | 画像 | 说明 |
 | --- | --- | --- |
-| ratio | 准确率、指数类：`aa.*`、`or.*`、`lb.*` | `value / best` |
-| elo | 竞技场评分：`da.*`、`lma.*`（agent 两项除外） | `2 / (1 + 10^((best - value) / 400))`，即对最强模型的期望胜率相对五五开的比值 |
-| spread | 有正负号的系数：`lma.agent`、`lma.agent_bash` | `(value - worst) / (best - worst)` |
+| `code.build` 0.82、`code.ops` 0.10、`general.chat` 0.08 | `code.build` | 叶子达到阈值，按叶子的榜单比较 |
+| `general.chat` 0.40、`code.build` 0.35、`code.ops` 0.25 | `code` | 叶子都没到阈值，`code` 大类合计 0.60 到了，按大类的榜单比较 |
+| `general.chat` 0.32、`general.knowledge` 0.30、`general.writing` 0.20、`code.build` 0.18 | 默认 | `general` 大类合计 0.82 可信，但 `general` 没有一级列表，取 `default_models` 第一个可用的；仍是可信判断，会覆盖客户端的推理档位 |
+| `code.build` 0.40、`data.analysis` 0.35、`general.chat` 0.25 | 沿用上一次，没有则默认 | 没有任何大类到阈值，判断不可信 |
+| `unknown` 0.70、`code.build` 0.30 | 沿用上一次，没有则默认 | `unknown` 不属于任何大类，不计入大类概率；`code` 只有 0.30，判断不可信 |
 
-### 4.2 任务画像
+**例 8：某一级没有可用模型**
 
-每个 jev 任务类型对应一组指标权重（每组权重之和为 1）：
+一级找不到可用模型，就往下一级找，最后落到 `default_models`，不再比较。
 
-| 任务 | 指标与权重 |
-| --- | --- |
-| coding | aa.coding .30，lb.coding .25，lma.coding .15，lma.webdev .15，lb.long_agentic .10，da.website .05 |
-| debugging | aa.coding .30，lb.coding .20，lb.long_agentic .15，lma.agent_bash .15，lb.reasoning .10，lma.coding .10 |
-| review | aa.coding .30，lb.coding .25，lb.reasoning .20，lma.coding .15，lma.hard_prompts .10 |
-| operations | aa.agentic .30，or.tau .20，lma.agent_bash .20，lb.long_agentic .15，lma.agent .15 |
-| research | lb.research .25，aa.intelligence .20，or.gpqa .15，lma.search .15，lma.expert .15，lb.browser .10 |
-| data_operation | lb.data_analysis .40，aa.intelligence .15，lma.math .15，lma.if .15，da.dataviz .15 |
-| summarization | lma.document .25，lma.longer_query .25，lma.if .20，lma.chinese .15，lma.multi_turn .15 |
-| direct_qa | lma.overall .25，lma.factuality .20，or.gpqa .20，aa.intelligence .15，lma.chinese .10，lma.hard_prompts .10 |
-| general（默认列表） | aa.intelligence .30，lma.overall .25，lb.reasoning .15，aa.coding .15，lma.if .15 |
+- `code.frontend` 的 114 个模型都不可用，只启用了 `code` 里不在 `code.frontend` 列表中的 8 个模型。画像落到 `code`，参照分是 `gpt-6-astra` 的 0.9477，下限 0.8777，带内只有它一个，结果是它。
+- `general.browser` 的 26 个模型都不可用。`general` 没有一级列表，直接取 `default_models` 第一个可用的。`default_models` 的前 11 个都在 `general.browser` 的榜单上，同样不可用，取到第 12 个 `muse-wonder`。
 
-### 4.3 质量分与覆盖率
+**例 9：一次决策在日志里的样子**
 
-- **覆盖率**：模型有数据的指标权重之和。覆盖率 < 0.5（`-min-coverage`）的模型不参与该任务的排名，避免只上过一个小榜的模型凭单项分数排到前面。
-- **质量分**：在有数据的指标上做加权平均，即 `Σ(w·v) / 覆盖率`。
+例 1 的请求，难度 3，`larger_model_benefit` 为 0.2，不到 0.5 所以不提档。消费日志 `admin_info.auto_router`（数值保留四位小数）：
 
-### 4.4 用量加分
+```json
+{
+  "resolved_model": "gpt-6.1-sol",
+  "profile": "code.build",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "source": "jev",
+  "decision": {
+    "task_type": "code.build",
+    "task_type_probability": 0.82,
+    "task_type_probabilities": {"code.build": 0.82, "code.ops": 0.1, "general.chat": 0.08},
+    "difficulty": 3,
+    "task_change": 1,
+    "larger_model_benefit": 0.2
+  },
+  "effort_in_body": true,
+  "effort_override": true,
+  "pick": {
+    "chosen": "gpt-6.1-sol",
+    "lambda": 0.05,
+    "delta": 0.02,
+    "band": [
+      {"model": "claude-fable-5-1", "score": 0.9865, "price": 20, "utility": 0.9365, "tied": true},
+      {"model": "gpt-6-astra", "score": 0.9765, "price": 20, "utility": 0.9265},
+      {"model": "claude-opus-5-5", "score": 0.97, "price": 8, "utility": 0.9485, "tied": true},
+      {"model": "gpt-6.1-sol", "score": 0.941, "price": 4, "utility": 0.941, "tied": true}
+    ]
+  },
+  "applied_effort": "high",
+  "effort_action": "set"
+}
+```
 
-OpenRouter 任务分类给出每个标签前 10 名模型的用量占比。每个任务类型映射到若干标签：
+- `profile` 是实际用的榜单；它和 `decision.task_type` 不一致，说明发生了回退（回到大类或默认）。
+- `source` 是 `jev`（本次调用）、`cache`（判断缓存命中）、`inherit`（沿用上一轮）或 `default`（没有可用信号）。
+- `pick` 只在做过质量/价格比较时出现。`band` 是候选带，`utility` 是折后分，`tied` 标出同档，`chosen` 是选中的。沿用上一轮模型、兜底和按列表顺序取第一个时没有 `pick`。
+- `effort` 是难度给出的期望档位，`applied_effort` 是按模型的渠道声明收敛后真正写进请求体的档位，`effort_action` 是 `set`（写入）、`keep`（不碰客户端字段）或 `strip`（模型不支持推理，去掉客户端字段）。`effort_override` 为 true 表示这是可信的判断，覆盖了客户端的推理字段。`effort_in_body` 为 true 表示档位写进请求体、模型名保持裸名；为 false 时档位拼在模型名后缀上（如 `gpt-5-high`）。
 
-| 任务 | OpenRouter 标签 |
-| --- | --- |
-| coding | code:general_impl，code:frontend_ui，code:file_read_write，code:repo_scan |
-| debugging | code:debugging |
-| review | code:review_security，security_audit |
-| operations | code:shell_execution，code:devops_config，devops，agent:workflow_execution，agent:tool_dispatch |
-| research | research_report，agent:web_search |
-| data_operation | data:extraction，data:transformation，code:sql_database |
-| summarization | summarization，translation |
-| direct_qa | qa_knowledge，conversational_reply |
+## 8. 在线刷新
 
-模型在这些标签中的最大占比，除以该任务用量最高模型的占比，再乘以 0.03（`-usage-bonus`），作为加分。加分很小，只在质量相近的模型之间起排序作用。
+沿用系统任务 `autorouter_rank`：master 节点在数据库租约下按 `rank_refresh_interval_hours`（默认 24，最小 1）执行，依次写入 `task_models`、`task_scores`、`default_models`、`rank_sources`，其他节点经配置同步生效，不需要重启。任一来源失败或任一画像没有模型时不写配置，线上保留上一份榜单。
 
-最终分 = 质量分 + 用量加分。
-
-## 5. 排序与选取
-
-### 5.1 任务列表（`task_models`）
-
-每个任务包含**所有**覆盖率达标的模型，按最终分从高到低排；同分时价格低的在前，再相同按 id 排。
-
-列表不截断，原因是运行时取列表中第一个"当前令牌和分组可用"的模型。列表越完整，无论部署了哪些模型，任务都能落到"已部署模型中该任务排名最高的那个"，而不会因为头部几个模型没部署就退回默认列表。
-
-**支配关系**：A 的分数、价格、延迟都不差于 B，且至少一项更好，则 A 支配 B。延迟只在双方都已知、且相差超过 1.5 倍（`-latency-tolerance`）时才参与比较，因为它只是 30 分钟快照，波动较大。按分数降序时，支配者一定排在被支配者前面，所以被支配的模型只在更优的模型都不可用时才会被选中。
-
-### 5.2 默认列表（`default_models`）
-
-用于以下情况：jev 不可用或结果不可信、任务类型为 unknown、任务列表中没有任何可用模型。按 general 画像排序：
-
-1. 先放分数 ≥ 最高分 0.9 倍（`-default-floor`）、且在分数/价格/延迟帕累托前沿上的模型，按价格从低到高。这样兜底流量会落到"足够强里最便宜"的模型上。
-2. 再放其余所有有 general 分数的模型，按分数降序。
-
-这样只要部署了任意一个上榜模型，`auto` 就能路由出去。
-
-### 5.3 证据
-
-`modelrank` 命令行生成的文件除路由用的三个字段外，还包含：
-
-- `weights`：各画像的指标权重；
-- `evidence`：每个画像下全部上榜模型的 `score`、`quality`、`coverage`、`usage`，以及是否在前沿上（`frontier`）；
-- `models`：每个模型的 OpenRouter id、混合价格、p50 延迟、可选思考强度、各项原始指标值。
-
-用这些字段可以复核任何一个模型为什么排在它所在的位置。
-
-## 6. 运行时如何使用榜单
-
-`pkg/autorouter/policy.go` 的 `SelectRoute`：
-
-1. jev 结果可信时，按 `difficulty_efforts` 把难度换成思考强度。若 `larger_model_benefit ≥ upgrade_benefit`，再提一档。
-2. 若属于同一任务的延续（`task_change < continuation_task_change`），且上一次用的模型仍可用，就沿用该模型，思考强度不降。
-3. 否则从 `task_models[task_type]` 取第一个可用模型；没有可用的就从 `default_models` 取。
-4. jev 失败或结果不可信时，沿用上一次的路由；没有上一次就从 `default_models` 取，思考强度用 `default_effort`。
-
-"可用"指的是：令牌模型白名单允许，且当前分组有启用的渠道支持该模型和请求路径。判断时，基础名本身或任一思考强度变体（`<model>-low`、`-medium`、`-high`、`-xhigh` 等）存在即可。最终发往上游的名称由 `ResolveVariant` 决定：
-
-- 优先用 `<model>-<effort>`；
-- 其次用基础名（即厂商默认思考强度）；
-- 再次用最接近的思考强度，距离相同时取较强的一档。
-
-可用性检查在单个请求内会缓存结果。未开启内存缓存时，会先用一次查询取出各分组已启用的模型集合，集合之外的名称直接跳过，不逐个查数据库。
-
-## 7. 动态更新
-
-### 7.1 定时刷新（默认开启）
-
-网关内置系统任务 `autorouter_rank`，基于现有系统任务框架，用数据库租约保证多节点同一时刻只有一个节点执行。
-
-- **启用条件**：`autorouter_setting.enabled` 和 `autorouter_setting.rank_refresh_enabled` 都为 true，且进程环境变量里有 `OPENROUTER_API_KEY`。
-- **周期**：`autorouter_setting.rank_refresh_interval_hours`，默认 24 小时，最小 1 小时。距上一次运行满一个周期就会创建新任务；从未运行过时，首次满足启用条件就立即运行。
-- **执行**：调用 `modelrank.Build` 拉取全部来源并排序，然后依次写入 `autorouter_setting.task_models`、`autorouter_setting.default_models`、`autorouter_setting.rank_sources` 三个配置项。
-  - 执行节点立即生效。
-  - 其他节点通过配置同步（`SYNC_FREQUENCY`，默认 60 秒）生效。
-  - 全程不需要重启服务。
-- **失败处理**：任一来源失败，或任一任务没有可用模型时，任务记为失败，不写任何配置，线上继续使用上一份榜单。下一个周期会重试。`rank_sources` 最后写入，它的 `generated_at` 更新了，就表示这一轮三项都已写完。
-- **记录**：每次运行在"系统任务"中留一条记录。结果里包含 `rank_sources`、各任务的模型数和前 3 名、默认列表长度；失败时记录错误原因。
-
-网关进程需要能访问 `openrouter.ai`、`livebench.ai`、`hf-mirror.com`。一次完整刷新的耗时主要花在为每个上榜模型查询端点延迟上（并发 8），通常几分钟。
-
-### 7.2 手动修改
-
-`autorouter_setting.task_models` 和 `default_models` 是普通配置项，可以通过 `PUT /api/option/` 或管理后台修改，修改即时生效。注意：开启定时刷新时，下一次刷新会覆盖手动修改。如果要长期固定一份手工榜单，需要把 `rank_refresh_enabled` 设为 false。
-
-### 7.3 配置项一览
+- **启用条件**：`autorouter_setting.enabled` 与 `rank_refresh_enabled` 为 true，且进程环境变量有 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY` 之一。OpenRouter 模型列表是公开接口，不需要 key。
+- **网络**：网关需能访问 `openrouter.ai`、`livebench.ai`、`hf-mirror.com`、`artificialanalysis.ai`、`www.designarena.ai`。不再逐模型查询端点延迟，一次刷新通常在一分钟内完成。
+- **数据新鲜度**：按 OpenRouter 目录的上架时间（`created`）取每个来源评过分的最新 10 个候选（`-stale-probe`），某项指标在这 10 个里都没有数据时视为停更，本轮不参与打分，记入 `rank_sources.stale_metrics` 和刷新记录。来源评过分的候选不足 10 个时不做判断；视觉指标只看支持图像输入的候选。
+- **分类版本**：`rank_sources` 记录 `taxonomy_version`。启动或配置同步时若已存的版本与代码中的分类不一致，运行时改用内置 `task_models.json`，并立即触发一次刷新，不等周期。`task_scores` 与 `task_models` 按同一个版本判定，一起退回内置的，避免旧分类下的分数配上新分类的列表。
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `autorouter_setting.rank_refresh_enabled` | `true` | 是否定时刷新榜单 |
+| `autorouter_setting.rank_refresh_enabled` | `true` | 是否定时刷新 |
 | `autorouter_setting.rank_refresh_interval_hours` | `24` | 刷新周期，单位小时 |
-| `autorouter_setting.task_models` | 内置榜单 | 任务类型 → 模型列表 |
+| `autorouter_setting.task_models` | 内置榜单 | 画像名 → 模型列表 |
+| `autorouter_setting.task_scores` | 内置榜单 | 画像名 → 模型 → 榜单分，第 7.3 节比较用；与 `task_models` 一起生成、一起刷新 |
 | `autorouter_setting.default_models` | 内置榜单 | 默认模型列表 |
-| `autorouter_setting.rank_sources` | 内置榜单 | 当前榜单的各来源快照日期和生成时间 |
-| 环境变量 `OPENROUTER_API_KEY` | 无 | 访问 OpenRouter benchmarks / classifications 所需；未设置时不刷新 |
+| `autorouter_setting.cost_lambda` | `0.05` | 第 7.3 节的 λ：为了价格最多让出的榜单分；负数和 NaN 按 0，大于 1 按 1 |
+| `autorouter_setting.score_tie_delta` | `0.02` | 第 7.3 节的 δ：折后分相差不超过它的算同档；取值范围同 λ |
+| `autorouter_setting.rank_sources` | 内置榜单 | 各来源快照日期、生成时间、`taxonomy_version` |
+| 环境变量 `ARTIFICIAL_ANALYSIS_API_KEY` | 无 | Artificial Analysis 免费接口所需；未设置时不刷新 |
+| 环境变量 `DESIGN_ARENA_API_KEY` | 无 | Design Arena 接口所需（`sk_live_` 开头，经 designarena.ai/developers/apply 申请）；未设置时经 OpenRouter 读取 |
+| 环境变量 `OPENROUTER_API_KEY` | 无 | 未设置 `DESIGN_ARENA_API_KEY` 时读取 OpenRouter 转发的 Design Arena 数据 |
 
-## 8. 命令行
+`modelrank` 命令行同步调整：新增 `-aa-key-env`（默认 `ARTIFICIAL_ANALYSIS_API_KEY`）、`-da-key-env`（默认 `DESIGN_ARENA_API_KEY`）、`-openrouter-key-env`（默认 `OPENROUTER_API_KEY`）、`-artificial-analysis`、`-design-arena`（接口地址），去掉 `-api-key-env`；去掉 `-usage-bonus`、`-latency-tolerance`。输出文件的 `weights` 改为 `profiles`（画像名 → 指标列表），`evidence` 记录每个模型在各画像下的分数、有数据的指标数和各指标归一化值。
 
-```bash
-# 重新生成内置榜单（带完整证据）
-OPENROUTER_API_KEY=... go run ./pkg/autorouter/modelrank/cmd/modelrank
+## 9. 代码改动
 
-# 输出到别处、固定 LiveBench 版本
-OPENROUTER_API_KEY=... go run ./pkg/autorouter/modelrank/cmd/modelrank \
-  -out /tmp/task_models.json -livebench-release 20261014
-```
+| 位置 | 改动 |
+| --- | --- |
+| `pkg/autorouter/jev.go` | `task_type` 选项换成 12 个二级类 + `unknown`，判定标准用第 4.1 节的文案；二级类名的前缀即一级类 |
+| `pkg/autorouter/modelrank/metrics.go` | 指标目录换成第 3 节；`taskWeights` 换成画像 → 指标列表；`code`、`data` 一级画像，`general` 一级画像即默认画像；`designArenaCategories` 只保留 `website`、`uicomponent`、`slides`；删除 `usageTags`、`openRouterBenchmarks` |
+| `pkg/autorouter/modelrank/sources.go` | 新增 Artificial Analysis 免费接口与 Design Arena 接口加载，无 Design Arena key 时经 OpenRouter `/benchmarks` 读取；新增指标新鲜度统计；LMArena 增加 `creative_writing` 与两个 `industry_*` 分类；删除 OpenRouter 自测 benchmark（GPQA、τ-bench）、AA 指数转发、任务用量、端点延迟的加载 |
+| `pkg/autorouter/modelrank/rank.go` | 等权平均与按指标数的覆盖要求；删除用量加分；帕累托比较只看分数与价格 |
+| `pkg/autorouter/policy.go` | 按第 7.2 节的顺序选画像与列表，记录 `route_profile`、`route_fallback`；每一级列表先按第 7.3 节比较，比不出再取第一个可用的 |
+| `pkg/autorouter/select.go` | 第 7.3 节的质量/价格比较：候选带、价格折扣、同档、取最便宜，并返回比较过程写进日志 |
+| `setting/autorouter_setting/` | 新的内置 `task_models.json`；`taxonomy_version` 校验；`task_scores` 从内置 `evidence` 播种，随 `task_models` 一起按版本退回内置；`cost_lambda`、`score_tie_delta` |
+| `controller/system_task_handlers.go` | 刷新任务的启用条件改为检查 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY`；刷新时同时写 `task_scores` |
+| `middleware/distributor.go`、`relay/helper/price.go` | 候选按“模型 + 渠道”判定可用；`RoutingPricer` 按用户侧价格给候选报价，只读价格配置，不写 `PriceData`、不碰额度 |
+| `service/autorouter.go`、`service/log_info_generate.go` | 调用 jev 前先检查有没有可用模型；比较过程写进 `admin_info.auto_router` |
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `-out` | `setting/autorouter_setting/task_models.json` | 输出文件 |
-| `-api-key-env` | `OPENROUTER_API_KEY` | 存放 OpenRouter key 的环境变量名 |
-| `-openrouter` | `https://openrouter.ai/api/v1` | OpenRouter API 地址 |
-| `-livebench` | `https://livebench.ai` | LiveBench 站点 |
-| `-livebench-release` | 空（取最新） | LiveBench 版本目录 |
-| `-lmarena` | hf-mirror 上的 LMArena 数据集地址 | LMArena 数据地址 |
-| `-min-context` | `128000` | 候选模型最小上下文长度 |
-| `-min-coverage` | `0.5` | 参与排名所需的最小覆盖率 |
-| `-default-floor` | `0.9` | 默认列表头部"便宜且强"模型的分数下限（相对最高分） |
-| `-usage-bonus` | `0.03` | 用量加分上限 |
-| `-latency-tolerance` | `1.5` | 延迟相差多少倍以内视为一样快 |
+## 10. 已知限制
 
-运行时会输出各来源行数、未匹配名称、所有非精确匹配（`alias`），以及每个任务的模型数和列表，便于在更新内置榜单前人工复核。
-
-## 9. 已知限制
-
-- **模型命名**：网关模型名按"厂商原生写法"推断（见第 2 节）。如果渠道里配置的名称与之不同（例如加了自定义前缀），这些模型不会被选中，需要在渠道里配置模型重定向，或调整名称规则。
-- **带日期的快照**：OpenRouter 上同时存在"不带日期"和"带日期"的同一模型时，两者都会出现在榜单里（如 `deepseek-v4.1-flash` 和 `deepseek-v4.1-flash-1017`），哪个在渠道里配置了就用哪个。
-- **延迟**：取自 30 分钟快照，只影响帕累托判断和默认列表头部的选择；任务列表主要按分数排序，延迟不改变其中的大顺序。
-- **数据新旧**：各来源的更新频率不同。LMArena 文档榜可能比其他榜单旧一个月，以 `rank_sources` 中记录的日期为准。
-- **未收录模型**：排行榜上没有足够数据（覆盖率 < 0.5）的新模型，不会出现在对应任务的列表里，等榜单收录后会在下次刷新时自动进入。
+- **小榜覆盖有限**：`lb.*` 只含最新版本跑过的模型（`20261025` 为 31 个），`lma.document`、`lma.search` 各四十余个；两指标画像只要有其中一项即可上榜；`general.browser` 只用 `lb.browser`，只覆盖 LiveBench 收录的模型。未收录模型落到一级列表。
+- **Artificial Analysis 免费接口只有指数**：单项 benchmark（如 Terminal-Bench、FrontierCode）需要付费接口，因此 `aa.*` 只用 Intelligence 指数（v5）和 Strategy & Ops 能力指数。接口仍返回 `coding_index`、`agentic_index` 字段，但它们已不在 v5 指数体系中、不再随新模型更新，不使用。Intelligence v5 只覆盖 2026-03 之后发布的模型。
+- **LMArena 分榜新旧不一**：文档、搜索榜可能比文本榜旧一个月以上，以 `rank_sources` 记录的日期为准。
+- **分类准确率待校准**：12 个二级类的判定标准需要用标注集验证 jev 的选择准确率，`min_task_type_probability` 随之调整；一级类兜底保证二级类判错时仍落在相近的榜单上。
+- **λ 和 δ 是全局的，窗口宽度随画像变**：见第 7.4 节例 5。只含 elo 指标的画像候选带窄，含 ratio 指标的宽。按 2026-10-28 的内置榜单和榜单文件里的价格，λ=0.05、δ=0.02 时 12 个二级类里有 8 个选的不是榜单第一名。按画像分别标定还没做。
+- **单指标画像的分数偏薄**：`general.browser`、`general.research` 只有一个指标；`general.design`、`general.search`、`general.writing` 在 2026-10-28 的快照里因 `da.slides`、`lma.search`、`lma.document` 停更，实际只剩一到两个有效指标。用很小的分差换很大的价差，依据比多指标画像弱。
+- **比价用的是用户侧价格**：榜单文件里的 `price_per_mtok` 是 OpenRouter 的价格，只用来给 `default_models` 排序和本文示例。运行时按第 7.3 节用用户侧价格比较，两者可能差很多。

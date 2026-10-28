@@ -6,13 +6,12 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"math"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,15 +19,13 @@ import (
 )
 
 type sources struct {
-	client     *http.Client
-	openRouter string
-	apiKey     string
-	logf       func(format string, args ...any)
+	client *http.Client
+	logf   func(format string, args ...any)
 }
 
 // get makes up to attempts tries, retrying transient failures; a 429 waits
-// for Retry-After, or 15s more per attempt.
-func (s *sources) get(ctx context.Context, url string, attempts int) ([]byte, error) {
+// for Retry-After, or 15s more per attempt. header is sent with every try.
+func (s *sources) get(ctx context.Context, url string, header http.Header, attempts int) ([]byte, error) {
 	var lastErr error
 	wait := time.Duration(0)
 	for attempt := range attempts {
@@ -44,9 +41,7 @@ func (s *sources) get(ctx context.Context, url string, attempts int) ([]byte, er
 		if err != nil {
 			return nil, err
 		}
-		if s.apiKey != "" && strings.HasPrefix(url, s.openRouter) {
-			req.Header.Set("Authorization", "Bearer "+s.apiKey)
-		}
+		maps.Copy(req.Header, header)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			lastErr = err
@@ -73,8 +68,8 @@ func (s *sources) get(ctx context.Context, url string, attempts int) ([]byte, er
 	return nil, lastErr
 }
 
-func (s *sources) getJSON(ctx context.Context, url string, v any) error {
-	body, err := s.get(ctx, url, 5)
+func (s *sources) getJSON(ctx context.Context, url string, header http.Header, v any) error {
+	body, err := s.get(ctx, url, header, 5)
 	if err != nil {
 		return err
 	}
@@ -84,6 +79,7 @@ func (s *sources) getJSON(ctx context.Context, url string, v any) error {
 type orModel struct {
 	ID            string `json:"id"`
 	CanonicalSlug string `json:"canonical_slug"`
+	Created       int64  `json:"created"`
 	ContextLength int    `json:"context_length"`
 	Architecture  struct {
 		InputModalities  []string `json:"input_modalities"`
@@ -104,11 +100,11 @@ type orModel struct {
 // and out, tool calling, enough context, priced, not scheduled for removal.
 // Routing aliases (~), variants (:free, :batch) and OpenRouter's own routers
 // are dropped; ids sharing a canonical slug keep the shortest.
-func (s *sources) loadCandidates(ctx context.Context, minContext int) (*pool, error) {
+func (s *sources) loadCandidates(ctx context.Context, base string, minContext int) (*pool, error) {
 	var resp struct {
 		Data []orModel `json:"data"`
 	}
-	if err := s.getJSON(ctx, s.openRouter+"/models", &resp); err != nil {
+	if err := s.getJSON(ctx, base+"/models", nil, &resp); err != nil {
 		return nil, err
 	}
 	slices.SortFunc(resp.Data, func(a, b orModel) int {
@@ -136,60 +132,16 @@ func (s *sources) loadCandidates(ctx context.Context, minContext int) (*pool, er
 			continue
 		}
 		names[name] = true
-		c := &candidate{ID: m.ID, Slug: m.CanonicalSlug, Name: name, Price: price}
+		c := &candidate{
+			ID: m.ID, Slug: m.CanonicalSlug, Name: name, Price: price, Created: m.Created,
+			Vision: slices.Contains(m.Architecture.InputModalities, "image"),
+		}
 		if m.Reasoning != nil {
 			c.Efforts = m.Reasoning.SupportedEfforts
 		}
 		p.add(c)
 	}
 	return p, nil
-}
-
-func (s *sources) loadBenchmarks(ctx context.Context, p *pool) (string, error) {
-	var resp struct {
-		Data []struct {
-			Source        string   `json:"source"`
-			Slug          string   `json:"model_permaslug"`
-			Intelligence  *float64 `json:"intelligence_index"`
-			Coding        *float64 `json:"coding_index"`
-			Agentic       *float64 `json:"agentic_index"`
-			Arena         string   `json:"arena"`
-			Category      string   `json:"category"`
-			Elo           *float64 `json:"elo"`
-			BenchmarkType string   `json:"benchmark_type"`
-			Accuracy      *float64 `json:"accuracy"`
-		} `json:"data"`
-		Meta struct {
-			AsOf string `json:"as_of"`
-		} `json:"meta"`
-	}
-	if err := s.getJSON(ctx, s.openRouter+"/benchmarks", &resp); err != nil {
-		return "", err
-	}
-	for _, row := range resp.Data {
-		c := p.bySlug[row.Slug]
-		if c == nil {
-			continue
-		}
-		set := func(metric string, v *float64) {
-			if metric != "" && v != nil {
-				c.record(metric, *v)
-			}
-		}
-		switch row.Source {
-		case "artificial-analysis":
-			set("aa.intelligence", row.Intelligence)
-			set("aa.coding", row.Coding)
-			set("aa.agentic", row.Agentic)
-		case "design-arena":
-			if row.Arena == "models" {
-				set(designArenaCategories[row.Category], row.Elo)
-			}
-		case "openrouter":
-			set(openRouterBenchmarks[row.BenchmarkType], row.Accuracy)
-		}
-	}
-	return resp.Meta.AsOf, nil
 }
 
 var (
@@ -203,7 +155,7 @@ func (s *sources) loadLiveBench(ctx context.Context, p *pool, site, release stri
 	var body []byte
 	var err error
 	if release != "" {
-		body, err = s.get(ctx, site+"/data/"+release+"/table.csv", 5)
+		body, err = s.get(ctx, site+"/data/"+release+"/table.csv", nil, 5)
 	} else {
 		release, body, err = s.latestLiveBench(ctx, site)
 	}
@@ -241,7 +193,7 @@ func (s *sources) loadLiveBench(ctx context.Context, p *pool, site, release stri
 // latestLiveBench finds the newest release: the site publishes no index, but
 // its bundle lists the release directories as "YYYYMMDD" strings.
 func (s *sources) latestLiveBench(ctx context.Context, site string) (string, []byte, error) {
-	index, err := s.get(ctx, site+"/", 5)
+	index, err := s.get(ctx, site+"/", nil, 5)
 	if err != nil {
 		return "", nil, err
 	}
@@ -249,7 +201,7 @@ func (s *sources) latestLiveBench(ctx context.Context, site string) (string, []b
 	if bundlePath == nil {
 		return "", nil, fmt.Errorf("livebench: no bundle in %s", site)
 	}
-	bundle, err := s.get(ctx, site+"/"+string(bundlePath), 5)
+	bundle, err := s.get(ctx, site+"/"+string(bundlePath), nil, 5)
 	if err != nil {
 		return "", nil, err
 	}
@@ -261,7 +213,7 @@ func (s *sources) latestLiveBench(ctx context.Context, site string) (string, []b
 	releases = slices.Compact(releases)
 	slices.Reverse(releases)
 	for _, release := range releases {
-		if body, err := s.get(ctx, site+"/data/"+release+"/table.csv", 1); err == nil {
+		if body, err := s.get(ctx, site+"/data/"+release+"/table.csv", nil, 1); err == nil {
 			return release, body, nil
 		}
 	}
@@ -281,7 +233,7 @@ type lmArenaRow struct {
 func (s *sources) loadLMArena(ctx context.Context, p *pool, base string) (string, error) {
 	var dates []string
 	for _, board := range lmArenaBoards {
-		body, err := s.get(ctx, base+"/"+board.config+"/latest-00000-of-00001.parquet", 5)
+		body, err := s.get(ctx, base+"/"+board.config+"/latest-00000-of-00001.parquet", nil, 5)
 		if err != nil {
 			return "", err
 		}
@@ -317,67 +269,130 @@ func (s *sources) loadLMArena(ctx context.Context, p *pool, base string) (string
 	return strings.Join(dates, " "), nil
 }
 
-// loadUsage reads OpenRouter's 7-day task classification: the top models of
-// each tag with their share of the tag's requests.
-func (s *sources) loadUsage(ctx context.Context, p *pool) (string, error) {
-	var resp struct {
-		Data struct {
-			AsOf            string `json:"as_of"`
-			WindowDays      int    `json:"window_days"`
-			Classifications []struct {
-				Tag    string `json:"tag"`
-				Models []struct {
-					ID    string  `json:"id"`
-					Share float64 `json:"tag_usage_share"`
-				} `json:"models"`
-			} `json:"classifications"`
-		} `json:"data"`
-	}
-	if err := s.getJSON(ctx, s.openRouter+"/classifications/task", &resp); err != nil {
-		return "", err
-	}
-	for _, class := range resp.Data.Classifications {
-		for _, m := range class.Models {
-			if c := p.bySlug[m.ID]; c != nil {
-				c.Usage[class.Tag] = m.Share
-			}
+// loadArtificialAnalysis reads the index evaluations of every model on the
+// free API, page by page. Models are matched by name, then by slug.
+func (s *sources) loadArtificialAnalysis(ctx context.Context, p *pool, base, apiKey string) (string, error) {
+	header := http.Header{"X-Api-Key": {apiKey}}
+	version := 0
+	rows, unmatched := 0, 0
+	for page := 1; ; page++ {
+		var resp struct {
+			IntelligenceIndexVersion int `json:"intelligence_index_version"`
+			Pagination               struct {
+				HasMore bool `json:"has_more"`
+			} `json:"pagination"`
+			Data []struct {
+				Name        string              `json:"name"`
+				Slug        string              `json:"slug"`
+				Evaluations map[string]*float64 `json:"evaluations"`
+			} `json:"data"`
 		}
-	}
-	return fmt.Sprintf("%s (%dd)", resp.Data.AsOf, resp.Data.WindowDays), nil
-}
-
-// loadLatency fills the lowest endpoint p50 latency of the last 30 minutes.
-// A failed lookup leaves the latency unknown.
-func (s *sources) loadLatency(ctx context.Context, list []*candidate) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
-	for _, c := range list {
-		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			var resp struct {
-				Data struct {
-					Endpoints []struct {
-						Latency *struct {
-							P50 *float64 `json:"p50"`
-						} `json:"latency_last_30m"`
-					} `json:"endpoints"`
-				} `json:"data"`
+		if err := s.getJSON(ctx, fmt.Sprintf("%s/language/models/free?page=%d", base, page), header, &resp); err != nil {
+			return "", err
+		}
+		version = resp.IntelligenceIndexVersion
+		for _, row := range resp.Data {
+			rows++
+			c := p.match(row.Name)
+			if c == nil {
+				c = p.match(row.Slug)
 			}
-			if err := s.getJSON(ctx, s.openRouter+"/models/"+c.ID+"/endpoints", &resp); err != nil {
-				s.logf("latency %s: %v", c.ID, err)
-				return
+			if c == nil {
+				unmatched++
+				continue
 			}
-			best := math.Inf(1)
-			for _, e := range resp.Data.Endpoints {
-				if e.Latency != nil && e.Latency.P50 != nil && *e.Latency.P50 > 0 {
-					best = min(best, *e.Latency.P50)
+			for field, metric := range artificialAnalysisIndexes {
+				if v := row.Evaluations[field]; v != nil {
+					c.record(metric, *v)
 				}
 			}
-			if !math.IsInf(best, 1) {
-				c.LatencyMs = best
-			}
-		})
+		}
+		if !resp.Pagination.HasMore {
+			break
+		}
 	}
-	wg.Wait()
+	s.logf("artificial_analysis rows=%d unmatched=%d intelligence_index_version=%d", rows, unmatched, version)
+	return fmt.Sprintf("intelligence_index_v%d", version), nil
+}
+
+// loadDesignArena reads the Models Arena Elo of each category. A row names
+// its OpenRouter id when the model is on OpenRouter; other rows are matched by
+// display name.
+func (s *sources) loadDesignArena(ctx context.Context, p *pool, base, apiKey string) (string, error) {
+	header := http.Header{"Authorization": {"Bearer " + apiKey}}
+	var dates []string
+	for _, category := range slices.Sorted(maps.Keys(designArenaCategories)) {
+		var resp struct {
+			Data []struct {
+				DisplayName  string   `json:"displayName"`
+				OpenRouterID *string  `json:"openRouterId"`
+				Elo          *float64 `json:"elo"`
+			} `json:"data"`
+			Meta struct {
+				LastUpdated *string `json:"lastUpdated"`
+			} `json:"meta"`
+		}
+		if err := s.getJSON(ctx, base+"/leaderboard/models/"+category, header, &resp); err != nil {
+			return "", err
+		}
+		unmatched := 0
+		for _, row := range resp.Data {
+			if row.Elo == nil {
+				continue
+			}
+			var c *candidate
+			if row.OpenRouterID != nil {
+				c = p.bySlug[*row.OpenRouterID]
+			}
+			if c == nil {
+				c = p.match(row.DisplayName)
+			}
+			if c == nil {
+				unmatched++
+				continue
+			}
+			c.record(designArenaCategories[category], *row.Elo)
+		}
+		date := ""
+		if resp.Meta.LastUpdated != nil {
+			date = *resp.Meta.LastUpdated
+		}
+		s.logf("design_arena %s rows=%d unmatched=%d updated=%s", category, len(resp.Data), unmatched, date)
+		dates = append(dates, category+"@"+date)
+	}
+	return strings.Join(dates, " "), nil
+}
+
+// loadDesignArenaViaOpenRouter reads the Design Arena Models Arena Elo that
+// OpenRouter's /benchmarks relays, keyed by canonical slug; it stands in for
+// the Design Arena API when no Design Arena key is configured.
+func (s *sources) loadDesignArenaViaOpenRouter(ctx context.Context, p *pool, base, apiKey string) (string, error) {
+	var resp struct {
+		Data []struct {
+			Source   string   `json:"source"`
+			Slug     string   `json:"model_permaslug"`
+			Arena    string   `json:"arena"`
+			Category string   `json:"category"`
+			Elo      *float64 `json:"elo"`
+		} `json:"data"`
+		Meta struct {
+			AsOf string `json:"as_of"`
+		} `json:"meta"`
+	}
+	if err := s.getJSON(ctx, base+"/benchmarks", http.Header{"Authorization": {"Bearer " + apiKey}}, &resp); err != nil {
+		return "", err
+	}
+	rows := map[string]int{}
+	for _, row := range resp.Data {
+		metric, ok := designArenaCategories[row.Category]
+		if row.Source != "design-arena" || row.Arena != "models" || !ok || row.Elo == nil {
+			continue
+		}
+		rows[row.Category]++
+		if c := p.bySlug[row.Slug]; c != nil {
+			c.record(metric, *row.Elo)
+		}
+	}
+	s.logf("design_arena via openrouter rows=%v as_of=%s", rows, resp.Meta.AsOf)
+	return "openrouter@" + resp.Meta.AsOf, nil
 }

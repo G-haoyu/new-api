@@ -29,9 +29,10 @@ const (
 )
 
 // fakeJev answers by the current task: "hard" is a very difficult coding task,
-// "ok" is unclassifiable, anything else is a simple question. Every answer
-// continues the previous task. It expects the key and model that
-// useAutoRouterSetting configures.
+// "ok" is unclassifiable, "split" spreads the task type over several leaves
+// without any single one reaching the trust threshold, anything else is a
+// simple question. Every answer continues the previous task. It expects the key
+// and model that useAutoRouterSetting configures.
 func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -43,15 +44,23 @@ func fakeJev(t *testing.T, calls *atomic.Int32, delay time.Duration) *httptest.S
 		require.NoError(t, common.DecodeJson(r.Body, &payload))
 		assert.Equal(t, "Bearer "+testJevAPIKey, r.Header.Get("Authorization"))
 		assert.Equal(t, testJevModel, payload.Model)
-		taskType, difficulty := "direct_qa", "0"
+		taskType, difficulty := "general.chat", "0"
+		probabilities := ""
 		switch payload.State["current_task"] {
 		case "hard":
-			taskType, difficulty = "coding", "3"
+			taskType, difficulty = "code.build", "3"
 		case "ok":
 			taskType = autorouter.TaskTypeUnknown
+		case "split":
+			// 概率最高的叶子是 general.chat，但只有 0.4；code 下的两个叶子加起来 0.6。
+			difficulty = "3"
+			probabilities = `"general.chat":0.4,"code.build":0.35,"code.ops":0.25`
+		}
+		if probabilities == "" {
+			probabilities = `"` + taskType + `":0.9`
 		}
 		_, _ = w.Write([]byte(`{"answers":{
-			"task_type":{"type":"choice","choice":"` + taskType + `","probabilities":{"` + taskType + `":0.9}},
+			"task_type":{"type":"choice","choice":"` + taskType + `","probabilities":{` + probabilities + `}},
 			"difficulty":{"type":"score","probabilities":{"` + difficulty + `":0.8}},
 			"task_change":{"type":"noul","noul":0.1},
 			"larger_model_benefit":{"type":"noul","noul":0.1}}}`))
@@ -70,10 +79,11 @@ func useAutoRouterSetting(t *testing.T, endpoint string, timeoutMs int) {
 	setting.Enabled = true
 	setting.JevTimeoutMs = timeoutMs
 	setting.TaskModels = map[string][]string{
-		"coding":    {"coder"},
-		"direct_qa": {"chat"},
+		"code.build":   {"coder"},
+		"general.chat": {"chat"},
 	}
 	setting.DefaultModels = []string{"general"}
+	setting.RankSources = map[string]string{"taxonomy_version": autorouter.TaxonomyVersion}
 	setting.DifficultyEfforts = []string{"low", "medium", "high", "xhigh"}
 	setting.DefaultEffort = "medium"
 }
@@ -104,7 +114,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	first, err := ResolveAutoModel(newAutoRouterContext(9101, body), allModelsAvailable)
 	require.NoError(t, err)
 	assert.Equal(t, "coder-xhigh", first.ResolvedModel)
-	assert.Equal(t, autorouter.Route{TaskType: "coding", Model: "coder", Effort: "xhigh"}, first.Route)
+	assert.Equal(t, autorouter.Route{Profile: "code.build", Model: "coder", Effort: "xhigh"}, first.Route)
 	assert.Equal(t, autorouter.SourceJev, first.Source)
 	require.NotNil(t, first.Jev)
 	assert.NotEmpty(t, first.Jev.Response)
@@ -116,7 +126,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	assert.Equal(t, autorouter.SourceCache, second.Source)
 	assert.Nil(t, second.Jev, "a cache hit must not carry jev output")
 	assert.Equal(t, int32(1), calls.Load())
-	assert.Equal(t, "coding", common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload))
+	assert.Equal(t, "code.build", common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload))
 
 	_, err = ResolveAutoModel(newAutoRouterContext(9102, body), allModelsAvailable)
 	require.NoError(t, err)
@@ -144,8 +154,26 @@ func TestResolveAutoModelFollowsPreviousRoute(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "coder-xhigh", continued.ResolvedModel, "a continuation keeps the model and never lowers the effort")
 	assert.Equal(t, autorouter.SourceJev, continued.Source)
-	assert.Equal(t, "direct_qa", continued.Decision.TaskType)
+	assert.Equal(t, "general.chat", continued.Decision.TaskType)
 	assert.True(t, continued.EffortOverride)
+}
+
+// 没有任何一个叶子的概率过半，但同一大类下各叶子的概率之和过半：按大类的榜单选模型，
+// 这仍然是一次可信的判断，档位由 auto 定，会覆盖客户端自己写的推理字段。
+func TestResolveAutoModelTrustsTheClassWhenNoSingleLeafIsTrusted(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	autorouter_setting.GetAutoRouterSetting().TaskModels["code"] = []string{"class-coder"}
+
+	result, err := ResolveAutoModel(newAutoRouterContext(9451, `{"messages":[{"role":"user","content":"split"}]}`), allModelsAvailable)
+	require.NoError(t, err)
+	require.NotNil(t, result.Decision)
+	assert.Less(t, result.Decision.TaskTypeProbability, 0.5, "概率最高的叶子没有过半")
+	assert.Equal(t, autorouter.Route{Profile: "code", Model: "class-coder", Effort: "xhigh"}, result.Route)
+	assert.Equal(t, "class", result.Fallback())
+	assert.Equal(t, autorouter.SourceJev, result.Source)
+	assert.True(t, result.EffortOverride)
+	assert.Equal(t, "class-coder-xhigh", result.ResolvedModel)
 }
 
 func TestResolveAutoModelEncryptedSubAgentInheritsSessionRoute(t *testing.T) {
@@ -240,8 +268,8 @@ func TestResolveAutoModelPicksByQualityAndPrice(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
 	setting := autorouter_setting.GetAutoRouterSetting()
-	setting.TaskModels = map[string][]string{"coding": {"opus-m", "sonnet-m"}}
-	setting.TaskScores = map[string]map[string]float64{"coding": {"opus-m": 0.97, "sonnet-m": 0.96}}
+	setting.TaskModels = map[string][]string{"code.build": {"opus-m", "sonnet-m"}}
+	setting.TaskScores = map[string]map[string]float64{"code.build": {"opus-m": 0.97, "sonnet-m": 0.96}}
 	setting.CostLambda, setting.ScoreTieDelta = 0.05, 0.02
 	prices := map[string]float64{"opus-m": 8, "sonnet-m": 4}
 	candidates := func(withPrice func(string) (float64, bool)) AutoCandidates {
@@ -307,7 +335,7 @@ func TestResolveAutoModelConvergesEffortForDeclaredReasoningModels(t *testing.T)
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
 	setting := autorouter_setting.GetAutoRouterSetting()
-	setting.TaskModels = map[string][]string{"coding": {"reasoner"}, "direct_qa": {"no-think"}}
+	setting.TaskModels = map[string][]string{"code.build": {"reasoner"}, "general.chat": {"no-think"}}
 	setting.DefaultModels = []string{"reasoner"}
 	withChannels := func(channels ...int) AutoCandidates {
 		return AutoCandidates{Serves: func(string, bool) bool { return true }, Channels: func(string) []int { return channels }}
@@ -350,7 +378,7 @@ func TestResolveAutoModelConvergesEffortForDeclaredReasoningModels(t *testing.T)
 	})
 
 	t.Run("a model without a reasoning declaration keeps the model-name suffix", func(t *testing.T) {
-		setting.TaskModels = map[string][]string{"coding": {"gated-model"}}
+		setting.TaskModels = map[string][]string{"code.build": {"gated-model"}}
 		result, err := ResolveAutoModel(newAutoRouterContext(9704, `{"messages":[{"role":"user","content":"hard"}]}`), withChannels(1))
 		require.NoError(t, err)
 		assert.Equal(t, "gated-model-xhigh", result.ResolvedModel)
@@ -414,6 +442,8 @@ func TestResolveAutoModelTraceSpans(t *testing.T) {
 		assert.Equal(t, "coder-xhigh", attr(route, "langfuse.observation.metadata.resolved_model"))
 		assert.Equal(t, "coder", attr(route, "langfuse.trace.metadata.auto_router_model"))
 		assert.Equal(t, "xhigh", attr(route, "langfuse.trace.metadata.auto_router_effort"))
+		assert.Equal(t, "code.build", attr(route, "langfuse.observation.metadata.route_profile"))
+		assert.Equal(t, "leaf", attr(route, "langfuse.trace.metadata.auto_router_fallback"))
 		assert.Empty(t, attr(route, "langfuse.observation.level"))
 
 		c, exporter = newTracedContext(t, 9601, body)

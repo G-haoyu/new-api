@@ -107,10 +107,11 @@ func AutoRouterListed(visible []string) bool {
 		return false
 	}
 	isVisible := func(model string) bool { return slices.Contains(visible, model) }
-	if slices.ContainsFunc(setting.DefaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
+	taskModels, defaultModels := setting.Ranking()
+	if slices.ContainsFunc(defaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 		return true
 	}
-	for _, models := range setting.TaskModels {
+	for _, models := range taskModels {
 		if slices.ContainsFunc(models, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 			return true
 		}
@@ -309,13 +310,17 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 	route.Metadata = map[string]string{
 		"route_model":    result.Model,
 		"route_effort":   result.Effort,
+		"route_profile":  result.Profile,
+		"route_fallback": result.Fallback(),
 		"source":         result.Source,
 		"resolved_model": result.ResolvedModel,
 	}
 	route.TraceMetadata = map[string]string{
-		"auto_router_model":  result.Model,
-		"auto_router_effort": result.Effort,
-		"auto_router_source": result.Source,
+		"auto_router_model":    result.Model,
+		"auto_router_effort":   result.Effort,
+		"auto_router_profile":  result.Profile,
+		"auto_router_fallback": result.Fallback(),
+		"auto_router_source":   result.Source,
 	}
 	otelRuntime.FinishObservation(routeSpan, route)
 	if !ok {
