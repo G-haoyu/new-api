@@ -51,6 +51,9 @@ func CurrentCapabilityGateMode() CapabilityGateMode {
 type CapabilityGate struct {
 	mode  CapabilityGateMode
 	needs *capability.Needs
+	// estimator 给声明了上下文窗口的候选估算输入长度，同一个请求里与价格探测、调度器共用。
+	// 为 nil 时不做上下文窗口判定。
+	estimator *routingInputEstimator
 
 	modelVerdicts   map[string]capabilityVerdict
 	modelRejections map[string]capabilityRejection
@@ -109,6 +112,7 @@ func BuildCapabilityGate(c *gin.Context) *CapabilityGate {
 	gate := &CapabilityGate{
 		mode:          mode,
 		needs:         needs,
+		estimator:     routingInputEstimatorOf(c),
 		modelVerdicts: make(map[string]capabilityVerdict),
 	}
 	common.SetContextKey(c, constant.ContextKeyCapabilityGate, gate)
@@ -180,14 +184,6 @@ func (g *CapabilityGate) AllowsAnyChannel(modelName string, channelIDs []int, ig
 	}
 	g.rejected = append(g.rejected, capabilityBaseModel(modelName))
 	return false
-}
-
-// EstimatedInputTokens 返回请求体粗估的输入 token 数；门控关闭或没有解析出诉求时为 0。
-func (g *CapabilityGate) EstimatedInputTokens() int64 {
-	if g == nil || g.needs == nil {
-		return 0
-	}
-	return g.needs.EstimatedInputTokens
 }
 
 // withoutClientReasoning 返回撇开客户端推理字段的诉求副本，推理维度不参与判定。
@@ -295,7 +291,15 @@ func (g *CapabilityGate) judgeChannels(modelName string, channelIDs []int, needs
 			judgement.rejections[channelID] = capabilityRejection{undeclared: true}
 			continue
 		}
-		violations := normalizeGateViolations(capability.Evaluate(effective, needs))
+		// 上下文窗口是按这个模型自己的 tokenizer 声明的，所以输入长度也按它的家族估算；
+		// 只有声明了窗口才估算，没声明的模型不必为此解析请求体。
+		judged := needs
+		if needs != nil && g.estimator != nil && effective.Context.MaxInputTokens != nil {
+			withEstimate := *needs
+			withEstimate.EstimatedInputTokens = g.estimator.tokens(modelName)
+			judged = &withEstimate
+		}
+		violations := normalizeGateViolations(capability.Evaluate(effective, judged))
 		if !capability.Satisfied(violations) {
 			judgement.rejected = append(judgement.rejected, channelID)
 			judgement.rejections[channelID] = capabilityRejection{violations: violations}

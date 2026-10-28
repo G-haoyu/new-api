@@ -151,7 +151,7 @@ func TestExtractChatNeeds(t *testing.T) {
 	assert.Equal(t, 0.1, *needs.FrequencyPenalty)
 	assert.Contains(t, needs.InputModalities, "image")
 	assert.Contains(t, needs.Mimes, "image/png")
-	assert.Greater(t, needs.EstimatedInputTokens, int64(0))
+	assert.Zero(t, needs.EstimatedInputTokens, "输入 token 估算取决于候选模型的家族，不在提取阶段算")
 }
 
 func TestSummarizeDoesNotInventBuiltinTools(t *testing.T) {

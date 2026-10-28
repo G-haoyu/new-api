@@ -14,8 +14,11 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/autorouter_setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -740,4 +743,61 @@ func TestDistributeAutoPricesCandidatesInTheirOwnBillingGroup(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "cheap-y", originalModel, "exp-x 的计费分组倍率是 4，实际价格是 cheap-y 的 4 倍")
+}
+
+// useTieredExpressions 给 expressions 里的模型配上分档计费表达式。
+func useTieredExpressions(t *testing.T, expressions map[string]string) {
+	t.Helper()
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	t.Cleanup(func() { require.NoError(t, config.GlobalConfig.LoadFromDB(saved)) })
+	modes := map[string]string{}
+	for name := range expressions {
+		modes[name] = billing_setting.BillingModeTieredExpr
+	}
+	encodedModes, err := common.Marshal(modes)
+	require.NoError(t, err)
+	encodedExpressions, err := common.Marshal(expressions)
+	require.NoError(t, err)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": string(encodedModes),
+		"billing_setting.billing_expr": string(encodedExpressions),
+	}))
+}
+
+// 门控关闭（没有任何能力声明）时价格探测也要按候选自己的家族估算输入长度：
+// 同一段文本在 claude 4.7 的 tokenizer 下更长，会落进另一个价格档。
+// 原先价格探测的估算来自门控，门控为 nil 时恒为 0，所有候选都按最小档估价。
+func TestDistributeAutoPricesTieredModelsAtTheirOwnEstimatedLength(t *testing.T) {
+	setupAutoRoutingDistribute(t, []string{"claude-opus-4-7-tier"}, map[int][]string{
+		1: {"claude-opus-4-7-tier"}, 2: {"claude-sonnet-4-5-tier"}})
+	content := strings.Repeat("Please review the scheduler design and the retry policy. 请审查调度器的设计和重试策略。", 60)
+	encoded, err := common.Marshal(map[string]any{"model": "auto", "messages": []any{map[string]any{"role": "user", "content": content}}})
+	require.NoError(t, err)
+	body := string(encoded)
+
+	probe, _ := gin.CreateTestContext(httptest.NewRecorder())
+	probe.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	sonnetLength := service.RoutingInputTokens(probe, "claude-sonnet-4-5-tier")
+	opusLength := service.RoutingInputTokens(probe, "claude-opus-4-7-tier")
+	require.Less(t, sonnetLength, opusLength)
+
+	// 长度阈值落在两个估算之间：sonnet 在短档（混合价 1），opus 在长档（混合价 10）。
+	expression := fmt.Sprintf(`len <= %d ? tier("short", p * 1 + c * 1) : tier("long", p * 10 + c * 10)`, (sonnetLength+opusLength)/2)
+	useTieredExpressions(t, map[string]string{"claude-opus-4-7-tier": expression, "claude-sonnet-4-5-tier": expression})
+
+	s := autorouter_setting.GetAutoRouterSetting()
+	s.TaskModels = map[string][]string{"coding": {"claude-opus-4-7-tier", "claude-sonnet-4-5-tier"}}
+	s.TaskScores = map[string]map[string]float64{"coding": {"claude-opus-4-7-tier": 0.97, "claude-sonnet-4-5-tier": 0.96}}
+	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
+	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "coding"))
+
+	_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9805, body)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "claude-sonnet-4-5-tier", originalModel,
+		"opus 的 tokenizer 把同一段文本切得更长，落进 10 倍价格的长档；两者分数只差 0.01，所以选便宜的 sonnet")
 }

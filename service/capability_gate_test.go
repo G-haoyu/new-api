@@ -469,6 +469,47 @@ func TestCapabilityGateCandidateJudgementWritesNoEvent(t *testing.T) {
 	assert.Equal(t, 1, event.RejectedCount)
 }
 
+// 同一个请求、同样声明的上下文窗口，放不放得下要看候选模型自己的 tokenizer 家族；
+// 并且 tools 定义要算进输入长度（原先的估算只数消息文本）。
+func TestCapabilityGateContextWindowFollowsTheCandidatesTokenizerFamily(t *testing.T) {
+	setupCapabilityGateTest(t)
+	chat := estimateCases(t)[0]
+	var payload map[string]any
+	require.NoError(t, common.Unmarshal([]byte(chat.body), &payload))
+	delete(payload, "tools")
+	bare := estimateBody(t, payload)
+
+	sonnetFull := RoutingInputTokens(estimateContext(chat.path, chat.body), "claude-sonnet-4-5")
+	opusFull := RoutingInputTokens(estimateContext(chat.path, chat.body), "claude-opus-4-7")
+	sonnetBare := RoutingInputTokens(estimateContext(chat.path, bare), "claude-sonnet-4-5")
+	require.Less(t, sonnetBare, sonnetFull)
+	require.Less(t, sonnetFull, opusFull)
+	familyWindow, toolsWindow := (sonnetFull+opusFull)/2, (sonnetBare+sonnetFull)/2
+
+	declare := func(name string, window int64) model.Model {
+		return model.Model{ModelName: name, NameRule: model.NameRuleExact, Capabilities: fmt.Sprintf(`{"context":{"max_input_tokens":%d}}`, window)}
+	}
+	require.NoError(t, model.DB.Create(&[]model.Model{
+		declare("claude-sonnet-4-5", familyWindow), declare("claude-opus-4-7", familyWindow), declare("claude-3-5-haiku", toolsWindow),
+	}).Error)
+	require.NoError(t, model.InitCapabilityCache())
+
+	setting := operation_setting.GetCapabilityGateSetting()
+	previous := setting.Mode
+	t.Cleanup(func() { setting.Mode = previous })
+	setting.Mode = operation_setting.CapabilityGateModeEnforce
+
+	allows := func(body, candidate string) bool {
+		gate := BuildCapabilityGate(estimateContext(chat.path, body))
+		require.NotNil(t, gate)
+		return gate.AllowsAnyChannel(candidate, []int{1}, false)
+	}
+	assert.True(t, allows(chat.body, "claude-sonnet-4-5"), "窗口够放 sonnet 的估算")
+	assert.False(t, allows(chat.body, "claude-opus-4-7"), "同样的窗口放不下 opus 4.7 更碎的 tokenizer")
+	assert.False(t, allows(chat.body, "claude-3-5-haiku"), "带上 tools 定义就超出窗口")
+	assert.True(t, allows(bare, "claude-3-5-haiku"), "同一个窗口，去掉 tools 就放得下")
+}
+
 func TestCapabilityGateEventTruncatesRejectedChannelsOnAWholeChannelId(t *testing.T) {
 	setupCapabilityGateTest(t)
 	batches := captureCapabilityGateEvents(t)

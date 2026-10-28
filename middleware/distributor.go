@@ -156,7 +156,9 @@ func Distribute() func(c *gin.Context) {
 					channels := map[string][]int{}
 					// 选路阶段估价：只读价格配置，不预扣、不写额度。
 					userSetting, _ := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
-					pricer := helper.NewRoutingPricer(c, capabilityGate.EstimatedInputTokens(), userSetting.AcceptUnsetRatioModel)
+					pricer := helper.NewRoutingPricer(c, func(candidate string) int64 {
+						return service.RoutingInputTokens(c, candidate)
+					}, userSetting.AcceptUnsetRatioModel)
 					quotes := map[string]helper.RoutingQuote{}
 					quoteOf := func(candidate string) helper.RoutingQuote {
 						if quote, seen := quotes[candidate]; seen {

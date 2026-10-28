@@ -851,7 +851,7 @@ func newRoutingPricer(t *testing.T, estimatedInputTokens int64, acceptUnset bool
 	t.Helper()
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	return NewRoutingPricer(ctx, estimatedInputTokens, acceptUnset)
+	return NewRoutingPricer(ctx, func(string) int64 { return estimatedInputTokens }, acceptUnset)
 }
 
 func TestRoutingPricerQuote(t *testing.T) {
@@ -905,6 +905,32 @@ func TestRoutingPricerQuote(t *testing.T) {
 		quote := newRoutingPricer(t, 100, true).Quote("rp-unknown", 1)
 		assert.Equal(t, RoutingPerToken, quote.Kind)
 		assert.Greater(t, quote.PricePerMillion, 0.0)
+	})
+
+	// 同一个请求在不同家族的 tokenizer 下长度不同，分档表达式的档位也就不同：每个候选按自己的估算取价。
+	t.Run("each candidate is quoted at its own estimated length", func(t *testing.T) {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		// rp-tiered 在 1000 token 以内是短档（混合价 3），超过是长档（15）；
+		// rp-fixed 在 32000 以内按次计价，超过是长档（只收输入，混合价 1.5）。
+		pricer := NewRoutingPricer(ctx, func(candidate string) int64 {
+			return map[string]int64{"rp-tiered": 5000, "rp-fixed": 100000}[candidate]
+		}, false)
+		assert.InDelta(t, 15.0, pricer.Quote("rp-tiered", 1).PricePerMillion, 1e-9)
+		fixed := pricer.Quote("rp-fixed", 1)
+		assert.Equal(t, RoutingPerToken, fixed.Kind)
+		assert.InDelta(t, 1.5, fixed.PricePerMillion, 1e-9)
+
+		short := NewRoutingPricer(ctx, func(candidate string) int64 {
+			return map[string]int64{"rp-tiered": 500, "rp-fixed": 100}[candidate]
+		}, false)
+		assert.InDelta(t, 3.0, short.Quote("rp-tiered", 1).PricePerMillion, 1e-9)
+		assert.Equal(t, RoutingPerRequest, short.Quote("rp-fixed", 1).Kind)
+	})
+
+	t.Run("an unknown estimate quotes the smallest tier", func(t *testing.T) {
+		quote := newRoutingPricer(t, 0, false).Quote("rp-tiered", 1)
+		assert.InDelta(t, 3.0, quote.PricePerMillion, 1e-9)
 	})
 }
 

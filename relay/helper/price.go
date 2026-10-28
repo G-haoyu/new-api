@@ -456,19 +456,20 @@ type RoutingQuote struct {
 // 价格保持浮点美元，不换算成额度。
 type RoutingPricer struct {
 	input            billingexpr.RequestInput
-	promptTokens     float64
+	estimateInput    func(originModel string) int64
 	acceptUnsetRatio bool
 }
 
-// NewRoutingPricer 按请求的估算输入 token 数选择表达式里的上下文长度档位。
-// 估算为 0（门控关闭等）时按最小档估价。
-func NewRoutingPricer(c *gin.Context, estimatedInputTokens int64, acceptUnsetRatio bool) *RoutingPricer {
+// NewRoutingPricer 按候选模型的估算输入 token 数选择表达式里的上下文长度档位。
+// 同一段文本在不同家族的 tokenizer 下长度不同，所以每个候选单独估算；
+// 估算为 0（请求体不可用、超限等）时按最小档估价。estimateInput 不能为 nil。
+func NewRoutingPricer(c *gin.Context, estimateInput func(originModel string) int64, acceptUnsetRatio bool) *RoutingPricer {
 	// 读不到请求体时表达式里的 param() 取不到值，按没有该参数估价，不让选路因此失败。
 	input, _ := ResolveIncomingBillingExprRequestInput(c, nil)
 	input.Headers = relaycommon.CloneRequestHeaders(c)
 	return &RoutingPricer{
 		input:            input,
-		promptTokens:     float64(min(max(estimatedInputTokens, 1), math.MaxInt32)),
+		estimateInput:    estimateInput,
 		acceptUnsetRatio: acceptUnsetRatio,
 	}
 }
@@ -488,10 +489,11 @@ func (p *RoutingPricer) Quote(originModel string, groupRatio float64) RoutingQuo
 			return RoutingQuote{}
 		}
 		hash := billingexpr.ExprHashString(expr)
+		promptTokens := float64(min(max(p.estimateInput(originModel), 1), math.MaxInt32))
 		// 表达式的系数就是美元/百万 token。跑两次再相减，得到当前上下文长度档位下的输入价和输出价，
 		// 不假设表达式对 token 数是线性的。
 		inputCost, trace, err := billingexpr.RunExprByHashWithRequest(expr, hash,
-			billingexpr.TokenParams{P: p.promptTokens, C: 0, Len: p.promptTokens}, p.input)
+			billingexpr.TokenParams{P: promptTokens, C: 0, Len: promptTokens}, p.input)
 		if err != nil {
 			return RoutingQuote{}
 		}
@@ -499,11 +501,11 @@ func (p *RoutingPricer) Quote(originModel string, groupRatio float64) RoutingQuo
 			return RoutingQuote{Kind: RoutingPerRequest}
 		}
 		bothCost, _, err := billingexpr.RunExprByHashWithRequest(expr, hash,
-			billingexpr.TokenParams{P: p.promptTokens, C: p.promptTokens, Len: p.promptTokens}, p.input)
+			billingexpr.TokenParams{P: promptTokens, C: promptTokens, Len: promptTokens}, p.input)
 		if err != nil {
 			return RoutingQuote{}
 		}
-		inputPrice, outputPrice = inputCost/p.promptTokens, (bothCost-inputCost)/p.promptTokens
+		inputPrice, outputPrice = inputCost/promptTokens, (bothCost-inputCost)/promptTokens
 	default:
 		if _, fixed := ratio_setting.GetModelPrice(name, false); fixed {
 			return RoutingQuote{Kind: RoutingPerRequest}
