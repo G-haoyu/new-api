@@ -3,12 +3,14 @@ package model
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm/schema"
 )
 
 func TestIsClickHouseDSN(t *testing.T) {
@@ -140,6 +142,20 @@ func TestEnsureLogRequestId(t *testing.T) {
 	assert.Equal(t, "fixed-request-id", existing.RequestId, "existing request id must be preserved")
 
 	assert.NotPanics(t, func() { ensureLogRequestId(nil) })
+}
+
+// ClickHouse 绕过 AutoMigrate，建表语句靠手工维护；少一列会让整批 INSERT 失败。
+func TestClickHouseCapabilityGateEventCreateTableSQLCoversEveryColumn(t *testing.T) {
+	parsed, err := schema.Parse(&CapabilityGateEvent{}, &sync.Map{}, schema.NamingStrategy{})
+	require.NoError(t, err)
+
+	ddl := clickHouseCapabilityGateEventCreateTableSQL(30)
+	assert.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS capability_gate_events")
+	assert.Contains(t, ddl, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
+	assert.NotContains(t, clickHouseCapabilityGateEventCreateTableSQL(0), "TTL ")
+	for _, field := range parsed.Fields {
+		assert.Regexp(t, "(?m)^\\s*`?"+field.DBName+"`? ", ddl, "column %s is missing from the ClickHouse DDL", field.DBName)
+	}
 }
 
 func TestAssignDisplayLogIds(t *testing.T) {

@@ -506,7 +506,7 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{})
+	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{}, &CapabilityGateEvent{})
 }
 
 func migrateClickHouseLogDB() error {
@@ -526,7 +526,13 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseRelayAttemptCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseTableTTL("relay_attempts", ttlDays)
+	if err := syncClickHouseTableTTL("relay_attempts", ttlDays); err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseCapabilityGateEventCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	return syncClickHouseTableTTL("capability_gate_events", ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -650,6 +656,31 @@ CREATE TABLE IF NOT EXISTS relay_attempts (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, channel_id, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+// clickHouseCapabilityGateEventCreateTableSQL mirrors the CapabilityGateEvent
+// struct; keep the two in sync by hand because AutoMigrate is bypassed for
+// ClickHouse. Rows expire through the table TTL, so no cleanup task touches it.
+func clickHouseCapabilityGateEventCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS capability_gate_events (
+	id Int64 DEFAULT 0,
+	`+"`mode`"+` String DEFAULT '',
+	`+"`model`"+` String DEFAULT '',
+	`+"`action`"+` String DEFAULT '',
+	channels_evaluated Int32 DEFAULT 0,
+	rejected_channels String DEFAULT '',
+	dimensions String DEFAULT '',
+	created_at Int64 DEFAULT 0,
+	rejected_count Int32 DEFAULT 0,
+	request_id String DEFAULT '',
+	user_id Int32 DEFAULT 0,
+	token_id Int32 DEFAULT 0,
+	using_group String DEFAULT ''
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
 // syncClickHouseTableTTL reconciles the TTL of a log-database ClickHouse table.

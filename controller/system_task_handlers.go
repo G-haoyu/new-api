@@ -30,6 +30,7 @@ import (
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(channelModelRecoveryHandler{})
+	service.RegisterSystemTaskHandler(capabilityGateEventCleanupHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
@@ -125,6 +126,36 @@ func (channelModelRecoveryHandler) Interval() time.Duration {
 }
 
 func (channelModelRecoveryHandler) NewPayload() any { return nil }
+
+// capabilityGateEventCleanupHandler 清理超过保留期的能力门控事件。
+// 它必须是独立任务：挂在渠道恢复任务上时，只要断路器没开、也没有过期的
+// 渠道事件，那个任务就根本不会被调度，门控事件会永远留在库里。
+// ClickHouse 日志库靠表 TTL 过期，HasCapabilityGateEventsBefore 对它恒为 false。
+type capabilityGateEventCleanupHandler struct{}
+
+func (capabilityGateEventCleanupHandler) Type() string {
+	return model.SystemTaskTypeCapabilityGateClean
+}
+
+func (capabilityGateEventCleanupHandler) Enabled() bool {
+	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
+	return model.HasCapabilityGateEventsBefore(time.Now().Add(-retention).Unix())
+}
+
+func (capabilityGateEventCleanupHandler) Interval() time.Duration { return time.Hour }
+
+func (capabilityGateEventCleanupHandler) NewPayload() any { return nil }
+
+func (capabilityGateEventCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
+	deleted, err := model.CleanupCapabilityGateEvents(ctx, time.Now().Add(-retention).Unix())
+	summary := map[string]any{"deleted": deleted}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
 
 func (channelModelRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary, err := runChannelModelRecoveryTask(ctx, service.NewSystemTaskProgressReporter(task, runnerID))

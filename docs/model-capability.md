@@ -20,7 +20,9 @@
 | `service/capability/check.go` | `Evaluate`：请求诉求与声明比对，产出违规项 |
 | `service/capability/parameters.go` | 由声明派生模型广场的「支持的参数」表 |
 | `model/channel_model_capability.go` | 声明解析优先级、缓存、收窄保存校验、模型级改动冲突校验 |
-| `service/capability_gate.go` | 请求级门控、渠道过滤、失败原因、事件留痕 |
+| `service/capability_gate.go` | 请求级门控、渠道过滤、失败原因、事件组装 |
+| `service/capability_gate_event_writer.go` | 事件的异步批量写入（队列、批量、丢弃计数、退出时写完） |
+| `model/capability_gate_event.go` | 事件表（日志库）、批量写入、查询、分块清理 |
 | 管理界面 | 模型管理 → Models（模型级）/ Capabilities（渠道收窄）；系统设置 → 模型 → Capability Gate（门控配置与日志） |
 
 ## 1. 通用规则
@@ -179,8 +181,11 @@
   - 模型级：只用于 `auto` 候选筛选；
   - 渠道级：选定模型后对所有非 pinned 候选渠道做过滤，淘汰结果同时注册进重试链。
 - 违规分 hard / soft。哪些维度只记录，在「系统设置 → 模型 → Capability Gate」的**维度策略**里按维度组切换（`capability_gate_setting.record_only_dimensions`，默认 `params,tools.parallel`）。清单清空 = 所有维度都拦截。
-- 门控模式（同一面板）：`off` 不评估；`shadow` 只评估并留痕，不改选路；`enforce` 真正淘汰渠道。全部设置存 DB，没有环境变量开关。
-- 每次渠道级判定会写入 `capability_gate_events`：`passed` / `soft` / `filtered`（淘汰部分渠道但请求仍完成）/ `rejected`（可用渠道为 0，请求被拦）/ `would_filter` / `would_reject`（shadow 预演）。「记录通过的判定」关闭后只留违规行。
+- 门控模式（同一面板）：`off` 不评估；`shadow` 只评估并留痕，不改选路；`enforce` 真正淘汰渠道。模式、请求体上限、维度策略、保留期都存 DB，没有环境变量开关（只有下面事件 writer 的进程级调优项是环境变量）。
+- 渠道级判定会写入 `capability_gate_events`：`passed` / `soft` / `filtered`（淘汰部分渠道但请求仍完成）/ `rejected`（可用渠道为 0，请求被拦）/ `would_filter` / `would_reject`（shadow 预演）。「记录通过的判定」**默认关闭**，只留违规行；打开后每个请求写一行，只适合短时间排查。
+- 事件是遥测，不在请求路径上落库：`service/capability_gate_event_writer.go` 用 4096 容量的队列接住事件，后台每 2 秒或满 200 条批量写入**日志库**（`LOG_SQL_DSN` 为空时与主库同库）。队列满了直接丢弃并计数，写入失败只记日志，都不影响选路。进程退出时会把队列写完。队列容量、每批条数、最长等待时间、清理任务每块删除的行数可以用 `CAPABILITY_GATE_EVENT_BUFFER_SIZE`、`CAPABILITY_GATE_EVENT_BATCH_SIZE`、`CAPABILITY_GATE_EVENT_FLUSH_MS`、`CAPABILITY_GATE_EVENT_CLEANUP_CHUNK` 调整（写法同 `RELAY_ATTEMPT_LOG_*`，超出范围会被截断，范围与默认值见 `.env.example`）。`rejected_channels` 的列宽跟表结构绑定，不可调。
+- 每条事件带 `request_id`（与 `logs`、`relay_attempts` 同源）、`user_id`、`token_id`、`using_group`，管理页可以按 request_id 筛选，再去使用日志里看这次请求的真实结果。`rejected_channels` 列宽有限，过长时在逗号处截断，准确数量见 `rejected_count`。
+- 保留期由「Gate log retention (days)」控制。非 ClickHouse 日志库由独立的系统任务 `capability_gate_event_cleanup` 每小时分块删除过期事件；ClickHouse 日志库靠建表 TTL（`LOG_SQL_CLICKHOUSE_TTL_DAYS`）过期，不走这个任务。
 - 对被拦下的请求，错误信息会列出未满足的维度与实际声明值，例如
   `no available channel for model "x" satisfies the request: reasoning.effort (requested xhigh, supported none, low, medium)`。
 
