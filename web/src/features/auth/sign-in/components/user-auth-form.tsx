@@ -306,7 +306,8 @@ export function UserAuthForm({
   }
 
   function handleSsoLogin() {
-    const redirect = `${window.location.origin}${redirectTo || '/model-square'}`
+    const origin = status?.hoidc_redirect_origin || status?.data?.hoidc_redirect_origin || window.location.origin
+    const redirect = `${origin}${redirectTo || '/model-square'}`
     window.location.href = `/api/sso/hoidc/login?redirect=${encodeURIComponent(redirect)}`
   }
 
