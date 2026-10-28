@@ -148,6 +148,7 @@ func InitEnv() {
 	HoidcPlatformId = GetEnvOrDefaultString("HOIDC_PLATFORM_ID", "")
 	HoidcAllowSignup = GetEnvOrDefaultBool("HOIDC_ALLOW_SIGNUP", false)
 	HoidcEnforceSso = GetEnvOrDefaultBool("HOIDC_ENFORCE_SSO", false)
+	HoidcRedirectOrigin = GetEnvOrDefaultString("HOIDC_REDIRECT_ORIGIN", "")
 	SsoSyncEnabled = GetEnvOrDefaultBool("SSO_SYNC_ENABLED", false)
 	SsoUserListApiUrl = GetEnvOrDefaultString("SSO_USER_LIST_API_URL", "")
 	SsoUserListPlatformId = GetEnvOrDefaultString("SSO_USER_LIST_PLATFORM_ID", "")
