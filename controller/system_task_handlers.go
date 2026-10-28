@@ -48,12 +48,22 @@ func (autoRouterRankHandler) Type() string { return model.SystemTaskTypeAutoRout
 
 func (autoRouterRankHandler) Enabled() bool {
 	setting := autorouter_setting.GetAutoRouterSetting()
-	return setting.Enabled && setting.RankRefreshEnabled && os.Getenv("OPENROUTER_API_KEY") != ""
+	return setting.Enabled && setting.RankRefreshEnabled && os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY") != "" &&
+		(os.Getenv("DESIGN_ARENA_API_KEY") != "" || os.Getenv("OPENROUTER_API_KEY") != "")
 }
 
+// Interval is the refresh period, or a short retry delay while the stored
+// ranking predates the current task types, so a new taxonomy gets its ranking
+// without waiting a whole period.
 func (autoRouterRankHandler) Interval() time.Duration {
-	return time.Duration(max(autorouter_setting.GetAutoRouterSetting().RankRefreshIntervalHours, 1)) * time.Hour
+	setting := autorouter_setting.GetAutoRouterSetting()
+	if !setting.RankingCurrent() {
+		return autoRouterRankRetryInterval
+	}
+	return time.Duration(max(setting.RankRefreshIntervalHours, 1)) * time.Hour
 }
+
+const autoRouterRankRetryInterval = 10 * time.Minute
 
 func (autoRouterRankHandler) NewPayload() any { return nil }
 
@@ -62,7 +72,9 @@ func (autoRouterRankHandler) NewPayload() any { return nil }
 // marks a complete update.
 func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	cfg := modelrank.DefaultConfig()
-	cfg.APIKey = os.Getenv("OPENROUTER_API_KEY")
+	cfg.AAKey = os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY")
+	cfg.DAKey = os.Getenv("DESIGN_ARENA_API_KEY")
+	cfg.OpenRouterKey = os.Getenv("OPENROUTER_API_KEY")
 	mapping, err := modelrank.Build(ctx, cfg)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
@@ -95,8 +107,11 @@ func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, ru
 		}
 	}
 	summary := map[string]any{"rank_sources": mapping.Sources, "default_models": len(mapping.DefaultModels)}
-	for taskType, models := range mapping.TaskModels {
-		summary[taskType] = map[string]any{"models": len(models), "top": models[:min(len(models), 3)]}
+	if len(mapping.StaleMetrics) > 0 {
+		summary["stale_metrics"] = mapping.StaleMetrics
+	}
+	for profile, models := range mapping.TaskModels {
+		summary[profile] = map[string]any{"models": len(models), "top": models[:min(len(models), 3)]}
 	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }

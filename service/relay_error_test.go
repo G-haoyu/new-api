@@ -238,7 +238,7 @@ func TestAutoRouterDecisionReachesLogAdminInfo(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	result := &autorouter.Result{
 		ResolvedModel: "sonnet-m",
-		Route:         autorouter.Route{TaskType: "coding", Model: "sonnet-m", Effort: "xhigh"},
+		Route:         autorouter.Route{Profile: "code.build", Model: "sonnet-m", Effort: "xhigh"},
 		Source:        autorouter.SourceJev,
 		Pick:          &autorouter.Pick{Chosen: "sonnet-m", Lambda: 0.05, Delta: 0.02},
 		EffortAction:  autorouter.EffortSet, AppliedEffort: "high",
