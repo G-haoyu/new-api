@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/service/capability"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,6 +186,25 @@ func TestChannelNarrowingMustStayWithinModelDeclaration(t *testing.T) {
 	inherited, ok := EffectiveChannelCapability(2, "m")
 	require.True(t, ok)
 	assert.Equal(t, int64(1000), *inherited.Context.MaxOutputTokens)
+}
+
+func TestChannelNarrowingToNoBuiltinToolsSurvivesPersistence(t *testing.T) {
+	db := setupCapabilityModelTest(t)
+	require.NoError(t, db.Create(&Model{ModelName: "search-model", NameRule: NameRuleExact, Capabilities: `{"tools":{"supported":true,"builtin":["web_search"]}}`}).Error)
+	require.NoError(t, db.Create(&Channel{Id: 1, Name: "narrowed", Group: "default", Models: "search-model", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, db.Create(&Channel{Id: 2, Name: "inherits", Group: "default", Models: "search-model", Status: common.ChannelStatusEnabled}).Error)
+	require.NoError(t, InitCapabilityCache())
+
+	require.NoError(t, SetChannelModelCapability(1, "search-model", `{"tools":{"builtin":[]}}`))
+
+	needs := &capability.Needs{BuiltinTools: []string{"web_search"}}
+	narrowed, ok := EffectiveChannelCapability(1, "search-model")
+	require.True(t, ok)
+	assert.False(t, capability.Satisfied(capability.Evaluate(narrowed, needs)), "channel declared no built-in tools")
+
+	inherited, ok := EffectiveChannelCapability(2, "search-model")
+	require.True(t, ok)
+	assert.True(t, capability.Satisfied(capability.Evaluate(inherited, needs)), "channel without narrowing keeps the model-level tools")
 }
 
 func TestChannelCapabilityRowsFollowChannelModelChanges(t *testing.T) {
