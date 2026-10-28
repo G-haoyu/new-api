@@ -100,9 +100,14 @@ func ProvisionSsoUser(hoidcId, email, name, avatar, departmentTreePathStr string
 	}
 
 	secondary, tertiary, team := parseOrgInfo(departmentTreePathStr)
+	emailPrefix := strings.Split(email, "@")[0]
 
 	var user model.User
-	err := model.DB.Where("email = ?", email).First(&user).Error
+	err := model.DB.Where("username = ?", emailPrefix).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		err = model.DB.Where("email = ?", email).First(&user).Error
+	}
+
 	if err == nil {
 		if user.DeletedAt.Valid {
 			return nil, errors.New("account has been disabled")
@@ -118,6 +123,9 @@ func ProvisionSsoUser(hoidcId, email, name, avatar, departmentTreePathStr string
 		}
 		if avatar != "" && avatar != user.Avatar {
 			updates["avatar"] = avatar
+		}
+		if user.Email == "" && email != "" {
+			updates["email"] = email
 		}
 		if secondary != "" && secondary != user.SecondaryOrganization {
 			updates["secondary_organization"] = secondary
