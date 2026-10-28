@@ -71,8 +71,10 @@ type ToolSpec struct {
 	Supported  *bool    `json:"supported,omitempty"`
 	Parallel   *bool    `json:"parallel,omitempty"`
 	ToolChoice []string `json:"tool_choice,omitempty"` // auto | none | required | named
-	Builtin    []string `json:"builtin,omitempty"`     // web_search | code_execution | file_search | computer_use
-	MaxTools   *int     `json:"max_tools,omitempty"`
+	// Builtin 区分三态：不写（nil）= 沿用上一层；[] = 一个内置工具都不支持；
+	// 非空 = 只支持列出的。必须用 omitzero：omitempty 会把 [] 当成没写而丢掉。
+	Builtin  []string `json:"builtin,omitzero"` // web_search | code_execution | file_search | computer_use
+	MaxTools *int     `json:"max_tools,omitempty"`
 }
 
 // StructuredSpec 结构化输出。json_mode 只保证是合法 JSON，json_schema 按 schema 校验。
@@ -262,7 +264,8 @@ func Merge(base, over Spec) Spec {
 	if len(over.Tools.ToolChoice) > 0 {
 		out.Tools.ToolChoice = over.Tools.ToolChoice
 	}
-	if len(over.Tools.Builtin) > 0 {
+	// 内置工具没列出就是不支持，所以渠道写 [] 是有意义的收窄，不能按"没声明"回落。
+	if over.Tools.Builtin != nil {
 		out.Tools.Builtin = over.Tools.Builtin
 	}
 	if over.Tools.MaxTools != nil {
