@@ -11,6 +11,9 @@ const (
 	ContextKeyCapabilityGate   ContextKey = "capability_gate"
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
 
+	// 选路阶段共用的输入 token 估算器，见 service.RoutingInputTokens。
+	ContextKeyRoutingInputEstimator ContextKey = "routing_input_estimator"
+
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"
 	ContextKeyTokenKey               ContextKey = "token_key"
