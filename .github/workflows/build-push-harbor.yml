@@ -1,10 +1,13 @@
 name: Build & push image (Harbor)
 
+# Releases are cut on demand: merging to prod builds nothing; pushing a
+# release-* tag on a prod commit builds and pushes that version.
 # Runs on the self-hosted Tokyo runner. Never add pull_request triggers here:
 # the repository is public and fork PRs must not execute on this machine.
 on:
   push:
-    branches: [prod]
+    tags:
+      - 'release-*'
   workflow_dispatch:
 
 permissions:
@@ -28,17 +31,37 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
+      # Release tags must point at a commit on prod and become the image tag
+      # as-is. Manual runs build <branch>-<sha12> for testing.
       - name: Resolve tag & write VERSION
         id: version
         env:
-          BRANCH_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          BRANCH_TAG=$(printf '%s' "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g')
-          TAG="${BRANCH_TAG}-$(git rev-parse --short=12 HEAD)"
+          if [ "$REF_TYPE" = "tag" ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^release-[A-Za-z0-9_.-]{1,100}$'; then
+              echo "::error::Tag '$REF_NAME' is not a valid image tag"
+              exit 1
+            fi
+            git fetch --no-tags origin prod
+            if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+              echo "::error::Tag '$REF_NAME' does not point at a commit on prod"
+              exit 1
+            fi
+            TAG="$REF_NAME"
+            LATEST_TAG="prod-latest"
+          else
+            BRANCH_TAG=$(printf '%s' "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g')
+            TAG="${BRANCH_TAG}-$(git rev-parse --short=12 HEAD)"
+            LATEST_TAG="${BRANCH_TAG}-latest"
+          fi
           echo "$TAG" > VERSION
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "branch_tag=$BRANCH_TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Harbor
         env:
@@ -50,23 +73,23 @@ jobs:
       - name: Build
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          BRANCH_TAG: ${{ steps.version.outputs.branch_tag }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
         run: |
           docker build --progress=plain \
             --build-arg GOPROXY=https://proxy.golang.org,direct \
             --build-arg GOSUMDB=sum.golang.org \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             --tag "$IMAGE_REPO:$TAG" \
-            --tag "$IMAGE_REPO:$BRANCH_TAG-latest" \
+            --tag "$IMAGE_REPO:$LATEST_TAG" \
             .
 
       - name: Push
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          BRANCH_TAG: ${{ steps.version.outputs.branch_tag }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
         run: |
           docker push "$IMAGE_REPO:$TAG"
-          docker push "$IMAGE_REPO:$BRANCH_TAG-latest"
+          docker push "$IMAGE_REPO:$LATEST_TAG"
           DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REPO:$TAG")
           {
             echo "### Image"
