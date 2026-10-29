@@ -4,7 +4,9 @@ import (
 	_ "embed"
 	"maps"
 	"math"
+	"os"
 	"slices"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -23,20 +25,28 @@ var taskModelsJSON []byte
 var shippedRanking struct {
 	TaskModels    map[string][]string `json:"task_models"`
 	DefaultModels []string            `json:"default_models"`
+	RankSources   map[string]string   `json:"rank_sources"`
 	// TaskScores 是内嵌文件里 evidence 的榜单分，不是文件顶层字段，由 init 填入。
 	TaskScores map[string]map[string]float64 `json:"-"`
 }
 
 // AutoRouterSetting configures resolution of the "auto" model. Option keys are
-// autorouter_setting.<json name>; map and list values are stored as JSON. The
-// jev endpoint, key and model come from the JEV_ENDPOINT, JEV_API_KEY and
-// JEV_MODEL environment variables.
+// autorouter_setting.<json name>; map and list values are stored as JSON.
 type AutoRouterSetting struct {
 	Enabled          bool `json:"enabled"`
 	JevTimeoutMs     int  `json:"jev_timeout_ms"`
 	MaxRunes         int  `json:"max_runes"`
 	PreviousMaxRunes int  `json:"previous_max_runes"`
 	CacheTTLSeconds  int  `json:"cache_ttl_seconds"`
+	// The jev connection and the leaderboard keys. An empty value falls back to
+	// the environment variable of the same service (see Connections); the *_api_key
+	// options are write-only and never returned by the options API.
+	JevEndpoint           string `json:"jev_endpoint"`
+	JevModel              string `json:"jev_model"`
+	JevAPIKey             string `json:"jev_api_key"`
+	ArtificialAnalysisKey string `json:"artificial_analysis_api_key"`
+	DesignArenaKey        string `json:"design_arena_api_key"`
+	OpenRouterKey         string `json:"openrouter_api_key"`
 	// TaskModels maps a task type or task class to base model names in
 	// preference order. A model supports an effort when the effort-suffixed
 	// name (e.g. gpt-5-high) is usable; the bare name is its provider default
@@ -143,25 +153,35 @@ func (s *AutoRouterSetting) RankingCurrent() bool {
 	return s.RankSources["taxonomy_version"] == autorouter.TaxonomyVersion
 }
 
-// Ranking returns the task and default lists to route by: the stored ones,
-// or the embedded ones while the stored lists predate the current task types.
-func (s *AutoRouterSetting) Ranking() (taskModels map[string][]string, defaultModels []string) {
+// Ranking is the leaderboard the router routes by. Its lists and scores come
+// from one source: they are generated together, and scores of an older task
+// taxonomy must never be paired with lists of a newer one.
+type Ranking struct {
+	TaskModels    map[string][]string
+	DefaultModels []string
+	TaskScores    map[string]map[string]float64
+	Sources       map[string]string
+}
+
+// Ranking returns the stored ranking, or the embedded one while the stored
+// ranking predates the current task types.
+func (s *AutoRouterSetting) Ranking() Ranking {
 	if s.RankingCurrent() {
-		return s.TaskModels, s.DefaultModels
+		return Ranking{TaskModels: s.TaskModels, DefaultModels: s.DefaultModels, TaskScores: s.TaskScores, Sources: s.RankSources}
 	}
-	return shippedRanking.TaskModels, shippedRanking.DefaultModels
+	return Ranking{
+		TaskModels:    shippedRanking.TaskModels,
+		DefaultModels: shippedRanking.DefaultModels,
+		TaskScores:    shippedRanking.TaskScores,
+		Sources:       shippedRanking.RankSources,
+	}
 }
 
 // Policy builds the routing policy for one request. preference is the key's own;
 // one that is empty or unknown uses DefaultPreference, and that falling back to
 // balanced when it is unknown too.
 func (s *AutoRouterSetting) Policy(preference string) autorouter.Policy {
-	taskModels, defaultModels := s.Ranking()
-	// 榜单分和任务列表同源：存的列表过期时一起退回内嵌的，否则旧分类下的分数会配上新分类的列表。
-	taskScores := s.TaskScores
-	if !s.RankingCurrent() {
-		taskScores = shippedRanking.TaskScores
-	}
+	ranking := s.Ranking()
 	for _, candidate := range []string{preference, s.DefaultPreference, autorouter.PreferenceBalanced} {
 		if slices.Contains(autorouter.Preferences, candidate) {
 			preference = candidate
@@ -173,14 +193,14 @@ func (s *AutoRouterSetting) Policy(preference string) autorouter.Policy {
 		weight = defaultCostWeights[preference]
 	}
 	return autorouter.Policy{
-		TaskModels:             taskModels,
-		DefaultModels:          defaultModels,
+		TaskModels:             ranking.TaskModels,
+		DefaultModels:          ranking.DefaultModels,
 		DifficultyEfforts:      s.DifficultyEfforts,
 		DefaultEffort:          s.DefaultEffort,
 		UpgradeBenefit:         s.UpgradeBenefit,
 		MinTaskTypeProbability: s.MinTaskTypeProbability,
 		ContinuationTaskChange: s.ContinuationTaskChange,
-		TaskScores:             taskScores,
+		TaskScores:             ranking.TaskScores,
 		Preference:             preference,
 		CostWeight:             scoreWeight(weight),
 	}
@@ -193,4 +213,75 @@ func scoreWeight(value float64) float64 {
 		return 0
 	}
 	return min(max(value, 0), 1)
+}
+
+// Where a connection value came from.
+const (
+	SourceOption = "option"
+	SourceEnv    = "env"
+)
+
+// Connection is one connection value; Source is empty when it is not set anywhere.
+type Connection struct {
+	Value  string
+	Source string
+}
+
+// Connections are the jev connection and the leaderboard keys the router uses.
+// A value stored in the options wins; an empty one falls back to the environment
+// variable that deployments used before these options existed.
+type Connections struct {
+	JevEndpoint           Connection
+	JevModel              Connection
+	JevAPIKey             Connection
+	ArtificialAnalysisKey Connection
+	DesignArenaKey        Connection
+	OpenRouterKey         Connection
+}
+
+func resolveConnection(option, envName string) Connection {
+	if value := strings.TrimSpace(option); value != "" {
+		return Connection{Value: value, Source: SourceOption}
+	}
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return Connection{Value: value, Source: SourceEnv}
+	}
+	return Connection{}
+}
+
+func (s *AutoRouterSetting) Connections() Connections {
+	return Connections{
+		JevEndpoint:           resolveConnection(s.JevEndpoint, "JEV_ENDPOINT"),
+		JevModel:              resolveConnection(s.JevModel, "JEV_MODEL"),
+		JevAPIKey:             resolveConnection(s.JevAPIKey, "JEV_API_KEY"),
+		ArtificialAnalysisKey: resolveConnection(s.ArtificialAnalysisKey, "ARTIFICIAL_ANALYSIS_API_KEY"),
+		DesignArenaKey:        resolveConnection(s.DesignArenaKey, "DESIGN_ARENA_API_KEY"),
+		OpenRouterKey:         resolveConnection(s.OpenRouterKey, "OPENROUTER_API_KEY"),
+	}
+}
+
+// RankKeysReady reports whether a leaderboard refresh can run: it needs the
+// Artificial Analysis key, and Design Arena either directly or through OpenRouter.
+func (c Connections) RankKeysReady() bool {
+	return c.ArtificialAnalysisKey.Value != "" && (c.DesignArenaKey.Value != "" || c.OpenRouterKey.Value != "")
+}
+
+// ShippedOptions returns the embedded ranking as stored option values, the state
+// a restore puts the router back in.
+func ShippedOptions() (map[string]string, error) {
+	values := map[string]any{
+		"autorouter_setting.task_models":    shippedRanking.TaskModels,
+		"autorouter_setting.task_scores":    shippedRanking.TaskScores,
+		"autorouter_setting.default_models": shippedRanking.DefaultModels,
+		"autorouter_setting.rank_sources":   shippedRanking.RankSources,
+	}
+	options := make(map[string]string, len(values))
+	for key, value := range values {
+		encoded, err := common.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		options[key] = string(encoded)
+	}
+	return options, nil
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -48,8 +47,7 @@ func (autoRouterRankHandler) Type() string { return model.SystemTaskTypeAutoRout
 
 func (autoRouterRankHandler) Enabled() bool {
 	setting := autorouter_setting.GetAutoRouterSetting()
-	return setting.Enabled && setting.RankRefreshEnabled && os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY") != "" &&
-		(os.Getenv("DESIGN_ARENA_API_KEY") != "" || os.Getenv("OPENROUTER_API_KEY") != "")
+	return setting.Enabled && setting.RankRefreshEnabled && setting.Connections().RankKeysReady()
 }
 
 // Interval is the refresh period, or a short retry delay while the stored
@@ -71,10 +69,11 @@ func (autoRouterRankHandler) NewPayload() any { return nil }
 // refresh only delays the next ranking. rank_sources is written last and
 // marks a complete update.
 func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	connections := autorouter_setting.GetAutoRouterSetting().Connections()
 	cfg := modelrank.DefaultConfig()
-	cfg.AAKey = os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY")
-	cfg.DAKey = os.Getenv("DESIGN_ARENA_API_KEY")
-	cfg.OpenRouterKey = os.Getenv("OPENROUTER_API_KEY")
+	cfg.AAKey = connections.ArtificialAnalysisKey.Value
+	cfg.DAKey = connections.DesignArenaKey.Value
+	cfg.OpenRouterKey = connections.OpenRouterKey.Value
 	mapping, err := modelrank.Build(ctx, cfg)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)

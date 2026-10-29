@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -107,11 +106,11 @@ func AutoRouterListed(visible []string) bool {
 		return false
 	}
 	isVisible := func(model string) bool { return slices.Contains(visible, model) }
-	taskModels, defaultModels := setting.Ranking()
-	if slices.ContainsFunc(defaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
+	ranking := setting.Ranking()
+	if slices.ContainsFunc(ranking.DefaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 		return true
 	}
-	for _, models := range taskModels {
+	for _, models := range ranking.TaskModels {
 		if slices.ContainsFunc(models, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 			return true
 		}
@@ -215,10 +214,11 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 				route.Warning = "jev failed recently, not retried"
 			}
 		} else {
+			connections := setting.Connections()
 			client := autorouter.JevClient{
-				Endpoint:   os.Getenv("JEV_ENDPOINT"),
-				Model:      os.Getenv("JEV_MODEL"),
-				APIKey:     os.Getenv("JEV_API_KEY"),
+				Endpoint:   connections.JevEndpoint.Value,
+				Model:      connections.JevModel.Value,
+				APIKey:     connections.JevAPIKey.Value,
 				HTTPClient: autoRouterClient,
 			}
 			jevCtx, jevSpan := otelRuntime.StartJevClassify(routeCtx)

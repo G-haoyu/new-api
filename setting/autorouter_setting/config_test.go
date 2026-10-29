@@ -2,6 +2,7 @@ package autorouter_setting
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -115,14 +116,131 @@ func TestRankingFallsBackWhenTaxonomyChanged(t *testing.T) {
 	s.TaskScores = map[string]map[string]float64{"coding": {"stale": 1}}
 
 	s.RankSources = map[string]string{"taxonomy_version": "1"}
-	taskModels, defaultModels := s.Ranking()
-	assert.Equal(t, shippedRanking.TaskModels, taskModels, "lists keyed by older task types are not used")
-	assert.Equal(t, shippedRanking.DefaultModels, defaultModels)
-	assert.Equal(t, shippedRanking.TaskScores, s.Policy("").TaskScores, "榜单分和任务列表同源，一起退回内嵌的")
+	ranking := s.Ranking()
+	assert.Equal(t, shippedRanking.TaskModels, ranking.TaskModels, "lists keyed by older task types are not used")
+	assert.Equal(t, shippedRanking.DefaultModels, ranking.DefaultModels)
+	assert.Equal(t, shippedRanking.TaskScores, ranking.TaskScores, "榜单分和任务列表同源，一起退回内嵌的")
+	assert.Equal(t, shippedRanking.TaskScores, s.Policy("").TaskScores)
+	assert.Equal(t, shippedRanking.RankSources, ranking.Sources)
 
 	s.RankSources = map[string]string{"taxonomy_version": autorouter.TaxonomyVersion}
-	taskModels, defaultModels = s.Ranking()
-	assert.Equal(t, s.TaskModels, taskModels)
-	assert.Equal(t, []string{"stale"}, defaultModels)
+	ranking = s.Ranking()
+	assert.Equal(t, s.TaskModels, ranking.TaskModels)
+	assert.Equal(t, []string{"stale"}, ranking.DefaultModels)
 	assert.Equal(t, s.TaskScores, s.Policy("").TaskScores)
+	assert.Equal(t, s.RankSources, ranking.Sources)
+}
+
+func TestConnectionsPreferTheOptionOverTheEnvironment(t *testing.T) {
+	s := GetAutoRouterSetting()
+	saved := *s
+	t.Cleanup(func() { *s = saved })
+	t.Setenv("JEV_ENDPOINT", "http://env.example/jev")
+	t.Setenv("JEV_MODEL", "")
+	t.Setenv("JEV_API_KEY", "env-key")
+	t.Setenv("ARTIFICIAL_ANALYSIS_API_KEY", "aa-env")
+	t.Setenv("DESIGN_ARENA_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	s.JevEndpoint, s.JevModel, s.JevAPIKey = "", "", ""
+	s.ArtificialAnalysisKey, s.DesignArenaKey, s.OpenRouterKey = "", "", ""
+
+	connections := s.Connections()
+	assert.Equal(t, Connection{Value: "http://env.example/jev", Source: SourceEnv}, connections.JevEndpoint)
+	assert.Equal(t, Connection{}, connections.JevModel)
+	assert.Equal(t, Connection{Value: "env-key", Source: SourceEnv}, connections.JevAPIKey)
+	assert.False(t, connections.RankKeysReady(), "只有 Artificial Analysis 的 key 不够，还要 Design Arena 或 OpenRouter 之一")
+
+	s.JevEndpoint, s.OpenRouterKey = "http://option.example/jev", "or-option"
+	connections = s.Connections()
+	assert.Equal(t, Connection{Value: "http://option.example/jev", Source: SourceOption}, connections.JevEndpoint)
+	assert.Equal(t, Connection{Value: "env-key", Source: SourceEnv}, connections.JevAPIKey, "库里没设的项仍用环境变量")
+	assert.True(t, connections.RankKeysReady())
+}
+
+// 恢复内置榜单写回的四个选项必须能通过校验，并且让存的榜单重新与当前分类对得上。
+func TestShippedOptionsPassValidationAndRestoreTheCurrentRanking(t *testing.T) {
+	s := GetAutoRouterSetting()
+	saved := *s
+	t.Cleanup(func() { *s = saved })
+	s.RankSources = map[string]string{"taxonomy_version": "1"}
+	s.TaskModels = map[string][]string{"stale": {"x"}}
+	require.False(t, s.RankingCurrent())
+
+	options, err := ShippedOptions()
+	require.NoError(t, err)
+	require.Len(t, options, 4)
+	for key, value := range options {
+		require.NoError(t, ValidateOption(key, value), key)
+	}
+	require.NoError(t, config.GlobalConfig.LoadFromDB(options))
+
+	assert.True(t, s.RankingCurrent())
+	assert.Equal(t, shippedRanking.TaskModels, s.TaskModels)
+	assert.Equal(t, shippedRanking.TaskScores, s.TaskScores)
+	assert.Equal(t, shippedRanking.DefaultModels, s.DefaultModels)
+}
+
+// 加载时解析失败的值会被跳过，所以写入前就要拦住，否则存进去却永远不生效。
+func TestValidateOption(t *testing.T) {
+	tests := []struct {
+		key, value string
+		valid      bool
+	}{
+		{"autorouter_setting.enabled", "true", true},
+		{"autorouter_setting.enabled", "yes", false},
+		{"autorouter_setting.jev_timeout_ms", "5000", true},
+		{"autorouter_setting.jev_timeout_ms", "5000.000000", true},
+		{"autorouter_setting.jev_timeout_ms", "50", false},
+		{"autorouter_setting.jev_timeout_ms", "1.5", false},
+		{"autorouter_setting.jev_timeout_ms", "NaN", false},
+		{"autorouter_setting.max_runes", "0", true},
+		{"autorouter_setting.max_runes", "-1", false},
+		{"autorouter_setting.cache_ttl_seconds", "0", false},
+		{"autorouter_setting.cache_ttl_seconds", "7200", true},
+		{"autorouter_setting.rank_refresh_interval_hours", "0", false},
+		{"autorouter_setting.rank_refresh_interval_hours", "24", true},
+		{"autorouter_setting.upgrade_benefit", "0.5", true},
+		{"autorouter_setting.upgrade_benefit", "1.5", false},
+		{"autorouter_setting.min_task_type_probability", "NaN", false},
+		{"autorouter_setting.default_effort", "medium", true},
+		{"autorouter_setting.default_effort", "", false},
+		{"autorouter_setting.difficulty_efforts", `["low","medium","high","xhigh"]`, true},
+		{"autorouter_setting.difficulty_efforts", `[]`, false},
+		{"autorouter_setting.difficulty_efforts", `["low","extreme"]`, false},
+		{"autorouter_setting.difficulty_efforts", `low`, false},
+		{"autorouter_setting.default_preference", "cost", true},
+		{"autorouter_setting.default_preference", "cheap", false},
+		{"autorouter_setting.cost_weights", `{"balanced":0.1}`, true},
+		{"autorouter_setting.cost_weights", `{"balanced":2}`, false},
+		{"autorouter_setting.cost_weights", `{"cheap":0.1}`, false},
+		{"autorouter_setting.cost_weights", `[0.1]`, false},
+		{"autorouter_setting.cost_weights", `null`, false},
+		{"autorouter_setting.task_models", `null`, false},
+		{"autorouter_setting.task_models", `{"code.build":["a","b"]}`, true},
+		{"autorouter_setting.task_models", `{"code.build":"a"}`, false},
+		{"autorouter_setting.task_scores", `{"code.build":{"a":0.9}}`, true},
+		{"autorouter_setting.task_scores", `{"code.build":{"a":-1}}`, false},
+		{"autorouter_setting.default_models", `["a"]`, true},
+		{"autorouter_setting.rank_sources", `{"taxonomy_version":"3"}`, true},
+		{"autorouter_setting.rank_sources", `{"taxonomy_version":3}`, false},
+		{"autorouter_setting.jev_endpoint", "", true},
+		{"autorouter_setting.jev_endpoint", "https://jev.example/v1/decisions", true},
+		{"autorouter_setting.jev_endpoint", "ftp://jev.example", false},
+		{"autorouter_setting.jev_endpoint", "jev.example", false},
+		{"autorouter_setting.jev_model", "typesafe/jev-1.13", true},
+		{"autorouter_setting.jev_model", "two words", false},
+		{"autorouter_setting.jev_api_key", "sk-abc", true},
+		{"autorouter_setting.jev_api_key", "sk-abc\nX-Injected: 1", false},
+		{"autorouter_setting.openrouter_api_key", strings.Repeat("k", 513), false},
+		{"autorouter_setting.something_new", "anything", true},
+		{"other_setting.enabled", "yes", true},
+	}
+	for _, tt := range tests {
+		err := ValidateOption(tt.key, tt.value)
+		if tt.valid {
+			assert.NoError(t, err, "%s=%q", tt.key, tt.value)
+		} else {
+			assert.Error(t, err, "%s=%q", tt.key, tt.value)
+		}
+	}
 }

@@ -13,6 +13,9 @@ const AutoModel = "auto"
 // the channel adaptors turn that suffix into the provider's reasoning field.
 var effortLadder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
+// Efforts lists the reasoning efforts a route can carry, weakest first.
+func Efforts() []string { return slices.Clone(effortLadder) }
+
 // Policy holds the tunable routing rules: the task type picks the model, the
 // difficulty picks the reasoning effort.
 type Policy struct {
