@@ -48,6 +48,9 @@ export interface CommonFilters {
 /**
  * Common logs specific filters
  */
+/** Keep only the requests that asked for the "auto" model, or only those that did not. */
+export type AutoRoutedFilter = 'only' | 'exclude'
+
 export interface CommonLogFilters extends CommonFilters {
   model?: string
   token?: string
@@ -56,6 +59,7 @@ export interface CommonLogFilters extends CommonFilters {
   requestId?: string
   upstreamRequestId?: string
   iselfEmail?: string
+  autoRouted?: AutoRoutedFilter
 }
 
 /**
@@ -447,6 +451,7 @@ export interface GetLogsParams {
   request_id?: string
   upstream_request_id?: string
   iself_email?: string
+  auto_routed?: boolean
 }
 
 export interface GetLogsResponse {
@@ -473,6 +478,7 @@ export interface GetLogStatsParams {
   group?: string
   request_id?: string
   upstream_request_id?: string
+  auto_routed?: boolean
 }
 
 export interface GetLogStatsResponse {

@@ -171,6 +171,7 @@ describe('quota adjustment log localization', () => {
         use_time: 0,
         is_stream: false,
         fast_mode: false,
+        auto_routed: false,
             iself_email: '',
         channel: 0,
         channel_name: '',
