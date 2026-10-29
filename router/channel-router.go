@@ -63,6 +63,7 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodGet, path: "/default_base_urls", permission: authz.ChannelRead, handler: controller.GetChannelDefaultBaseURLs},
 	{method: http.MethodGet, path: "/models_enabled", permission: authz.ChannelRead, handler: controller.EnabledListModels},
 	{method: http.MethodGet, path: "/ops", permission: authz.ChannelRead, handler: controller.GetChannelOps},
+	{method: http.MethodGet, path: "/health", permission: authz.ChannelRead, handler: controller.GetChannelHealth},
 	{method: http.MethodGet, path: "/model-events", permission: authz.ChannelRead, handler: controller.GetChannelModelEvents},
 	{method: http.MethodGet, path: "/:id", permission: authz.ChannelRead, handler: controller.GetChannel},
 	{method: http.MethodGet, path: "/test", permission: authz.ChannelOperate, handler: controller.TestAllChannels},
