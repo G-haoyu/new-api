@@ -152,7 +152,7 @@ func Distribute() func(c *gin.Context) {
 							}
 						}
 					}
-					usable := map[string]bool{}
+					refusals := map[string]string{}
 					channels := map[string][]int{}
 					// 选路阶段估价：只读价格配置，不预扣、不写额度。
 					userSetting, _ := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
@@ -183,32 +183,47 @@ func Distribute() func(c *gin.Context) {
 						quotes[candidate] = pricer.Quote(candidate, groupRatio)
 						return quotes[candidate]
 					}
+					channelsOf := func(candidate string) []int {
+						channelIDs, seen := channels[candidate]
+						if !seen {
+							channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
+							channels[candidate] = channelIDs
+						}
+						return channelIDs
+					}
+					// refusal 说明候选为什么不能服务这个请求，能服务时返回空串。候选按"模型+渠道"判定：
+					// 至少有一个可用渠道的生效能力满足请求，渠道级收窄在这里就生效，
+					// 不会选中一个渠道全被收窄淘汰的模型再 503。没有价格的模型计费时会直接失败，
+					// 所以任何路径都不选它们。判定顺序就是留痕里原因的优先级。
+					refusal := func(candidate string, ignoreClientReasoning bool) string {
+						key := candidate
+						if ignoreClientReasoning {
+							key += "|auto-reasoning"
+						}
+						if reason, seen := refusals[key]; seen {
+							return reason
+						}
+						reason := ""
+						switch {
+						case modelLimitEnable && !TokenModelLimitAllows(tokenModelLimit, candidate):
+							reason = autorouter.ReasonTokenLimit
+						case enabled != nil && !enabled[candidate] && !enabled[ratio_setting.FormatMatchingModelName(candidate)]:
+							reason = autorouter.ReasonGroupDisabled
+						case len(channelsOf(candidate)) == 0:
+							reason = autorouter.ReasonNoChannel
+						case quoteOf(candidate).Kind == helper.RoutingUnpriced:
+							reason = autorouter.ReasonUnpriced
+						case capabilityGate != nil && !capabilityGate.AllowsAnyChannel(candidate, channelsOf(candidate), ignoreClientReasoning):
+							reason = autorouter.ReasonCapability
+						}
+						refusals[key] = reason
+						return reason
+					}
 					result, err := service.ResolveAutoModel(c, service.AutoCandidates{
-						// 候选按"模型+渠道"判定：至少有一个可用渠道的生效能力满足请求。
-						// 渠道级收窄在这里就生效，不会选中一个渠道全被收窄淘汰的模型再 503。
-						// 没有价格的模型计费时会直接失败，所以任何路径都不选它们。
 						Serves: func(candidate string, ignoreClientReasoning bool) bool {
-							key := candidate
-							if ignoreClientReasoning {
-								key += "|auto-reasoning"
-							}
-							if ok, seen := usable[key]; seen {
-								return ok
-							}
-							ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
-								(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)])
-							if ok {
-								channelIDs, seen := channels[candidate]
-								if !seen {
-									channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
-									channels[candidate] = channelIDs
-								}
-								ok = len(channelIDs) > 0 && quoteOf(candidate).Kind != helper.RoutingUnpriced &&
-									(capabilityGate == nil || capabilityGate.AllowsAnyChannel(candidate, channelIDs, ignoreClientReasoning))
-							}
-							usable[key] = ok
-							return ok
+							return refusal(candidate, ignoreClientReasoning) == ""
 						},
+						Why:      func(candidate string) string { return refusal(candidate, true) },
 						Channels: func(candidate string) []int { return channels[candidate] },
 						Price: func(candidate string) (float64, bool) {
 							quote := quoteOf(candidate)

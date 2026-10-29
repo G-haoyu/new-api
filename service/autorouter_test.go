@@ -106,6 +106,13 @@ func candidatesFrom(serves func(name string) bool) AutoCandidates {
 
 var allModelsAvailable = candidatesFrom(func(string) bool { return true })
 
+// encryptedSubAgentBody 是子 agent 的任务：文字被加密读不出来，只有会话 id 可用。
+func encryptedSubAgentBody(session string) string {
+	return `{"client_metadata":{"session_id":"` + session + `"},"input":[{"type":"agent_message","content":[
+		{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/scan\nSender: /root\nPayload:"},
+		{"type":"encrypted_content","encrypted_content":"gAAA"}]}]}`
+}
+
 func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
@@ -180,11 +187,7 @@ func TestResolveAutoModelTrustsTheClassWhenNoSingleLeafIsTrusted(t *testing.T) {
 func TestResolveAutoModelEncryptedSubAgentInheritsSessionRoute(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
-	subAgent := func(session string) string {
-		return `{"client_metadata":{"session_id":"` + session + `"},"input":[{"type":"agent_message","content":[
-			{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/scan\nSender: /root\nPayload:"},
-			{"type":"encrypted_content","encrypted_content":"gAAA"}]}]}`
-	}
+	subAgent := encryptedSubAgentBody
 
 	_, err := ResolveAutoModel(newAutoRouterContext(9251, `{"client_metadata":{"session_id":"sess-a"},"input":[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"hard"}]}]}`), allModelsAvailable)
@@ -504,6 +507,188 @@ func TestResolveAutoModelTraceSpans(t *testing.T) {
 		route := spans["newapi.auto_router"]
 		assert.Equal(t, codes.Error, route.Status.Code)
 		assert.JSONEq(t, `{"auxiliary":true}`, attr(route, "langfuse.observation.input"))
+	})
+}
+
+// ResolveAutoModel 把选路是怎么走到最后那个模型的记在 result.Trace 里：指令长什么样、
+// 判断从哪来、各榜单试了什么。留痕只给选路日志用，不进消费日志。
+func TestResolveAutoModelTrace(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":"hard"}]}`
+
+	t.Run("a live judgment, then the cached one", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+
+		first, err := ResolveAutoModel(newAutoRouterContext(9901, body), allModelsAvailable)
+		require.NoError(t, err)
+		trace := first.Trace
+		require.NotNil(t, trace)
+		assert.Equal(t, autorouter.JudgmentLive, trace.Judgment)
+		assert.Equal(t, autorouter.RequestTrace{Protocol: autorouter.ProtocolChat, HumanTurns: 1, TextRunes: 4}, trace.Request)
+		assert.Equal(t, []string{"code.build", "code"}, trace.Trust.Profiles)
+		assert.Empty(t, trace.Trust.Reason)
+		assert.Equal(t, "xhigh", trace.Effort.Base)
+		assert.Equal(t, []autorouter.LadderStep{{Profile: "code.build", Models: 1, Outcome: autorouter.OutcomeFirstAvailable, Model: "coder"}}, trace.Ladder)
+
+		second, err := ResolveAutoModel(newAutoRouterContext(9901, body), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentCache, second.Trace.Judgment)
+		assert.Equal(t, trace.Ladder, second.Trace.Ladder, "同一个判断、同样的可用集合，走出同样的榜单")
+	})
+
+	t.Run("a jev failure, then the failure marker", func(t *testing.T) {
+		failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		t.Cleanup(failing.Close)
+		useAutoRouterSetting(t, failing.URL, 1000)
+
+		first, err := ResolveAutoModel(newAutoRouterContext(9902, body), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentLiveFailed, first.Trace.Judgment)
+		assert.Equal(t, autorouter.TrustNoDecision, first.Trace.Trust.Reason)
+		assert.Equal(t, []autorouter.LadderStep{{Profile: autorouter.DefaultProfile, Models: 1, Outcome: autorouter.OutcomeFirstAvailable, Model: "general"}}, first.Trace.Ladder)
+
+		second, err := ResolveAutoModel(newAutoRouterContext(9902, body), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentRecentFailure, second.Trace.Judgment)
+	})
+
+	t.Run("requests that are never classified say so", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+
+		auxiliary, err := ResolveAutoModel(newAutoRouterContext(9903, `{"messages":[{"role":"user","content":"[SUGGESTION MODE: next prompt]"}]}`), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentAuxiliary, auxiliary.Trace.Judgment)
+		assert.True(t, auxiliary.Trace.Request.Auxiliary)
+		assert.Equal(t, autorouter.TrustNoDecision, auxiliary.Trace.Trust.Reason)
+
+		empty, err := ResolveAutoModel(newAutoRouterContext(9904, `{"messages":[{"role":"assistant","content":"hi"}]}`), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentNoInstruction, empty.Trace.Judgment)
+		assert.Zero(t, empty.Trace.Request.TextRunes)
+		assert.Equal(t, int32(0), calls.Load(), "没有可分类的指令就不调 jev")
+	})
+
+	t.Run("a sub-agent task without text follows its session", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		_, err := ResolveAutoModel(newAutoRouterContext(9905, `{"client_metadata":{"session_id":"sess-t"},"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hard"}]}]}`), allModelsAvailable)
+		require.NoError(t, err)
+
+		known, err := ResolveAutoModel(newAutoRouterContext(9905, encryptedSubAgentBody("sess-t")), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentSession, known.Trace.Judgment)
+		assert.True(t, known.Trace.Request.Session)
+		assert.Equal(t, []autorouter.LadderStep{{Profile: "code.build", Outcome: autorouter.OutcomeInherited, Model: "coder"}}, known.Trace.Ladder)
+
+		unknown, err := ResolveAutoModel(newAutoRouterContext(9905, encryptedSubAgentBody("sess-none")), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, autorouter.JudgmentSession, unknown.Trace.Judgment)
+		assert.Equal(t, []autorouter.LadderStep{{Profile: autorouter.DefaultProfile, Models: 1, Outcome: autorouter.OutcomeFirstAvailable, Model: "general"}}, unknown.Trace.Ladder,
+			"会话里没有记录就走兜底")
+	})
+
+	t.Run("nothing routable counts the models by reason and does not call jev", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		reasons := map[string]string{"general": autorouter.ReasonGroupDisabled, "chat": autorouter.ReasonNoChannel, "coder": autorouter.ReasonNoChannel}
+		candidates := candidatesFrom(func(string) bool { return false })
+		candidates.Why = func(name string) string { return reasons[name] }
+
+		result, err := ResolveAutoModel(newAutoRouterContext(9906, body), candidates)
+		require.Error(t, err)
+		require.NotNil(t, result.Trace, "失败的请求也带着留痕，选路日志要记它")
+		assert.Equal(t, autorouter.JudgmentUnroutable, result.Trace.Judgment)
+		assert.Nil(t, result.Trace.Trust)
+		assert.Empty(t, result.Trace.Ladder, "兜底那一次不再写进留痕")
+		assert.Equal(t, &autorouter.Unroutable{Reasons: []autorouter.ReasonCount{
+			{Reason: autorouter.ReasonNoChannel, Count: 2, Examples: []string{"coder", "chat"}},
+			{Reason: autorouter.ReasonGroupDisabled, Count: 1, Examples: []string{"general"}},
+		}}, result.Trace.Unroutable)
+		assert.Equal(t, int32(0), calls.Load())
+	})
+
+	t.Run("a failed route keeps the first attempt instead of the fallback's", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		// "ok" 分不出任务，判断不可信；客户端原样的请求没有任何模型能服务，但撇开推理字段后有。
+		candidates := AutoCandidates{
+			Serves:   func(_ string, ignoreClientReasoning bool) bool { return ignoreClientReasoning },
+			Channels: func(string) []int { return nil },
+		}
+
+		result, err := ResolveAutoModel(newAutoRouterContext(9907, `{"messages":[{"role":"user","content":"ok"}]}`), candidates)
+		require.Error(t, err)
+		assert.Equal(t, autorouter.JudgmentLive, result.Trace.Judgment)
+		require.Len(t, result.Trace.Ladder, 1, "兜底重试一次不再追加第二步")
+		assert.Equal(t, autorouter.OutcomeNone, result.Trace.Ladder[0].Outcome)
+	})
+
+	t.Run("truncation is flagged for the current and the previous instruction separately", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		setting := autorouter_setting.GetAutoRouterSetting()
+		setting.MaxRunes, setting.PreviousMaxRunes = 10, 5
+
+		long, err := ResolveAutoModel(newAutoRouterContext(9908, `{"messages":[{"role":"user","content":"这是一段超过十个字的很长的指令内容"}]}`), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, 17, long.Trace.Request.TextRunes, "按字符数而不是字节数")
+		assert.True(t, long.Trace.Request.Truncated)
+
+		short, err := ResolveAutoModel(newAutoRouterContext(9909, body), allModelsAvailable)
+		require.NoError(t, err)
+		assert.False(t, short.Trace.Request.Truncated)
+
+		withPrevious, err := ResolveAutoModel(newAutoRouterContext(9910, `{"messages":[
+			{"role":"user","content":"previous task text"},{"role":"assistant","content":"done"},{"role":"user","content":"ok"}]}`), allModelsAvailable)
+		require.NoError(t, err)
+		assert.Equal(t, 18, withPrevious.Trace.Request.PreviousRunes)
+		assert.Equal(t, 2, withPrevious.Trace.Request.HumanTurns)
+		assert.True(t, withPrevious.Trace.Request.Truncated, "上一句被截断也算")
+	})
+
+	t.Run("the protocol follows the endpoint the request came in on", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		for path, want := range map[string]autorouter.Protocol{
+			"/v1/chat/completions": autorouter.ProtocolChat,
+			"/v1/messages":         autorouter.ProtocolAnthropic,
+			"/v1/responses":        autorouter.ProtocolResponses,
+		} {
+			c := newAutoRouterContext(9911, body)
+			c.Request.URL.Path = path
+			result, err := ResolveAutoModel(c, allModelsAvailable)
+			require.NoError(t, err)
+			assert.Equal(t, want, result.Trace.Request.Protocol, path)
+		}
+	})
+
+	t.Run("the consume log's summary leaves the trace out", func(t *testing.T) {
+		var calls atomic.Int32
+		useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+		setting := autorouter_setting.GetAutoRouterSetting()
+		setting.TaskModels = map[string][]string{"code.build": {"opus-m", "sonnet-m"}}
+		setting.TaskScores = map[string]map[string]float64{"code.build": {"opus-m": 0.97, "sonnet-m": 0.96}}
+		// 模型名带不带档位后缀都要判不可用，否则 opus-m-medium 会让 opus-m 仍然算可用。
+		candidates := candidatesFrom(func(model string) bool { return !strings.HasPrefix(model, "opus-m") })
+		candidates.Why = func(string) string { return autorouter.ReasonCapability }
+		candidates.Price = func(string) (float64, bool) { return 4, true }
+
+		result, err := ResolveAutoModel(newAutoRouterContext(9912, body), candidates)
+		require.NoError(t, err)
+		require.NotNil(t, result.Pick)
+		require.Len(t, result.Trace.Ladder, 1)
+		assert.Equal(t, []autorouter.Skipped{{Model: "opus-m", Score: 0.97, Reason: autorouter.ReasonCapability}}, result.Trace.Ladder[0].Skipped)
+
+		summary, err := common.Marshal(result)
+		require.NoError(t, err)
+		assert.Contains(t, string(summary), `"pick"`)
+		for _, leaked := range []string{`"trace"`, `"ladder"`, `"skipped"`, `"unroutable"`} {
+			assert.NotContains(t, string(summary), leaked)
+		}
 	})
 }
 

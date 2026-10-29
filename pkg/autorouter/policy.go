@@ -81,13 +81,20 @@ func (r Route) Fallback() string {
 // first: the chosen task type and its class when the task type is trusted,
 // else the most probable class when that is trusted. The class of a task type
 // sums the probabilities of its task types. Nil means the decision is not
-// trusted.
-func trustedProfiles(decision *Decision, policy Policy) []string {
-	if decision == nil || decision.Difficulty <= 0 {
-		return nil
+// trusted; trust says how it came out either way.
+func trustedProfiles(decision *Decision, policy Policy) ([]string, Trust) {
+	trust := Trust{Threshold: policy.MinTaskTypeProbability}
+	if decision == nil {
+		trust.Reason = TrustNoDecision
+		return nil, trust
+	}
+	if decision.Difficulty <= 0 {
+		trust.Reason = TrustNoDifficulty
+		return nil, trust
 	}
 	if class := TaskClass(decision.TaskType); class != "" && decision.TaskTypeProbability >= policy.MinTaskTypeProbability {
-		return []string{decision.TaskType, class}
+		trust.Profiles = []string{decision.TaskType, class}
+		return trust.Profiles, trust
 	}
 	classes := map[string]float64{}
 	for taskType, probability := range decision.TaskTypeProbabilities {
@@ -95,6 +102,7 @@ func trustedProfiles(decision *Decision, policy Policy) []string {
 			classes[class] += probability
 		}
 	}
+	trust.Classes = classes
 	best, bestProbability := "", 0.0
 	for _, class := range slices.Sorted(maps.Keys(classes)) {
 		if classes[class] > bestProbability {
@@ -102,9 +110,11 @@ func trustedProfiles(decision *Decision, policy Policy) []string {
 		}
 	}
 	if best == "" || bestProbability < policy.MinTaskTypeProbability {
-		return nil
+		trust.Reason = TrustLowConfidence
+		return nil, trust
 	}
-	return []string{best}
+	trust.Profiles = []string{best}
+	return trust.Profiles, trust
 }
 
 // SelectRoute maps a jev decision to a route. decision is nil when jev failed;
@@ -118,14 +128,23 @@ func trustedProfiles(decision *Decision, policy Policy) []string {
 // client's reasoning fields set aside, because a trusted decision picks the
 // effort itself and rewrites them. pick is set when the model was chosen by
 // quality and price among several candidates.
-func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates Candidates) (route Route, inherited, ok bool, pick *Pick) {
+//
+// trace, when not nil, receives how the route came about: whether the decision was
+// trusted, whether the request continued the previous task, how difficulty became an
+// effort, and each ranking tried.
+func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates Candidates, trace *Trace) (route Route, inherited, ok bool, pick *Pick) {
+	if trace == nil {
+		trace = &Trace{}
+	}
 	available, overridable := candidates.Available, candidates.Overridable
-	profiles := trustedProfiles(decision, policy)
+	profiles, trust := trustedProfiles(decision, policy)
+	trace.Trust = &trust
 	if profiles == nil {
 		if previous != nil && ModelAvailable(previous.Model, available) {
+			trace.Ladder = append(trace.Ladder, LadderStep{Profile: previous.Profile, Outcome: OutcomeInherited, Model: previous.Model})
 			return *previous, true, true, nil
 		}
-		model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, available, candidates.Price)
+		model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, available, candidates, trace)
 		return Route{Model: model, Effort: policy.DefaultEffort}, true, found, picked
 	}
 
@@ -133,42 +152,60 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates 
 	if len(policy.DifficultyEfforts) > 0 {
 		effort = policy.DifficultyEfforts[min(decision.Difficulty, len(policy.DifficultyEfforts))-1]
 	}
+	trace.Effort = &EffortTrace{Difficulty: decision.Difficulty, Base: effort, Benefit: decision.LargerModelBenefit, Threshold: policy.UpgradeBenefit}
 	if decision.LargerModelBenefit != nil && *decision.LargerModelBenefit >= policy.UpgradeBenefit {
 		if rank := slices.Index(effortLadder, effort); rank >= 0 && rank < len(effortLadder)-1 {
 			effort = effortLadder[rank+1]
+			trace.Effort.Upgraded = true
 		}
 	}
 
-	if previous != nil && decision.TaskChange != nil && *decision.TaskChange < policy.ContinuationTaskChange &&
-		ModelAvailable(previous.Model, overridable) {
-		if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
-			effort = previous.Effort
+	if previous != nil && decision.TaskChange != nil {
+		continued := *decision.TaskChange < policy.ContinuationTaskChange && ModelAvailable(previous.Model, overridable)
+		trace.Continuation = &Continuation{Previous: previous.Model, TaskChange: *decision.TaskChange, Threshold: policy.ContinuationTaskChange, Continued: continued}
+		if continued {
+			if slices.Index(effortLadder, previous.Effort) > slices.Index(effortLadder, effort) {
+				effort = previous.Effort
+				trace.Effort.Floored = true
+			}
+			return Route{Profile: previous.Profile, Model: previous.Model, Effort: effort}, false, true, nil
 		}
-		return Route{Profile: previous.Profile, Model: previous.Model, Effort: effort}, false, true, nil
 	}
 
 	for _, profile := range profiles {
-		if model, picked, found := policy.choose(profile, policy.TaskModels[profile], overridable, candidates.Price); found {
+		if model, picked, found := policy.choose(profile, policy.TaskModels[profile], overridable, candidates, trace); found {
 			return Route{Profile: profile, Model: model, Effort: effort}, false, true, picked
 		}
 	}
-	model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, overridable, candidates.Price)
+	model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, overridable, candidates, trace)
 	return Route{Model: model, Effort: effort}, false, found, picked
 }
 
 // choose picks a model from one ranking's list. With scores and prices it
 // compares quality and price under the policy's preference; otherwise, or when no
 // scored model is servable, it takes the first available model in list order.
-// picked is set only for the comparison.
-func (p Policy) choose(profile string, models []string, available func(string) bool, price func(string) (float64, bool)) (string, *Pick, bool) {
-	if scores := p.TaskScores[profile]; len(scores) > 0 && price != nil {
+// picked is set only for the comparison. Every call adds a step to trace.
+func (p Policy) choose(profile string, models []string, available func(string) bool, candidates Candidates, trace *Trace) (string, *Pick, bool) {
+	step := LadderStep{Profile: profile, Models: len(models), Outcome: OutcomeNone}
+	var picked *Pick
+	model, found := "", false
+	if scores := p.TaskScores[profile]; len(scores) > 0 && candidates.Price != nil {
 		servable := func(name string) bool { return ModelAvailable(name, available) }
-		if pick, ok := pickByQualityCost(models, scores, p.CostWeight, servable, price); ok {
-			return pick.Chosen, &pick, true
+		pick, ok := pickByQualityCost(models, scores, p.CostWeight, servable, candidates.Price, candidates.Why)
+		step.Skipped, step.SkippedMore = pick.skipped, pick.skippedMore
+		if ok {
+			picked, model, found = &pick, pick.Chosen, true
+			step.Outcome = OutcomeCompared
 		}
 	}
-	model, ok := firstAvailable(models, available)
-	return model, nil, ok
+	if !found {
+		if model, found = firstAvailable(models, available); found {
+			step.Outcome = OutcomeFirstAvailable
+		}
+	}
+	step.Model = model
+	trace.Ladder = append(trace.Ladder, step)
+	return model, picked, found
 }
 
 func firstAvailable(models []string, available func(model string) bool) (string, bool) {
@@ -265,6 +302,9 @@ type Result struct {
 	EffortAction  EffortAction `json:"effort_action,omitempty"`
 	// Jev is set only when this request called jev, cache hits leave it nil.
 	Jev *JevCall `json:"jev,omitempty"`
+	// Trace is how the route came about, for the routing log. The consume log's
+	// summary leaves it out, so it never makes every log row bigger.
+	Trace *Trace `json:"-"`
 }
 
 type JevCall struct {

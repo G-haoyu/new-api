@@ -24,6 +24,9 @@ type Candidates struct {
 	// Price 返回模型的混合用户价（美元/百万 token）。ok 为 false 表示没有价格或按次计价，
 	// 没法按 token 比较。Price 为 nil 时不比价，按榜单顺序取第一个可用的。
 	Price func(model string) (price float64, ok bool)
+	// Why 说明一个模型为什么不能服务这个请求（撇开客户端的推理字段），能服务时返回空串，
+	// 留给选路留痕解释"为什么没选更靠前的模型"。可以为 nil。
+	Why func(model string) string
 }
 
 // Candidate 是质量/成本选择里的一个候选。
@@ -43,6 +46,19 @@ type Pick struct {
 	Weight float64 `json:"weight"`
 	// Band 是进入比较的候选：分数不低于最高可用分减去 Weight 的可用模型。
 	Band []Candidate `json:"band"`
+
+	// skipped 是比较时跳过的模型，只进选路留痕；消费日志里的摘要不带它，免得每条日志都变大。
+	skipped     []Skipped
+	skippedMore int
+}
+
+// skip 记下一个被跳过的模型，最多记 maxSkipped 个，其余只计数。
+func (p *Pick) skip(model string, score float64, reason string) {
+	if len(p.skipped) >= maxSkipped {
+		p.skippedMore++
+		return
+	}
+	p.skipped = append(p.skipped, Skipped{Model: model, Score: score, Reason: reason})
 }
 
 // pickByQualityCost 在同一个榜单的候选里一次比较质量和价格，按折后分排名取第一。
@@ -54,7 +70,10 @@ type Pick struct {
 //
 // weight 为 0 时候选带只剩与最高分并列的模型，等于按榜单分选。scores 里没有分数的模型不参与；
 // 没有任何可用且有价格的候选时 ok 为 false。
-func pickByQualityCost(models []string, scores map[string]float64, weight float64, overridable func(string) bool, price func(string) (float64, bool)) (Pick, bool) {
+//
+// 带内被跳过的模型（不可用，或可用但按次计价没法比价）连同原因记在返回的 Pick 里，
+// 即使 ok 为 false 也带着，选路留痕据此解释"为什么没选更靠前的模型"。why 可以为 nil。
+func pickByQualityCost(models []string, scores map[string]float64, weight float64, overridable func(string) bool, price func(string) (float64, bool), why func(string) string) (Pick, bool) {
 	scored := make([]string, 0, len(models))
 	for _, model := range models {
 		if _, found := scores[model]; found {
@@ -75,15 +94,19 @@ func pickByQualityCost(models []string, scores map[string]float64, weight float6
 	// 掉出带的模型不必再判定可用性（没有内存缓存时每次判定都是一次查询）。
 	var band []Candidate
 	var top float64
+	var pick Pick
 	for _, model := range scored {
 		if len(band) > 0 && scores[model] < top-weight {
 			break
 		}
 		if !overridable(model) {
+			pick.skip(model, scores[model], skipReason(why, model))
 			continue
 		}
 		modelPrice, priced := price(model)
 		if !priced {
+			// 没有价格的模型连可用都过不了（计费会失败），能走到这里的只剩按次计价。
+			pick.skip(model, scores[model], ReasonPerCall)
 			continue
 		}
 		if len(band) == 0 {
@@ -92,7 +115,7 @@ func pickByQualityCost(models []string, scores map[string]float64, weight float6
 		band = append(band, Candidate{Model: model, Score: scores[model], Price: modelPrice})
 	}
 	if len(band) == 0 {
-		return Pick{}, false
+		return pick, false
 	}
 
 	floor, ceiling := priceRange(band)
@@ -105,7 +128,8 @@ func pickByQualityCost(models []string, scores map[string]float64, weight float6
 			chosen = i
 		}
 	}
-	return Pick{Chosen: band[chosen].Model, Weight: weight, Band: band}, true
+	pick.Chosen, pick.Weight, pick.Band = band[chosen].Model, weight, band
+	return pick, true
 }
 
 // priceRange 返回带内的价格下限和上限。免费（价格为 0）的模型不拉低下限，

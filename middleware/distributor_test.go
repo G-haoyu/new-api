@@ -458,6 +458,20 @@ func serveAutoRoutingRequestIn(t *testing.T, path, usingGroup string, tokenID in
 	return stored, originalModel, recorder
 }
 
+// serveAutoRoutingResult 同 serveAutoRoutingRequestIn（聊天补全入口、default 分组），
+// 另外返回 Distribute 存下的选路结果。
+func serveAutoRoutingResult(t *testing.T, tokenID int, body string, setup ...func(*gin.Context)) (*autorouter.Result, string, *httptest.ResponseRecorder) {
+	t.Helper()
+	var result *autorouter.Result
+	setup = append(setup, func(c *gin.Context) {
+		// 结果是 Distribute 存的，要等整条链跑完才能读。
+		c.Next()
+		result = service.GetAutoRouterResult(c)
+	})
+	_, originalModel, recorder := serveAutoRoutingRequestIn(t, "/v1/chat/completions", "default", tokenID, body, setup...)
+	return result, originalModel, recorder
+}
+
 func TestDistributeAutoRewritesStoredBodyModel(t *testing.T) {
 	setupAutoRoutingDistribute(t, []string{"general"}, map[int][]string{1: {"general"}})
 	useModelPrices(t, map[string]float64{"general": 1})
@@ -566,6 +580,63 @@ func fakeJevFor(t *testing.T, taskType string) string {
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
+}
+
+// 选路留痕里榜单靠前却没被选中的模型带着不能服务的原因，原因就是分发中间件判定候选的顺序：
+// 令牌白名单、分组启用、渠道、价格、能力。这里开着内存缓存，一个分组里没登记的模型表现为没有渠道；
+// 分组启用只在没开内存缓存时才单独判定，那条路径要真实的 model.InitDB 才有列名，这个内存库夹具走不了。
+func TestDistributeAutoTraceExplainsWhySkippedModelsCouldNotServe(t *testing.T) {
+	db := setupAutoRoutingDistribute(t, []string{"m-token", "m-nochannel", "m-unpriced", "m-capability", "m-ok"},
+		map[int][]string{1: {"m-token", "m-unpriced", "m-capability", "m-ok"}})
+	useModelPrices(t, map[string]float64{"m-token": 1, "m-nochannel": 1, "m-capability": 1, "m-ok": 1})
+	useEnforcedToolCapabilities(t, db, []string{"m-token", "m-unpriced", "m-capability", "m-ok"}, map[int]string{1: "m-capability"})
+	autorouter_setting.GetAutoRouterSetting().TaskScores = map[string]map[string]float64{autorouter.DefaultProfile: {
+		"m-token": 0.95, "m-nochannel": 0.94, "m-unpriced": 0.93, "m-capability": 0.92, "m-ok": 0.91,
+	}}
+
+	result, originalModel, recorder := serveAutoRoutingResult(t, 9605, autoRoutingToolsBody, func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
+		common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"m-nochannel": true, "m-unpriced": true, "m-capability": true, "m-ok": true})
+	})
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "m-ok", originalModel)
+	require.NotNil(t, result)
+	require.Len(t, result.Trace.Ladder, 1)
+	assert.Equal(t, autorouter.OutcomeCompared, result.Trace.Ladder[0].Outcome)
+	assert.Equal(t, 5, result.Trace.Ladder[0].Models)
+	assert.Equal(t, []autorouter.Skipped{
+		{Model: "m-token", Score: 0.95, Reason: autorouter.ReasonTokenLimit},
+		{Model: "m-nochannel", Score: 0.94, Reason: autorouter.ReasonNoChannel},
+		{Model: "m-unpriced", Score: 0.93, Reason: autorouter.ReasonUnpriced},
+		{Model: "m-capability", Score: 0.92, Reason: autorouter.ReasonCapability},
+	}, result.Trace.Ladder[0].Skipped)
+}
+
+// 客户端自己写的推理档位会让一个模型在"按原样的请求"下不可用，但这个档位 auto 能改写。
+// 兜底路径不碰客户端字段，所以会跳过这个模型，留痕要把原因记成客户端的推理字段，
+// 而不是能力不足：撇开推理字段后它是能服务的。
+func TestDistributeAutoTraceBlamesTheClientReasoningFields(t *testing.T) {
+	db := setupAutoRoutingDistribute(t, []string{"reasoner", "plain"}, map[int][]string{1: {"reasoner"}, 2: {"reasoner"}, 3: {"reasoner"}, 5: {"plain"}})
+	// 没有声明的模型在 enforce 下一律不可用，所以 plain 也要声明；它的唯一渠道满足客户端的 tools + xhigh。
+	require.NoError(t, db.Create(&model.Model{
+		ModelName: "plain", NameRule: model.NameRuleExact, Status: 1,
+		Capabilities: `{"tools":{"supported":true},"reasoning":{"supported":true,"efforts":["none","low","medium","high","xhigh"]}}`,
+	}).Error)
+	useReasoningModels(t, db)
+	useModelPrices(t, map[string]float64{"reasoner": 1, "plain": 1})
+	autorouter_setting.GetAutoRouterSetting().TaskScores = map[string]map[string]float64{autorouter.DefaultProfile: {"reasoner": 0.95, "plain": 0.94}}
+	// 渠道 1、2 最高声明到 high，渠道 3 不支持 tools：请求带 tools 又要 xhigh 时 reasoner 没有渠道能服务。
+	body := `{"model":"auto","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"xhigh",` +
+		`"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`
+
+	result, originalModel, recorder := serveAutoRoutingResult(t, 9606, body)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "plain", originalModel)
+	require.NotNil(t, result)
+	require.Len(t, result.Trace.Ladder, 1)
+	assert.Equal(t, []autorouter.Skipped{{Model: "reasoner", Score: 0.95, Reason: autorouter.ReasonClientReasoning}}, result.Trace.Ladder[0].Skipped)
 }
 
 func TestDistributeAutoWritesConvergedEffortIntoStoredBody(t *testing.T) {

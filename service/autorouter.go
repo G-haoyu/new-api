@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -132,6 +133,9 @@ type AutoCandidates struct {
 	// ignoreClientReasoning 为 true 时撇开客户端自己写的推理字段：可信的 auto 判断
 	// 会自己定档位并改写它们；false 时按客户端原样的请求判定，兜底路径用它。
 	Serves func(name string, ignoreClientReasoning bool) bool
+	// Why 说明一个候选为什么不能服务这个请求（撇开客户端的推理字段，与 Serves 的第二个
+	// 参数为 true 时一致），能服务时返回空串，只用于选路留痕。可以为 nil。
+	Why func(name string) string
 	// Channels 返回候选模型的可用渠道，用来把期望档位收敛到渠道声明过的档位。
 	Channels func(name string) []int
 	// Price 返回候选模型的混合用户价（美元/百万 token）；ok 为 false 表示没有价格
@@ -151,7 +155,9 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 	result := &autorouter.Result{Source: autorouter.SourceDefault, Preference: policy.Preference}
 	available := func(name string) bool { return candidates.Serves(name, false) }
 	overridable := func(name string) bool { return candidates.Serves(name, true) }
-	routing := autorouter.Candidates{Available: available, Overridable: overridable, Price: candidates.Price}
+	routing := autorouter.Candidates{Available: available, Overridable: overridable, Price: candidates.Price, Why: candidates.Why}
+	trace := &autorouter.Trace{Judgment: autorouter.JudgmentNoInstruction}
+	result.Trace = trace
 
 	otelRuntime := observability.FromContext(c.Request.Context())
 	routeCtx, routeSpan := otelRuntime.StartAutoRouter(c.Request.Context())
@@ -167,6 +173,16 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 	if instruction.Auxiliary {
 		routeInput["auxiliary"] = true
 	}
+	protocol, _ := AutoRouterProtocol(c.Request.URL.Path)
+	trace.Request = autorouter.RequestTrace{
+		Protocol:      protocol,
+		Auxiliary:     instruction.Auxiliary,
+		Agent:         instruction.Agent,
+		HumanTurns:    instruction.HumanTurns,
+		Session:       instruction.Session != "",
+		TextRunes:     utf8.RuneCountInString(instruction.Text),
+		PreviousRunes: utf8.RuneCountInString(instruction.Previous),
+	}
 
 	ok := false
 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
@@ -176,8 +192,12 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 	case !policy.AnyModelAvailable(overridable):
 		// 一个可用模型都没有时，分类得出什么都选不出路由，不必先花一次 jev 调用。
 		// 用 overridable 判是因为它是 available 的超集，只有它也找不到才是真的没有。
+		trace.Judgment = autorouter.JudgmentUnroutable
+		trace.Unroutable = policy.ExplainUnroutable(routing.Why)
 	case instruction.Auxiliary:
+		trace.Judgment = autorouter.JudgmentAuxiliary
 	case instruction.Text == "" && instruction.Session != "":
+		trace.Judgment = autorouter.JudgmentSession
 		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found {
 			serves := available
 			if entry.Trusted {
@@ -185,11 +205,13 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 			}
 			if autorouter.ModelAvailable(entry.Route.Model, serves) {
 				result.Route, result.Source, result.EffortOverride = entry.Route, autorouter.SourceInherit, entry.Trusted
+				trace.Ladder = append(trace.Ladder, autorouter.LadderStep{Profile: entry.Route.Profile, Outcome: autorouter.OutcomeInherited, Model: entry.Route.Model})
 				ok = true
 			}
 		}
 	case instruction.Text != "":
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
+		trace.Request.Truncated = state["current_task"] != instruction.Text || (instruction.Previous != "" && state["previous_task"] != instruction.Previous)
 		if otelRuntime.RecordsContent(nil) {
 			for key, value := range state {
 				routeInput[key] = value
@@ -210,7 +232,9 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		fromCache := false
 		if entry, found, _ := cache.Get(decisionKey); found && (entry.Decision != nil || entry.Failed) {
 			decision, fromCache = entry.Decision, entry.Decision != nil
+			trace.Judgment = autorouter.JudgmentCache
 			if entry.Failed {
+				trace.Judgment = autorouter.JudgmentRecentFailure
 				route.Warning = "jev failed recently, not retried"
 			}
 		} else {
@@ -235,10 +259,12 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 			jev.Input = jevInput
 
 			if err != nil {
+				trace.Judgment = autorouter.JudgmentLiveFailed
 				result.Jev.Error = err.Error()
 				route.Warning = "jev failed: " + err.Error()
 				_ = cache.SetWithTTL(decisionKey, autoRouterEntry{Failed: true}, autoRouterFailureTTL)
 			} else {
+				trace.Judgment = autorouter.JudgmentLive
 				result.Jev.Response = response.ResponseBody
 				decided := response.Decision(instruction.Previous != "")
 				decision = &decided
@@ -256,7 +282,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		// 路由每次按本次请求自己的可用集合重新算，缓存里只有 jev 的判断。
 		var inherited bool
 		result.Decision = decision
-		result.Route, inherited, ok, result.Pick = autorouter.SelectRoute(decision, previous, policy, routing)
+		result.Route, inherited, ok, result.Pick = autorouter.SelectRoute(decision, previous, policy, routing, trace)
 		result.EffortOverride = !inherited
 		if inherited && decision != nil {
 			route.Warning = "jev decision untrusted"
@@ -280,7 +306,13 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		}
 	}
 	if !ok {
-		result.Route, _, ok, result.Pick = autorouter.SelectRoute(nil, nil, policy, routing)
+		// 前面已经选过路（Trust 有值），或根本没有可用模型时，兜底这一次不再写留痕，
+		// 免得盖掉真正的失败过程。
+		var fallbackTrace *autorouter.Trace
+		if trace.Trust == nil && trace.Judgment != autorouter.JudgmentUnroutable {
+			fallbackTrace = trace
+		}
+		result.Route, _, ok, result.Pick = autorouter.SelectRoute(nil, nil, policy, routing, fallbackTrace)
 		result.EffortOverride = false
 	}
 
