@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import {
   StaticDataTable,
+  staticDataTableClassNames as tableStyles,
   type StaticDataTableColumn,
 } from '@/components/data-table'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
@@ -37,6 +38,8 @@ export function PickTable(props: { pick: RoutePick }) {
     {
       id: 'model',
       header: t('Model'),
+      className: 'h-9',
+      cellClassName: 'py-2',
       cell: (row) => (
         <div className='flex flex-wrap items-center gap-1.5'>
           <span className='font-mono'>{row.model}</span>
@@ -49,13 +52,15 @@ export function PickTable(props: { pick: RoutePick }) {
     {
       id: 'score',
       header: t('Leaderboard score'),
-      cellClassName: 'tabular-nums',
+      className: 'h-9 text-right',
+      cellClassName: tableStyles.topNumericCell,
       cell: (row) => formatScore(row.score),
     },
     {
       id: 'price',
       header: t('Price per million tokens'),
-      cellClassName: 'tabular-nums',
+      className: 'h-9 text-right',
+      cellClassName: tableStyles.topNumericCell,
       cell: (row) =>
         formatBillingCurrencyFromUSD(row.price, {
           digitsLarge: 4,
@@ -66,13 +71,15 @@ export function PickTable(props: { pick: RoutePick }) {
     {
       id: 'discount',
       header: t('Price discount'),
-      cellClassName: 'tabular-nums',
+      className: 'h-9 text-right',
+      cellClassName: tableStyles.topNumericCell,
       cell: (row) => formatScore(row.discount),
     },
     {
       id: 'utility',
       header: t('Score after discount'),
-      cellClassName: 'font-medium tabular-nums',
+      className: 'h-9 text-right',
+      cellClassName: cn(tableStyles.topNumericCell, 'font-semibold'),
       cell: (row) => formatScore(row.utility),
     },
   ]
@@ -86,11 +93,13 @@ export function PickTable(props: { pick: RoutePick }) {
         )}
       </p>
       <StaticDataTable
+        className={tableStyles.sectionContainer}
+        headerRowClassName={tableStyles.mutedHeaderRow}
         columns={columns}
         data={props.pick.band}
         getRowKey={(row) => row.model}
         getRowClassName={(row) =>
-          cn(row.model === props.pick.chosen && 'bg-success/10 font-semibold')
+          cn(row.model === props.pick.chosen && 'bg-success/10')
         }
       />
     </div>

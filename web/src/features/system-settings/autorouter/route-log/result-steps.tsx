@@ -20,7 +20,7 @@ import { CircleCheck, Gauge, TriangleAlert } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import {
-  effortActionNote,
+  effortDeliveryNote,
   formatScore,
   preferenceLabel,
   routeErrorLabel,
@@ -65,7 +65,7 @@ export function EffortStep(props: {
       {adjustments.length > 0 && <Chips items={adjustments} />}
       {result && (
         <p className='text-muted-foreground text-xs'>
-          {effortActionNote(t, result.effort_in_body ? result.effort_action : '')}
+          {effortDeliveryNote(t, result)}
         </p>
       )}
     </StepFrame>

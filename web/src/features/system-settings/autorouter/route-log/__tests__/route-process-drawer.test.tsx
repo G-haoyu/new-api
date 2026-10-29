@@ -292,6 +292,30 @@ test.each([
   }
 )
 
+test.each([
+  ['sonnet-high', 'Sent as part of the model name.'],
+  ['sonnet', 'No model variant carries this effort, so the provider default applies.'],
+])(
+  'a model without a reasoning declaration that ran as %s says how the effort reached it',
+  async (resolved, note) => {
+    mockLog({
+      ...logItem,
+      detail: {
+        result: { model: 'sonnet', resolved_model: resolved, effort: 'high' },
+        trace: {
+          request: { human_turns: 1, text_runes: 5 },
+          judgment: 'live',
+          effort: { difficulty: 2, base: 'high', threshold: 0.5, benefit: 0.1 },
+        },
+      },
+    })
+    renderDrawer({})
+
+    expect(await screen.findByText(note)).toBeVisible()
+    expect(screen.queryByText('Effort sent')).not.toBeInTheDocument()
+  }
+)
+
 test('an untrusted classification says why and that the previous route is kept', async () => {
   mockLog({
     ...logItem,

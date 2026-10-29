@@ -4486,6 +4486,7 @@
     "No model mappings configured. Click \"Add Mapping\" to get started.": "未配置模型映射。点击“添加映射”即可开始使用。",
     "No model price changes to save": "没有模型价格变更需要保存",
     "No model usage data available": "暂无模型用量数据",
+    "No model variant carries this effort, so the provider default applies.": "没有哪个模型变体带这个推理强度，所以使用服务商的默认强度。",
     "No model-level declaration": "无模型级声明",
     "No model-level declaration.": "没有模型级声明。",
     "No models available": "没有可用的模型",

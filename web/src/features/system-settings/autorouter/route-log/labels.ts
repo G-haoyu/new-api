@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { TFunction } from 'i18next'
 
+import type { RouteResult } from './types'
+
 export type RouteTone = 'success' | 'warning' | 'danger' | 'info' | 'neutral'
 
 /** Leaderboard-style scores and probabilities keep four decimals. */
@@ -174,19 +176,28 @@ export function routeSourceLabel(t: TFunction, source: string): string {
   }
 }
 
-export function effortActionNote(t: TFunction, action?: string): string {
-  switch (action) {
-    case 'set':
-      return t("Written into the request, replacing the client's own setting.")
-    case 'strip':
-      return t(
-        "The model does not support reasoning, so the client's reasoning settings were removed."
-      )
-    case 'keep':
-      return t("The client's own reasoning settings were left untouched.")
-    default:
-      return t('Sent as part of the model name.')
+/**
+ * How the reasoning effort reached the model. A model that declares reasoning gets it
+ * in the request body; any other carries it as a suffix of its name, and the bare name
+ * means no variant existed, so the provider's own default effort applies.
+ */
+export function effortDeliveryNote(t: TFunction, result: RouteResult): string {
+  if (result.effort_in_body) {
+    switch (result.effort_action) {
+      case 'set':
+        return t("Written into the request, replacing the client's own setting.")
+      case 'strip':
+        return t(
+          "The model does not support reasoning, so the client's reasoning settings were removed."
+        )
+      default:
+        return t("The client's own reasoning settings were left untouched.")
+    }
   }
+  if (result.resolved_model && result.resolved_model !== result.model) {
+    return t('Sent as part of the model name.')
+  }
+  return t('No model variant carries this effort, so the provider default applies.')
 }
 
 export function preferenceLabel(t: TFunction, preference: string): string {
