@@ -459,6 +459,15 @@ func SetApiRouter(router *gin.Engine) {
 			capabilityGateRoute.GET("/events", controller.GetCapabilityGateEvents)
 		}
 
+		autoRouterRoute := apiRouter.Group("/autorouter")
+		autoRouterRoute.Use(middleware.RootAuth())
+		{
+			autoRouterRoute.GET("/status", controller.GetAutoRouterStatus)
+			autoRouterRoute.GET("/ranking", controller.GetAutoRouterRanking)
+			autoRouterRoute.POST("/ranking/refresh", controller.RefreshAutoRouterRanking)
+			autoRouterRoute.POST("/ranking/restore", controller.RestoreAutoRouterRanking)
+		}
+
 		// Deployments (model deployment management)
 		deploymentsRoute := apiRouter.Group("/deployments")
 		deploymentsRoute.Use(middleware.AdminAuth())
