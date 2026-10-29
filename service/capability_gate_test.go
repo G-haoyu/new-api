@@ -179,9 +179,9 @@ func receiveWithin[T any](t *testing.T, ch <-chan T) T {
 
 // newRecordingCapabilityGateEventWriter 返回一个把每个交付批次送进 channel 的 writer。
 // 调用方负责 shutdown。
-func newRecordingCapabilityGateEventWriter(queueSize, batchSize int, flushInterval time.Duration) (*capabilityGateEventWriter, <-chan []model.CapabilityGateEvent) {
+func newRecordingCapabilityGateEventWriter(queueSize, batchSize int, flushInterval time.Duration) (*eventWriter[model.CapabilityGateEvent], <-chan []model.CapabilityGateEvent) {
 	batches := make(chan []model.CapabilityGateEvent, 16)
-	writer := newCapabilityGateEventWriter(queueSize, batchSize, flushInterval, func(batch []*model.CapabilityGateEvent) error {
+	writer := newEventWriter("capability gate event", queueSize, batchSize, flushInterval, func(batch []*model.CapabilityGateEvent) error {
 		delivered := make([]model.CapabilityGateEvent, 0, len(batch))
 		for _, event := range batch {
 			delivered = append(delivered, *event)
@@ -242,7 +242,7 @@ func TestCapabilityGateEventWriterDropsInsteadOfBlockingWhenQueueIsFull(t *testi
 	started := make(chan struct{}, 4)
 	release := make(chan struct{})
 	var inserted atomic.Int64
-	writer := newCapabilityGateEventWriter(1, 1, time.Hour, func(batch []*model.CapabilityGateEvent) error {
+	writer := newEventWriter("capability gate event", 1, 1, time.Hour, func(batch []*model.CapabilityGateEvent) error {
 		started <- struct{}{}
 		<-release
 		inserted.Add(int64(len(batch)))
@@ -264,7 +264,7 @@ func TestCapabilityGateEventWriterDropsInsteadOfBlockingWhenQueueIsFull(t *testi
 func TestCapabilityGateEventWriterKeepsRunningAfterFailedInserts(t *testing.T) {
 	var calls atomic.Int32
 	delivered := make(chan string, 1)
-	writer := newCapabilityGateEventWriter(8, 1, time.Hour, func(batch []*model.CapabilityGateEvent) error {
+	writer := newEventWriter("capability gate event", 8, 1, time.Hour, func(batch []*model.CapabilityGateEvent) error {
 		switch calls.Add(1) {
 		case 1:
 			panic("insert panicked")
