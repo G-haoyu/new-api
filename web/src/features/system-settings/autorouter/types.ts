@@ -42,6 +42,9 @@ export type AutoRouterSettings = {
   'autorouter_setting.difficulty_efforts': string[]
   'autorouter_setting.rank_refresh_enabled': boolean
   'autorouter_setting.rank_refresh_interval_hours': number
+  /** Which requests leave a routing log: off, decisions or all. */
+  'autorouter_setting.route_log_mode': 'off' | 'decisions' | 'all'
+  'autorouter_setting.route_log_retention_days': number
 }
 
 /** Where a connection value comes from; empty when it is not set anywhere. */

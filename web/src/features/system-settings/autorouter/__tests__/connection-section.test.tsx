@@ -45,6 +45,8 @@ const settings: AutoRouterSettings = {
   'autorouter_setting.difficulty_efforts': ['low', 'medium', 'high', 'xhigh'],
   'autorouter_setting.rank_refresh_enabled': true,
   'autorouter_setting.rank_refresh_interval_hours': 24,
+  'autorouter_setting.route_log_mode': 'decisions',
+  'autorouter_setting.route_log_retention_days': 7,
 }
 
 function Fixture(props: { values?: Partial<AutoRouterSettings> }) {

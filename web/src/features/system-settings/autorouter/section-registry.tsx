@@ -21,6 +21,7 @@ import { ConnectionSection } from './connection-section'
 import { JudgmentSection } from './judgment-section'
 import { PreferenceSection } from './preference-section'
 import { RankingSection } from './ranking-section'
+import { RouteLogSection } from './route-log/route-log-section'
 import type { AutoRouterSettings } from './types'
 
 const AUTOROUTER_SECTIONS = [
@@ -50,6 +51,13 @@ const AUTOROUTER_SECTIONS = [
     titleKey: 'Leaderboard',
     build: (settings: AutoRouterSettings) => (
       <RankingSection settings={settings} />
+    ),
+  },
+  {
+    id: 'route-log',
+    titleKey: 'Routing logs',
+    build: (settings: AutoRouterSettings) => (
+      <RouteLogSection settings={settings} />
     ),
   },
 ] as const
