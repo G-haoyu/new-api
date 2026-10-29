@@ -26,14 +26,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type ModelRequest struct {
-	Model           string                 `json:"model"`
-	Group           string                 `json:"group,omitempty"`
-	ProviderRouting *model.ProviderRouting `json:"provider,omitempty"`
-	Workload        string                 `json:"workload,omitempty"`
+	Model    string `json:"model"`
+	Group    string `json:"group,omitempty"`
+	Workload string `json:"workload,omitempty"`
 }
 
 func Distribute() func(c *gin.Context) {
@@ -72,15 +70,6 @@ func Distribute() func(c *gin.Context) {
 		if err != nil {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
-		}
-		if modelRequest.ProviderRouting != nil {
-			routing := modelRequest.ProviderRouting.Normalized()
-			if routing == nil {
-				abortWithOpenAiMessage(c, http.StatusBadRequest, "provider.order must contain at least one provider")
-				return
-			}
-			common.SetContextKey(c, constant.ContextKeyProviderRouting, routing)
-			modelRequest.ProviderRouting = routing
 		}
 		if workload := strings.TrimSpace(modelRequest.Workload); workload != "" {
 			common.SetContextKey(c, constant.ContextKeySchedulerWorkload, workload)
@@ -193,12 +182,11 @@ func Distribute() func(c *gin.Context) {
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectErr *service.ChannelSelectError
 			channel, _, selectErr = service.SelectChannelForRequest(c, modelRequest.Model, &service.RetryParam{
-				Ctx:             c,
-				ModelName:       modelRequest.Model,
-				TokenGroup:      usingGroup,
-				RequestPath:     c.Request.URL.Path,
-				ProviderRouting: modelRequest.ProviderRouting,
-				Retry:           common.GetPointer(0),
+				Ctx:         c,
+				ModelName:   modelRequest.Model,
+				TokenGroup:  usingGroup,
+				RequestPath: c.Request.URL.Path,
+				Retry:       common.GetPointer(0),
 			})
 			if selectErr != nil {
 				if selectErr.FilterKind == taskdto.FilterTaskPluginIdentity {
@@ -213,10 +201,6 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, selectErr.StatusCode, message, selectErr.Code)
 				return
 			}
-		}
-		if !providerRoutingAllowsChannel(modelRequest.ProviderRouting, channel) {
-			abortWithOpenAiMessage(c, http.StatusForbidden, "provider routing conflicts with the selected channel")
-			return
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
@@ -272,19 +256,6 @@ func setSchedulerAllowedChannelIDs(c *gin.Context, modelName, usingGroup, reques
 // - application/json
 // - application/x-www-form-urlencoded
 // - multipart/form-data
-
-func providerRoutingAllowsChannel(routing *model.ProviderRouting, channel *model.Channel) bool {
-	if routing == nil || channel == nil {
-		return routing == nil
-	}
-	provider := channel.GetProviderSlug()
-	for _, requested := range routing.Order {
-		if requested == provider {
-			return true
-		}
-	}
-	return false
-}
 
 // noAvailableChannelMessage explains a 503 for a task-plugin-claimed model.
 // The response tells the caller the model is plugin-claimed without naming the
@@ -432,7 +403,7 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 		return nil, errors.New("model must be provided once")
 	}
 
-	values := gjson.GetManyBytes(requestBody, "model", "group", "provider", "workload")
+	values := gjson.GetManyBytes(requestBody, "model", "group", "workload")
 	modelName, err := getJSONStringValue(values[0], "model")
 	if err != nil {
 		return nil, err
@@ -441,32 +412,7 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var providerRouting *model.ProviderRouting
-	if values[2].Exists() && values[2].Type != gjson.Null {
-		if values[2].Type != gjson.JSON {
-			return nil, fmt.Errorf("field provider must be an object")
-		}
-		var parsed model.ProviderRouting
-		if err := common.Unmarshal([]byte(values[2].Raw), &parsed); err != nil {
-			return nil, fmt.Errorf("field provider is invalid: %w", err)
-		}
-		parsed.HasAllowFallbacks = values[2].Get("allow_fallbacks").Exists()
-		providerRouting = &parsed
-	}
-	cleanedBody, err := sjson.DeleteBytes(requestBody, "provider")
-	if err != nil {
-		return nil, fmt.Errorf("failed to remove provider routing field: %w", err)
-	}
-	if string(cleanedBody) != string(requestBody) {
-		replacement, err := common.CreateBodyStorage(cleanedBody)
-		if err != nil {
-			return nil, err
-		}
-		_ = storage.Close()
-		c.Set(common.KeyBodyStorage, replacement)
-		storage = replacement
-	}
-	workload, err := getJSONStringValue(values[3], "workload")
+	workload, err := getJSONStringValue(values[2], "workload")
 	if err != nil {
 		return nil, err
 	}
@@ -477,10 +423,9 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	c.Request.Body = io.NopCloser(storage)
 
 	return &ModelRequest{
-		Model:           modelName,
-		Group:           group,
-		ProviderRouting: providerRouting,
-		Workload:        workload,
+		Model:    modelName,
+		Group:    group,
+		Workload: workload,
 	}, nil
 }
 
@@ -605,9 +550,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			}
 			if req != nil {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 		} else if c.Request.Method == http.MethodGet {
 			relayMode = relayconstant.RelayModeVideoFetchByID
@@ -623,9 +565,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 				return nil, false, err
 			}
 			modelRequest.Model = req.Model
-			if req.ProviderRouting != nil {
-				modelRequest.ProviderRouting = req.ProviderRouting
-			}
 			relayMode = relayconstant.RelayModeVideoSubmit
 		} else if c.Request.Method == http.MethodGet {
 			relayMode = relayconstant.RelayModeVideoFetchByID
@@ -649,9 +588,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			return nil, false, err
 		}
 		modelRequest.Model = req.Model
-		if req.ProviderRouting != nil {
-			modelRequest.ProviderRouting = req.ProviderRouting
-		}
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
 		//wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01
@@ -683,9 +619,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			req, err := getModelFromRequest(c)
 			if err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 		}
 	}
@@ -698,9 +631,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			// 先尝试从请求读取
 			if req, err := getModelFromRequest(c); err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranslation
@@ -708,9 +638,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			// 先尝试从请求读取
 			if req, err := getModelFromRequest(c); err == nil && req.Model != "" {
 				modelRequest.Model = req.Model
-				if req.ProviderRouting != nil {
-					modelRequest.ProviderRouting = req.ProviderRouting
-				}
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranscription
@@ -725,9 +652,6 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		}
 		modelRequest.Model = req.Model
 		modelRequest.Group = req.Group
-		if req.ProviderRouting != nil {
-			modelRequest.ProviderRouting = req.ProviderRouting
-		}
 		common.SetContextKey(c, constant.ContextKeyTokenGroup, modelRequest.Group)
 	}
 
@@ -812,7 +736,6 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
 	common.SetContextKey(c, constant.ContextKeyChannelTag, channel.GetTag())
-	common.SetContextKey(c, constant.ContextKeyProviderSlug, channel.GetProviderSlug())
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())

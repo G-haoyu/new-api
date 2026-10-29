@@ -33,11 +33,6 @@ const MODELS_SECTIONS = [
     build: () => null,
   },
   {
-    id: 'providers',
-    titleKey: 'Providers',
-    build: () => null,
-  },
-  {
     id: 'deployments',
     titleKey: 'Deployments',
     build: () => null,

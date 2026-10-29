@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -54,11 +53,7 @@ const EMPTY_VENDORS: Vendor[] = []
 export function useModelsColumns(
   vendors: Vendor[] = EMPTY_VENDORS,
   pricing?: ModelPricingConfig,
-  pricingState?: 'loading' | 'error',
-  options?: {
-    expandedModelIds: Set<number>
-    onToggleExpand: (id: number) => void
-  }
+  pricingState?: 'loading' | 'error'
 ): ColumnDef<Model>[] {
   const { t } = useTranslation()
   const canPrice = useCanEditModelPricing()
@@ -75,34 +70,6 @@ export function useModelsColumns(
   return useMemo<ColumnDef<Model>[]>(() => {
     const rules = getNameRuleConfig(t)
     return [
-      {
-        id: 'provider_relations',
-        header: () => null,
-        cell: ({ row }) => {
-          const expanded =
-            options?.expandedModelIds.has(row.original.id) ?? false
-          return (
-            <Button
-              type='button'
-              variant='ghost'
-              size='icon'
-              className='size-7'
-              aria-label={t('Expand model providers')}
-              aria-expanded={expanded}
-              onClick={() => options?.onToggleExpand(row.original.id)}
-            >
-              {expanded ? (
-                <ChevronDown className='size-4' />
-              ) : (
-                <ChevronRight className='size-4' />
-              )}
-            </Button>
-          )
-        },
-        enableSorting: false,
-        enableHiding: false,
-        size: 40,
-      },
       {
         id: 'select',
         header: ({ table }) => (
@@ -420,6 +387,5 @@ export function useModelsColumns(
     pricingState,
     setCurrentRow,
     setOpen,
-    options,
   ])
 }

@@ -2667,25 +2667,6 @@ export function ChannelMutateDrawer({
   const basicSection = (
     <div className='scroll-mt-4'>
       <ChannelBasicSection>
-        <FormField
-          control={form.control}
-          name='provider_slug'
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('Provider slug')}</FormLabel>
-              <FormControl>
-                <Input placeholder='siliconflow' {...field} />
-              </FormControl>
-              <FormDescription>
-                {t(
-                  'Stable identifier used when users select a provider for routing.'
-                )}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-
         <div className='grid gap-4'>
           <FormField
             control={form.control}

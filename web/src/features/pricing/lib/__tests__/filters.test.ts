@@ -19,12 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { describe, expect, it } from 'vitest'
 
 import type { PricingModel } from '../../types'
-import {
-  filterByAdvanced,
-  getProviderQuantizations,
-  getProviderRegions,
-  hasValues,
-} from '../filters'
+import { filterByAdvanced, hasValues } from '../filters'
 
 const models: PricingModel[] = [
   {
@@ -55,10 +50,6 @@ describe('pricing advanced filters', () => {
       contextLength: 'gte-128k',
       parameterCount: '50b-100b',
       releaseDate: 'all',
-      free: 'all',
-      batch: 'all',
-      region: 'all',
-      quantization: 'all',
     })
 
     expect(filtered.map((model) => model.model_name)).toEqual(['large'])
@@ -66,50 +57,5 @@ describe('pricing advanced filters', () => {
 
   it('hides metadata filter sections when no values are present', () => {
     expect(hasValues(models, (model) => model.release_date)).toBe(false)
-  })
-
-  it('filters by available provider metadata and exposes dynamic values', () => {
-    const providerModels: PricingModel[] = [
-      {
-        ...models[0],
-        model_name: 'free-model',
-        providers: [
-          {
-            slug: 'siliconflow',
-            name: 'SiliconFlow',
-            available: true,
-            pricing: { input_price: 0, output_price: 0, source: 'model-provider' },
-            metadata: { region: 'CN', quantization: 'FP8', batch: true },
-          },
-        ],
-      },
-      {
-        ...models[1],
-        model_name: 'paid-model',
-        providers: [
-          {
-            slug: 'openai',
-            name: 'OpenAI',
-            available: true,
-            pricing: { input_price: 1, output_price: 2, source: 'model-provider' },
-            metadata: { region: 'US', quantization: 'FP16', batch: false },
-          },
-        ],
-      },
-    ]
-
-    expect(
-      filterByAdvanced(providerModels, {
-        contextLength: 'all',
-        parameterCount: 'all',
-        releaseDate: 'all',
-        free: 'supported',
-        batch: 'supported',
-        region: 'CN',
-        quantization: 'FP8',
-      }).map((model) => model.model_name)
-    ).toEqual(['free-model'])
-    expect(getProviderRegions(providerModels)).toEqual(['CN', 'US'])
-    expect(getProviderQuantizations(providerModels)).toEqual(['FP16', 'FP8'])
   })
 })

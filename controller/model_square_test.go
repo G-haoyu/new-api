@@ -25,13 +25,14 @@ func setupModelSquareControllerTest(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(
 		&model.Model{},
 		&model.Vendor{},
-		&model.Provider{},
-		&model.ModelProviderPrice{},
 		&model.Channel{},
 		&model.Ability{},
 	))
 	model.DB = db
+	previousPricing := getModelSquarePricing
+	getModelSquarePricing = func() []model.Pricing { return nil }
 	t.Cleanup(func() {
+		getModelSquarePricing = previousPricing
 		model.DB = previousDB
 		sqlDB, dbErr := db.DB()
 		if dbErr == nil {
@@ -43,7 +44,6 @@ func setupModelSquareControllerTest(t *testing.T) *gorm.DB {
 
 func TestGetModelSquareSupportsPagination(t *testing.T) {
 	db := setupModelSquareControllerTest(t)
-	seedModelSquareProvider(t, db)
 	for index := 1; index <= 3; index++ {
 		require.NoError(t, db.Create(&model.Model{
 			Id:        index,
@@ -51,7 +51,7 @@ func TestGetModelSquareSupportsPagination(t *testing.T) {
 			Status:    1,
 			NameRule:  model.NameRuleExact,
 		}).Error)
-		seedModelSquarePrice(t, db, index)
+		seedModelSquareListing(t, db, index)
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -81,7 +81,6 @@ func TestGetModelSquareSupportsPagination(t *testing.T) {
 
 func TestGetModelSquareUsesDefaultPageSize(t *testing.T) {
 	db := setupModelSquareControllerTest(t)
-	seedModelSquareProvider(t, db)
 	for index := 1; index <= 25; index++ {
 		require.NoError(t, db.Create(&model.Model{
 			Id:        index,
@@ -89,7 +88,7 @@ func TestGetModelSquareUsesDefaultPageSize(t *testing.T) {
 			Status:    1,
 			NameRule:  model.NameRuleExact,
 		}).Error)
-		seedModelSquarePrice(t, db, index)
+		seedModelSquareListing(t, db, index)
 	}
 
 	gin.SetMode(gin.TestMode)
@@ -115,7 +114,7 @@ func TestGetModelSquareUsesDefaultPageSize(t *testing.T) {
 	assert.Equal(t, 24, response.Data.Limit)
 }
 
-func TestGetModelSquareExcludesModelsWithoutProviderConfiguration(t *testing.T) {
+func TestGetModelSquareExcludesModelsWithoutEnabledChannel(t *testing.T) {
 	db := setupModelSquareControllerTest(t)
 	require.NoError(t, db.Create(&model.Model{
 		Id:        1,
@@ -143,7 +142,7 @@ func TestGetModelSquareExcludesModelsWithoutProviderConfiguration(t *testing.T) 
 	assert.Zero(t, response.Data.Total)
 }
 
-func TestGetModelSquareDetailExcludesModelsWithoutProviderConfiguration(t *testing.T) {
+func TestGetModelSquareDetailExcludesModelsWithoutEnabledChannel(t *testing.T) {
 	db := setupModelSquareControllerTest(t)
 	require.NoError(t, db.Create(&model.Model{
 		Id:        1,
@@ -170,135 +169,42 @@ func TestGetModelSquareDetailExcludesModelsWithoutProviderConfiguration(t *testi
 	assert.Equal(t, "model not found", response.Message)
 }
 
-func seedModelSquareProvider(t *testing.T, db *gorm.DB) {
+// seedModelSquareListing makes a model visible in the square: an enabled
+// channel ability plus an entry in the pricing cache.
+func seedModelSquareListing(t *testing.T, db *gorm.DB, modelID int) {
 	t.Helper()
-	require.NoError(t, db.Create(&model.Provider{
-		Id:          1,
-		Slug:        "test-provider",
-		DisplayName: "Test Provider",
-		Status:      1,
+	var meta model.Model
+	require.NoError(t, db.First(&meta, modelID).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group:     "default",
+		Model:     meta.ModelName,
+		ChannelId: 1,
+		Enabled:   true,
 	}).Error)
+	existing := getModelSquarePricing()
+	getModelSquarePricing = func() []model.Pricing {
+		return append(existing, model.Pricing{ModelName: meta.ModelName, ModelRatio: 1, CompletionRatio: 2})
+	}
 }
 
-func seedModelSquarePrice(t *testing.T, db *gorm.DB, modelID int) {
-	t.Helper()
-	require.NoError(t, db.Create(&model.ModelProviderPrice{
-		ModelId:      modelID,
-		ProviderSlug: "test-provider",
-		InputPrice:   1,
-		OutputPrice:  2,
-	}).Error)
+func TestModelSquarePricingFromRatio(t *testing.T) {
+	cacheRatio := 0.1
+	pricing := modelSquarePricingFromPricing(model.Pricing{
+		ModelRatio:      1.5,
+		CompletionRatio: 2,
+		CacheRatio:      &cacheRatio,
+	})
+
+	assert.Equal(t, 3.0, pricing.InputPrice)
+	assert.Equal(t, 6.0, pricing.OutputPrice)
+	require.NotNil(t, pricing.CacheReadPrice)
+	assert.InDelta(t, 0.3, *pricing.CacheReadPrice, 0.000001)
 }
 
-func TestModelSquareUsesOnlyExplicitProviderPrices(t *testing.T) {
-	inputListPrice := 1.4
-	discount := 90.0
-	item := modelSquareItemFromModel(
-		&model.Model{Id: 1, ModelName: "gpt-test"},
-		map[string]model.Pricing{
-			"gpt-test": {
-				Providers: []model.ProviderSummary{
-					{Slug: "deepseek", Name: "DeepSeek", Available: true},
-					{Slug: "siliconflow", Name: "SiliconFlow", Available: true},
-				},
-			},
-		},
-		map[int]model.Vendor{},
-		map[string]model.ModelProviderPrice{
-			"siliconflow": {
-				ModelId:        1,
-				ProviderSlug:   "siliconflow",
-				InputPrice:     1,
-				OutputPrice:    2,
-				InputListPrice: &inputListPrice,
-				DiscountRate:   &discount,
-			},
-		},
-		map[string]model.Provider{
-			"deepseek": {
-				Slug:        "deepseek",
-				DisplayName: "DeepSeek",
-				Status:      1,
-			},
-			"siliconflow": {
-				Slug:        "siliconflow",
-				DisplayName: "SiliconFlow",
-				Status:      1,
-			},
-		},
-	)
+func TestModelSquarePricingFromFixedPrice(t *testing.T) {
+	pricing := modelSquarePricingFromPricing(model.Pricing{QuotaType: 1, ModelPrice: 0.05})
 
-	require.Len(t, item.Providers, 1)
-	assert.Equal(t, "siliconflow", item.Providers[0].Slug)
-	assert.Equal(t, "SiliconFlow", item.Providers[0].Name)
-	assert.True(t, item.Providers[0].Available)
-	require.NotNil(t, item.Providers[0].Pricing)
-	assert.InDelta(t, 1.26, item.Providers[0].Pricing.InputPrice, 0.000001)
-	assert.Equal(t, inputListPrice, *item.Providers[0].Pricing.InputListPrice)
-	assert.Equal(t, discount, *item.Providers[0].Pricing.DiscountRate)
-}
-
-func TestModelSquareProviderNameFallsBackWhenMetadataNameIsEmpty(t *testing.T) {
-	item := modelSquareItemFromModel(
-		&model.Model{Id: 1, ModelName: "fallback-model"},
-		map[string]model.Pricing{
-			"fallback-model": {
-				Providers: []model.ProviderSummary{
-					{Slug: "provider-slug", Name: "Provider label", Available: true},
-				},
-			},
-		},
-		map[int]model.Vendor{},
-		map[string]model.ModelProviderPrice{
-			"provider-slug": {
-				ModelId:      1,
-				ProviderSlug: "provider-slug",
-				InputPrice:   1,
-				OutputPrice:  2,
-			},
-		},
-		map[string]model.Provider{
-			"provider-slug": {Slug: "provider-slug", DisplayName: "", Status: 1},
-		},
-	)
-
-	require.Len(t, item.Providers, 1)
-	assert.Equal(t, "Provider label", item.Providers[0].Name)
-}
-
-func TestBuildDefaultProviderPricesUsesModelPricingForMissingProviders(t *testing.T) {
-	prices := buildDefaultProviderPrices(
-		model.Pricing{
-			ModelName:       "default-price-model",
-			ModelRatio:      1.5,
-			CompletionRatio: 2,
-			Providers:       []model.ProviderSummary{{Slug: "openai"}},
-		},
-		map[string]model.ModelProviderPrice{},
-	)
-
-	require.Contains(t, prices, "openai")
-	assert.Equal(t, 3.0, prices["openai"].InputPrice)
-	assert.Equal(t, 6.0, prices["openai"].OutputPrice)
-}
-
-func TestBuildDefaultProviderPricesPreservesExplicitProviderPricing(t *testing.T) {
-	prices := buildDefaultProviderPrices(
-		model.Pricing{
-			ModelName:       "configured-price-model",
-			ModelRatio:      1.5,
-			CompletionRatio: 2,
-			Providers:       []model.ProviderSummary{{Slug: "openai"}},
-		},
-		map[string]model.ModelProviderPrice{
-			"openai": {
-				ProviderSlug: "openai",
-				InputPrice:   9,
-				OutputPrice:  10,
-			},
-		},
-	)
-
-	assert.Equal(t, 9.0, prices["openai"].InputPrice)
-	assert.Equal(t, 10.0, prices["openai"].OutputPrice)
+	assert.Equal(t, 0.05, pricing.InputPrice)
+	assert.Equal(t, 0.05, pricing.OutputPrice)
+	assert.Nil(t, pricing.CacheReadPrice)
 }
