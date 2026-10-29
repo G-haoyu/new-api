@@ -179,6 +179,14 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/scheduler/monitor":                accessTokenScopeRule("ops:read"),
 	"POST /api/scheduler/test-connection":       accessTokenScopeRule("option:write"),
 
+	// router/api-router.go: /api/autorouter
+	"GET /api/autorouter/status":           accessTokenScopeRule("option:read"),
+	"GET /api/autorouter/ranking":          accessTokenScopeRule("option:read"),
+	"POST /api/autorouter/ranking/refresh": accessTokenScopeRule("option:write"),
+	"POST /api/autorouter/ranking/restore": accessTokenScopeRule("option:write"),
+	"GET /api/auto-route-logs/":            accessTokenScopeRule("log:read"),
+	"GET /api/auto-route-logs/:request_id": accessTokenScopeRule("log:read"),
+
 	// router/api-router.go: /api/performance, /api/system-task, /api/system-info
 	"GET /api/performance/stats":                   accessTokenScopeRule("ops:read"),
 	"DELETE /api/performance/disk_cache":           accessTokenScopeRule("ops:write"),

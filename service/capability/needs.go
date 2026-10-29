@@ -31,10 +31,12 @@ func (f Format) Valid() bool {
 
 // Needs 是一次请求对硬约束能力的全部诉求。零值表示"请求没提这个维度"。
 type Needs struct {
-	Stream               bool     `json:"stream"`
-	MaxOutputTokens      *int64   `json:"max_output_tokens,omitempty"`
-	Temperature          *float64 `json:"temperature,omitempty"`
-	EstimatedInputTokens int64    `json:"estimated_input_tokens"`
+	Stream          bool     `json:"stream"`
+	MaxOutputTokens *int64   `json:"max_output_tokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	// EstimatedInputTokens 不由 Extract 填写：它取决于候选模型的 tokenizer 家族，
+	// 由门控逐个候选模型估算后填进副本再判定（见 service.RoutingInputTokens）。
+	EstimatedInputTokens int64 `json:"estimated_input_tokens"`
 
 	// 采样参数。值是客户端显式给出的值；nil 表示请求没提这个参数，
 	// StopCount 为 0 表示请求没带停止序列。
@@ -140,7 +142,7 @@ func sniff(body []byte) (Format, error) {
 	return "", fmt.Errorf("unable to detect request format: no messages, input or contents")
 }
 
-// collector 边解析边去重并累计文本长度。
+// collector 边解析边去重。
 type collector struct {
 	needs      Needs
 	modalities map[string]struct{}
@@ -149,8 +151,6 @@ type collector struct {
 	builtin    map[string]struct{}
 	counts     map[string]int
 	maxSizeMB  map[string]int
-	textRunes  int64
-	mediaCount int
 }
 
 func newCollector() *collector {
@@ -164,10 +164,6 @@ func newCollector() *collector {
 	}
 }
 
-func (c *collector) text(s string) {
-	c.textRunes += int64(len([]rune(s)))
-}
-
 func (c *collector) modality(name string) {
 	if name == "" {
 		return
@@ -177,7 +173,6 @@ func (c *collector) modality(name string) {
 
 // media 登记一个媒体项。sizeBytes 为 0 表示体积未知（例如只给了 URL）。
 func (c *collector) media(modality, mime, source string, sizeBytes int64) {
-	c.mediaCount++
 	c.modality(modality)
 	if modality != "" {
 		c.counts[modality]++
@@ -233,14 +228,6 @@ func (c *collector) finish() *Needs {
 	}
 	if len(c.maxSizeMB) > 0 {
 		n.MediaMaxSizeMB = c.maxSizeMB
-	}
-	// 粗估：文本按 3 字符/token，媒体各按 1000 token 计。
-	if n.EstimatedInputTokens == 0 {
-		estimated := c.textRunes/3 + int64(c.mediaCount)*1000
-		if estimated == 0 && (c.textRunes > 0 || c.mediaCount > 0) {
-			estimated = 1
-		}
-		n.EstimatedInputTokens = estimated
 	}
 	return &n
 }
@@ -468,7 +455,6 @@ func parseChat(c *collector, body []byte) error {
 		}
 		var text string
 		if err := common.Unmarshal(message.Content, &text); err == nil {
-			c.text(text)
 			c.modality("text")
 			continue
 		}
@@ -490,7 +476,6 @@ func parseChat(c *collector, body []byte) error {
 func parseChatPart(c *collector, part chatPart) {
 	switch part.Type {
 	case "text":
-		c.text(part.Text)
 		c.modality("text")
 	case "image_url":
 		if part.ImageURL != nil {
@@ -616,7 +601,6 @@ func parseResponses(c *collector, body []byte) error {
 
 	if req.Instructions != nil && *req.Instructions != "" {
 		c.needs.SystemMessages++
-		c.text(*req.Instructions)
 	}
 
 	for _, tool := range req.Tools {
@@ -648,7 +632,6 @@ func parseResponses(c *collector, body []byte) error {
 	}
 	var text string
 	if err := common.Unmarshal(req.Input, &text); err == nil {
-		c.text(text)
 		c.modality("text")
 		return nil
 	}
@@ -668,7 +651,6 @@ func parseResponses(c *collector, body []byte) error {
 		}
 		var text string
 		if err := common.Unmarshal(item.Content, &text); err == nil {
-			c.text(text)
 			c.modality("text")
 			continue
 		}
@@ -690,7 +672,6 @@ func parseResponses(c *collector, body []byte) error {
 func parseResponsesPart(c *collector, part responsesPart) {
 	switch part.Type {
 	case "input_text", "output_text", "text":
-		c.text(part.Text)
 		c.modality("text")
 	case "input_image":
 		if part.FileID != "" {
@@ -846,7 +827,6 @@ func parseAnthropic(c *collector, body []byte) error {
 		}
 		var text string
 		if err := common.Unmarshal(message.Content, &text); err == nil {
-			c.text(text)
 			c.modality("text")
 			continue
 		}
@@ -869,7 +849,6 @@ func parseAnthropic(c *collector, body []byte) error {
 func collectClaudeSystem(c *collector, raw common.RawMessage) {
 	var text string
 	if err := common.Unmarshal(raw, &text); err == nil {
-		c.text(text)
 		c.modality("text")
 		return
 	}
@@ -879,7 +858,6 @@ func collectClaudeSystem(c *collector, raw common.RawMessage) {
 	}
 	for _, block := range blocks {
 		if block.Type == "text" {
-			c.text(block.Text)
 			c.modality("text")
 		}
 	}
@@ -888,13 +866,11 @@ func collectClaudeSystem(c *collector, raw common.RawMessage) {
 func parseClaudeBlock(c *collector, block claudeBlock) {
 	switch block.Type {
 	case "text":
-		c.text(block.Text)
 		c.modality("text")
 	case "image":
 		c.claudeSourceMedia("image", block.Source)
 	case "document":
 		if block.Source != nil && block.Source.Type == "text" {
-			c.text(block.Text)
 			c.modality("text")
 			return
 		}
@@ -905,7 +881,6 @@ func parseClaudeBlock(c *collector, block claudeBlock) {
 		}
 		var text string
 		if err := common.Unmarshal(block.Content, &text); err == nil {
-			c.text(text)
 			c.modality("text")
 			return
 		}
@@ -916,7 +891,6 @@ func parseClaudeBlock(c *collector, block claudeBlock) {
 		for _, inner := range blocks {
 			switch inner.Type {
 			case "text":
-				c.text(inner.Text)
 				c.modality("text")
 			case "image":
 				c.claudeSourceMedia("image", inner.Source)
@@ -1109,7 +1083,6 @@ func parseGeminiPart(c *collector, raw common.RawMessage) {
 		return
 	}
 	if part.Text != nil {
-		c.text(*part.Text)
 		c.modality("text")
 	}
 	if part.InlineData != nil {

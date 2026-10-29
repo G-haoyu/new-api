@@ -6,15 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/cachex"
@@ -25,15 +26,26 @@ import (
 )
 
 const (
-	autoRouterCacheNamespace = "new-api:autorouter:v2"
+	autoRouterCacheNamespace = "new-api:autorouter:v3"
 	ginKeyAutoRouterResult   = "autorouter_result"
+	// autoRouterFailureTTL 是 jev 调用失败后不再重试的时长。agent 循环里同一条指令会
+	// 连发很多请求，jev 故障时不记一下，每个请求都要白等一次超时；
+	// 时间取得短，是为了 jev 恢复后能很快重新分类，而不是把兜底结果钉住整个缓存周期。
+	autoRouterFailureTTL = 60 * time.Second
 )
 
-// autoRouterEntry is cached per instruction so every call of one agent loop
-// resolves to the same route without calling jev again.
+// autoRouterEntry 按键的用途存不同的字段：
+//   - d: 键只存 jev 的判断（Decision），或"刚失败过"的标记（Failed）。
+//     同一条指令的后续请求不再调 jev，但路由每次按各自的可用集合重新算，
+//     所以一次带图请求因为能力不满足换了模型，不会影响之后的纯文本请求。
+//   - r: 和 s: 键存最近一次算出的路由（Route），供下一条指令"沿用上一轮模型"，
+//     以及没有可读文字的子 agent 继承会话路由。s: 键还记着这条路由是否来自可信的
+//     jev 判断（Trusted），子 agent 继承时据此决定能不能覆盖客户端的推理字段。
 type autoRouterEntry struct {
 	Route    autorouter.Route     `json:"route"`
 	Decision *autorouter.Decision `json:"decision,omitempty"`
+	Failed   bool                 `json:"failed,omitempty"`
+	Trusted  bool                 `json:"trusted,omitempty"`
 }
 
 var (
@@ -69,10 +81,22 @@ func IsAutoRouterRequest(c *gin.Context, modelName string) bool {
 	if modelName != autorouter.AutoModel || !autorouter_setting.GetAutoRouterSetting().Enabled {
 		return false
 	}
-	path := c.Request.URL.Path
-	mode := relayconstant.Path2RelayMode(path)
-	return mode == relayconstant.RelayModeChatCompletions || mode == relayconstant.RelayModeResponses ||
-		strings.HasPrefix(path, "/v1/messages")
+	_, supported := AutoRouterProtocol(c.Request.URL.Path)
+	return supported
+}
+
+// AutoRouterProtocol 返回 auto 支持的入站协议，决定推理档位写进请求体的哪个字段；
+// 其他路径 ok 为 false。
+func AutoRouterProtocol(path string) (protocol autorouter.Protocol, ok bool) {
+	switch mode := relayconstant.Path2RelayMode(path); {
+	case strings.HasPrefix(path, "/v1/messages"):
+		return autorouter.ProtocolAnthropic, true
+	case mode == relayconstant.RelayModeResponses:
+		return autorouter.ProtocolResponses, true
+	case mode == relayconstant.RelayModeChatCompletions:
+		return autorouter.ProtocolChat, true
+	}
+	return "", false
 }
 
 // AutoRouterListed reports whether "auto" belongs in a model list containing
@@ -83,11 +107,11 @@ func AutoRouterListed(visible []string) bool {
 		return false
 	}
 	isVisible := func(model string) bool { return slices.Contains(visible, model) }
-	taskModels, defaultModels := setting.Ranking()
-	if slices.ContainsFunc(defaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
+	ranking := setting.Ranking()
+	if slices.ContainsFunc(ranking.DefaultModels, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 		return true
 	}
-	for _, models := range taskModels {
+	for _, models := range ranking.TaskModels {
 		if slices.ContainsFunc(models, func(model string) bool { return autorouter.ModelAvailable(model, isVisible) }) {
 			return true
 		}
@@ -103,15 +127,37 @@ func autoRouterCacheKey(kind string, tokenID int, parts ...string) string {
 	return kind + ":" + hex.EncodeToString(sum[:])
 }
 
+// AutoCandidates 由分发中间件提供，回答一个候选模型能不能服务这个请求。
+type AutoCandidates struct {
+	// Serves 判定一个候选：令牌白名单、分组启用、至少一个可用渠道的生效能力满足请求。
+	// ignoreClientReasoning 为 true 时撇开客户端自己写的推理字段：可信的 auto 判断
+	// 会自己定档位并改写它们；false 时按客户端原样的请求判定，兜底路径用它。
+	Serves func(name string, ignoreClientReasoning bool) bool
+	// Why 说明一个候选为什么不能服务这个请求（撇开客户端的推理字段，与 Serves 的第二个
+	// 参数为 true 时一致），能服务时返回空串，只用于选路留痕。可以为 nil。
+	Why func(name string) string
+	// Channels 返回候选模型的可用渠道，用来把期望档位收敛到渠道声明过的档位。
+	Channels func(name string) []int
+	// Price 返回候选模型的混合用户价（美元/百万 token）；ok 为 false 表示没有价格
+	// 或按次计价，没法按 token 比较。为 nil 时不比价，按榜单顺序取第一个可用的。
+	Price func(name string) (price float64, ok bool)
+}
+
 // ResolveAutoModel picks the model and reasoning effort for an "auto" request.
-// available reports whether a model name is usable by this request (token
-// whitelist, group abilities, request path). A jev failure never fails the
-// request: the route falls back to the previous instruction's route or the
-// defaults.
-func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autorouter.Result, error) {
+// A jev failure never fails the request: the route falls back to the previous
+// instruction's route or the defaults.
+//
+// 模型声明了推理维度且裸模型名可用时，档位按声明收敛后写进请求体（result 里记着
+// 写什么，由分发中间件落到请求体）；否则沿用旧办法，把档位拼在模型名后缀上。
+func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Result, error) {
 	setting := autorouter_setting.GetAutoRouterSetting()
-	policy := setting.Policy()
-	result := &autorouter.Result{Source: autorouter.SourceDefault}
+	policy := setting.Policy(common.GetContextKeyString(c, constant.ContextKeyTokenAutoPreference))
+	result := &autorouter.Result{Source: autorouter.SourceDefault, Preference: policy.Preference}
+	available := func(name string) bool { return candidates.Serves(name, false) }
+	overridable := func(name string) bool { return candidates.Serves(name, true) }
+	routing := autorouter.Candidates{Available: available, Overridable: overridable, Price: candidates.Price, Why: candidates.Why}
+	trace := &autorouter.Trace{Judgment: autorouter.JudgmentNoInstruction}
+	result.Trace = trace
 
 	otelRuntime := observability.FromContext(c.Request.Context())
 	routeCtx, routeSpan := otelRuntime.StartAutoRouter(c.Request.Context())
@@ -127,20 +173,45 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 	if instruction.Auxiliary {
 		routeInput["auxiliary"] = true
 	}
+	protocol, _ := AutoRouterProtocol(c.Request.URL.Path)
+	trace.Request = autorouter.RequestTrace{
+		Protocol:      protocol,
+		Auxiliary:     instruction.Auxiliary,
+		Agent:         instruction.Agent,
+		HumanTurns:    instruction.HumanTurns,
+		Session:       instruction.Session != "",
+		TextRunes:     utf8.RuneCountInString(instruction.Text),
+		PreviousRunes: utf8.RuneCountInString(instruction.Previous),
+	}
 
 	ok := false
 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
 	cache := getAutoRouterCache()
 	ttl := time.Duration(setting.CacheTTLSeconds) * time.Second
 	switch {
+	case !policy.AnyModelAvailable(overridable):
+		// 一个可用模型都没有时，分类得出什么都选不出路由，不必先花一次 jev 调用。
+		// 用 overridable 判是因为它是 available 的超集，只有它也找不到才是真的没有。
+		trace.Judgment = autorouter.JudgmentUnroutable
+		trace.Unroutable = policy.ExplainUnroutable(routing.Why)
 	case instruction.Auxiliary:
+		trace.Judgment = autorouter.JudgmentAuxiliary
 	case instruction.Text == "" && instruction.Session != "":
-		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found && autorouter.ModelAvailable(entry.Route.Model, available) {
-			result.Route, result.Source = entry.Route, autorouter.SourceInherit
-			ok = true
+		trace.Judgment = autorouter.JudgmentSession
+		if entry, found, _ := cache.Get(autoRouterCacheKey("s", tokenID, instruction.Session)); found {
+			serves := available
+			if entry.Trusted {
+				serves = overridable
+			}
+			if autorouter.ModelAvailable(entry.Route.Model, serves) {
+				result.Route, result.Source, result.EffortOverride = entry.Route, autorouter.SourceInherit, entry.Trusted
+				trace.Ladder = append(trace.Ladder, autorouter.LadderStep{Profile: entry.Route.Profile, Outcome: autorouter.OutcomeInherited, Model: entry.Route.Model})
+				ok = true
+			}
 		}
 	case instruction.Text != "":
 		state := autorouter.BuildState(instruction.Text, instruction.Previous, setting.MaxRunes, setting.PreviousMaxRunes)
+		trace.Request.Truncated = state["current_task"] != instruction.Text || (instruction.Previous != "" && state["previous_task"] != instruction.Previous)
 		if otelRuntime.RecordsContent(nil) {
 			for key, value := range state {
 				routeInput[key] = value
@@ -149,23 +220,29 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		decisionKey := autoRouterCacheKey("d", tokenID, autorouter.QuestionsVersion, state["current_task"], state["previous_task"])
 		routeKey := autoRouterCacheKey("r", tokenID, instruction.Text)
 
-		// A cached route whose model is no longer usable is routed again.
-		if entry, found, _ := cache.Get(decisionKey); found && autorouter.ModelAvailable(entry.Route.Model, available) {
-			result.Route, result.Decision, result.Source = entry.Route, entry.Decision, autorouter.SourceCache
-			ok = true
-		} else {
-			var previous *autorouter.Route
-			if instruction.Previous != "" {
-				if entry, found, _ := cache.Get(autoRouterCacheKey("r", tokenID, instruction.Previous)); found {
-					previous = &entry.Route
-				}
+		var previous *autorouter.Route
+		if instruction.Previous != "" {
+			if entry, found, _ := cache.Get(autoRouterCacheKey("r", tokenID, instruction.Previous)); found {
+				previous = &entry.Route
 			}
-			routeInput["previous_route"] = previous
+		}
+		routeInput["previous_route"] = previous
 
+		var decision *autorouter.Decision
+		fromCache := false
+		if entry, found, _ := cache.Get(decisionKey); found && (entry.Decision != nil || entry.Failed) {
+			decision, fromCache = entry.Decision, entry.Decision != nil
+			trace.Judgment = autorouter.JudgmentCache
+			if entry.Failed {
+				trace.Judgment = autorouter.JudgmentRecentFailure
+				route.Warning = "jev failed recently, not retried"
+			}
+		} else {
+			connections := setting.Connections()
 			client := autorouter.JevClient{
-				Endpoint:   os.Getenv("JEV_ENDPOINT"),
-				Model:      os.Getenv("JEV_MODEL"),
-				APIKey:     os.Getenv("JEV_API_KEY"),
+				Endpoint:   connections.JevEndpoint.Value,
+				Model:      connections.JevModel.Value,
+				APIKey:     connections.JevAPIKey.Value,
 				HTTPClient: autoRouterClient,
 			}
 			jevCtx, jevSpan := otelRuntime.StartJevClassify(routeCtx)
@@ -182,53 +259,81 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 			jev.Input = jevInput
 
 			if err != nil {
+				trace.Judgment = autorouter.JudgmentLiveFailed
 				result.Jev.Error = err.Error()
 				route.Warning = "jev failed: " + err.Error()
+				_ = cache.SetWithTTL(decisionKey, autoRouterEntry{Failed: true}, autoRouterFailureTTL)
 			} else {
+				trace.Judgment = autorouter.JudgmentLive
 				result.Jev.Response = response.ResponseBody
-				decision := response.Decision(instruction.Previous != "")
-				result.Decision = &decision
+				decided := response.Decision(instruction.Previous != "")
+				decision = &decided
 				jev.Model = response.Model
 				jevOutput := map[string]any{"answers": response.Answers}
 				if response.LatencyMs != nil {
 					jevOutput["server_latency_ms"] = *response.LatencyMs
 				}
 				jev.Output = jevOutput
+				_ = cache.SetWithTTL(decisionKey, autoRouterEntry{Decision: decision}, ttl)
 			}
 			otelRuntime.FinishObservation(jevSpan, jev)
+		}
 
-			var inherited bool
-			result.Route, inherited, ok = autorouter.SelectRoute(result.Decision, previous, policy, available)
-			if inherited && err == nil {
-				route.Warning = "jev decision untrusted"
-			}
-			switch {
-			case !inherited:
-				result.Source = autorouter.SourceJev
-			case previous != nil && result.Route == *previous:
-				result.Source = autorouter.SourceInherit
-			}
-			// A fallback is cached too, so a jev outage costs one timeout per
-			// instruction rather than one per agent-loop call, and the loop
-			// keeps one model.
-			if ok {
-				entry := autoRouterEntry{Route: result.Route, Decision: result.Decision}
-				_ = cache.SetWithTTL(decisionKey, entry, ttl)
-				_ = cache.SetWithTTL(routeKey, entry, ttl)
-			}
+		// 路由每次按本次请求自己的可用集合重新算，缓存里只有 jev 的判断。
+		var inherited bool
+		result.Decision = decision
+		result.Route, inherited, ok, result.Pick = autorouter.SelectRoute(decision, previous, policy, routing, trace)
+		result.EffortOverride = !inherited
+		if inherited && decision != nil {
+			route.Warning = "jev decision untrusted"
+		}
+		switch {
+		case !inherited && fromCache:
+			result.Source = autorouter.SourceCache
+		case !inherited:
+			result.Source = autorouter.SourceJev
+		case previous != nil && result.Route == *previous:
+			result.Source = autorouter.SourceInherit
+		}
+		// 兜底路由也记下来，下一条指令才能沿用同一个模型，agent 循环不会来回换模型。
+		if ok {
+			_ = cache.SetWithTTL(routeKey, autoRouterEntry{Route: result.Route}, ttl)
 		}
 		// The session remembers its latest human instruction's route for the
 		// sub-agents whose task arrives without readable text.
 		if ok && instruction.Session != "" && !instruction.Agent {
-			_ = cache.SetWithTTL(autoRouterCacheKey("s", tokenID, instruction.Session), autoRouterEntry{Route: result.Route}, ttl)
+			_ = cache.SetWithTTL(autoRouterCacheKey("s", tokenID, instruction.Session), autoRouterEntry{Route: result.Route, Trusted: !inherited}, ttl)
 		}
 	}
 	if !ok {
-		result.Route, _, ok = autorouter.SelectRoute(nil, nil, policy, available)
+		// 前面已经选过路（Trust 有值），或根本没有可用模型时，兜底这一次不再写留痕，
+		// 免得盖掉真正的失败过程。
+		var fallbackTrace *autorouter.Trace
+		if trace.Trust == nil && trace.Judgment != autorouter.JudgmentUnroutable {
+			fallbackTrace = trace
+		}
+		result.Route, _, ok, result.Pick = autorouter.SelectRoute(nil, nil, policy, routing, fallbackTrace)
+		result.EffortOverride = false
 	}
 
 	if ok {
-		result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, available)
+		serves := available
+		if result.EffortOverride {
+			serves = overridable
+		}
+		if spec, declared := model.ResolveModelCapability(capabilityBaseModel(result.Model)); declared && spec.Reasoning.Declared() && serves(result.Model) {
+			result.ResolvedModel, result.EffortInBody = result.Model, true
+			// 只有可信的判断才改客户端的推理字段；兜底路径保持原样。
+			result.EffortAction = autorouter.EffortKeep
+			if result.EffortOverride {
+				gate := CapabilityGateFromContext(c)
+				support := gate.EffortSupport(result.ResolvedModel, candidates.Channels(result.ResolvedModel))
+				result.AppliedEffort, result.EffortAction = support.Clamp(result.Effort)
+				gate.OverrideReasoning(result.EffortAction, result.AppliedEffort)
+			}
+		} else {
+			result.ResolvedModel, ok = autorouter.ResolveVariant(result.Model, result.Effort, serves)
+		}
 	}
 	if !ok {
 		route.Err = errors.New("auto router found no available model for this token and group")
@@ -241,19 +346,23 @@ func ResolveAutoModel(c *gin.Context, available func(model string) bool) (*autor
 		"route_fallback": result.Fallback(),
 		"source":         result.Source,
 		"resolved_model": result.ResolvedModel,
+		"preference":     result.Preference,
 	}
 	route.TraceMetadata = map[string]string{
-		"auto_router_model":    result.Model,
-		"auto_router_effort":   result.Effort,
-		"auto_router_profile":  result.Profile,
-		"auto_router_fallback": result.Fallback(),
-		"auto_router_source":   result.Source,
+		"auto_router_model":      result.Model,
+		"auto_router_effort":     result.Effort,
+		"auto_router_profile":    result.Profile,
+		"auto_router_fallback":   result.Fallback(),
+		"auto_router_source":     result.Source,
+		"auto_router_preference": result.Preference,
 	}
 	otelRuntime.FinishObservation(routeSpan, route)
+	recordAutoRoute(c, result, route.Err)
 	if !ok {
 		return result, route.Err
 	}
 	c.Set(ginKeyAutoRouterResult, result)
+	common.SetContextKey(c, constant.ContextKeyAutoRouted, true)
 	if result.Decision != nil && result.Decision.TaskType != autorouter.TaskTypeUnknown &&
 		common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload) == "" {
 		common.SetContextKey(c, constant.ContextKeySchedulerWorkload, result.Decision.TaskType)

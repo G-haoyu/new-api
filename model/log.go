@@ -70,6 +70,7 @@ type Log struct {
 	UseTime           int    `json:"use_time" gorm:"default:0"`
 	IsStream          bool   `json:"is_stream"`
 	FastMode          bool   `json:"fast_mode" gorm:"index"`
+	AutoRouted        bool   `json:"auto_routed"` // asked for "auto"; ModelName is the model it resolved to. Rows from before the column hold NULL, read as false.
 	ChannelId         int    `json:"channel" gorm:"index"`
 	ChannelName       string `json:"channel_name" gorm:"->"`
 	TokenId           int    `json:"token_id" gorm:"default:0;index"`
@@ -307,6 +308,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 		TokenId:          tokenId,
 		UseTime:          useTimeSeconds,
 		IsStream:         isStream,
+		AutoRouted:       common.GetContextKeyBool(c, constant.ContextKeyAutoRouted),
 		Group:            group,
 		Ip: func() string {
 			if needRecordIp {
@@ -378,6 +380,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		UseTime:          params.UseTimeSeconds,
 		IsStream:         params.IsStream,
 		FastMode:         params.FastMode,
+		AutoRouted:       common.GetContextKeyBool(c, constant.ContextKeyAutoRouted),
 		Group:            params.Group,
 		Ip: func() string {
 			if needRecordIp {
@@ -548,6 +551,9 @@ type LogFilter struct {
 	StreamError       bool
 	Retry             bool
 	ISelfEmail        string
+	// AutoRouted keeps only requests that asked for the "auto" model (true) or
+	// only those that did not (false); nil keeps both.
+	AutoRouted *bool
 }
 
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
@@ -587,7 +593,21 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	}
 	tx = applyStreamErrorFilter(tx, "logs.other", f.StreamError)
 	tx = applyRetryFilter(tx, "logs.other", f.Retry)
+	tx = applyAutoRoutedFilter(tx, "logs.auto_routed", f.AutoRouted)
 	return tx, nil
+}
+
+// applyAutoRoutedFilter keeps the logs that did (true) or did not (false) ask for
+// the "auto" model. Rows written before the column existed hold NULL, so "did not"
+// has to include them; ClickHouse never holds NULL there and the extra test is harmless.
+func applyAutoRoutedFilter(tx *gorm.DB, column string, autoRouted *bool) *gorm.DB {
+	if autoRouted == nil {
+		return tx
+	}
+	if *autoRouted {
+		return tx.Where(column+" = ?", true)
+	}
+	return tx.Where("("+column+" IS NULL OR "+column+" = ?)", false)
 }
 
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
@@ -814,7 +834,7 @@ type Stat struct {
 	FastRatio float64 `json:"fast_ratio"`
 }
 
-func buildConsumeLogStatQuery(startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, streamError bool, retry bool) (*gorm.DB, error) {
+func buildConsumeLogStatQuery(startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, streamError bool, retry bool, autoRouted *bool) (*gorm.DB, error) {
 	tx := LOG_DB.Table("logs").Where("type = ?", LogTypeConsume)
 	var err error
 	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
@@ -840,15 +860,16 @@ func buildConsumeLogStatQuery(startTimestamp int64, endTimestamp int64, modelNam
 	}
 	tx = applyStreamErrorFilter(tx, "logs.other", streamError)
 	tx = applyRetryFilter(tx, "logs.other", retry)
+	tx = applyAutoRoutedFilter(tx, "logs.auto_routed", autoRouted)
 	return tx, nil
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, streamError bool, retry bool) (stat Stat, err error) {
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, streamError bool, retry bool, autoRouted *bool) (stat Stat, err error) {
 	newStatQuery := func() (*gorm.DB, error) {
 		// Build a fresh statement for every aggregate. GORM sessions can still
 		// share statement clauses after chained Select/Where calls, which causes
 		// one aggregate query to overwrite another.
-		return buildConsumeLogStatQuery(startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry)
+		return buildConsumeLogStatQuery(startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry, autoRouted)
 	}
 	tx, err := newStatQuery()
 	if err != nil {

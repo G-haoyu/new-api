@@ -32,7 +32,7 @@
 - **`*bool` 三态**：不写 = 不校验；`true` = 支持；`false` = 明确不支持，请求命中即违规。唯一例外是 `tools.builtin`：数组里没写就是不支持。
 - **收窄只能更严格**：渠道收窄只能出现在模型级已声明的维度上，并且不能放大——
   - 布尔只能收紧成 `false`（模型级没声明过的维度，渠道不能自行声明）；
-  - 枚举（`formats`/`sources`/`output`/`tool_choice`/`builtin`/`efforts`）必须是模型级的子集；
+  - 枚举（`formats`/`sources`/`output`/`tool_choice`/`builtin`/`efforts`）必须是模型级的子集；渠道里写 `[]` 对这些枚举等于没写、继承模型级（空数组表示"未枚举"，不是"一个都不允许"），**唯一例外是 `builtin`**：渠道写 `"builtin": []` 表示该渠道一个内置工具都不支持，不写才是继承。想整体禁用其它维度，用对应的 `supported: false`；
   - 区间必须收在模型级区间之内；
   - 计数值（`stop.max`/`n.max`/`max_count`/`max_size_mb`/`max_tools`）只能更小；
   - `messages.system_role` 必须与模型级完全相同。
@@ -77,7 +77,7 @@
 | `supported` | 布尔 | — | `false` 且请求带 tools → 违规（拦） |
 | `parallel` | 布尔 | — | `false` 且客户端请求并行调用 → 违规（记） |
 | `tool_choice` | 字符串数组 | `auto` / `none` / `required` / `named` | 非空时请求的 tool_choice 模式必须在列表内（拦） |
-| `builtin` | 字符串数组 | `web_search` / `code_execution` / `file_search` / `computer_use` | 请求用到未列出的内置工具 → 违规（拦）；**未声明即不支持** |
+| `builtin` | 字符串数组 | `web_search` / `code_execution` / `file_search` / `computer_use` | 请求用到未列出的内置工具 → 违规（拦）；**未声明即不支持**。渠道收窄里不写 = 继承模型级，`[]` = 该渠道没有任何内置工具 |
 | `max_tools` | 整数 | > 0 | 单次请求声明的工具数量上限（拦） |
 
 自定义函数（`type` 为空或 `function`）计入 `max_tools`，其它 `type` 视为供应商内置工具，按 `builtin` 校验。

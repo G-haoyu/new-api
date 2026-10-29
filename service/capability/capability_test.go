@@ -1,6 +1,7 @@
 package capability
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,6 +122,56 @@ func TestEvaluateRequiresDeclaredBuiltinTools(t *testing.T) {
 	assert.True(t, Satisfied([]Violation{}))
 }
 
+// tools.builtin 是唯一"没列出就是不支持"的枚举维度，所以渠道写 [] 要能把模型级的
+// 内置工具收窄到零；不写（或 null）才继承模型级。
+func TestMergeBuiltinToolsDistinguishesEmptyFromAbsent(t *testing.T) {
+	base := Spec{Tools: ToolSpec{Supported: ptrBool(true), Builtin: []string{"web_search", "code_execution"}}}
+	needsWebSearch := &Needs{BuiltinTools: []string{"web_search"}}
+
+	tests := []struct {
+		name            string
+		narrowing       string
+		wantBuiltin     []string
+		wantWebSearchOK bool
+	}{
+		{"字段不写则继承模型级", `{"tools":{"supported":true}}`, []string{"web_search", "code_execution"}, true},
+		{"显式 null 也继承模型级", `{"tools":{"builtin":null}}`, []string{"web_search", "code_execution"}, true},
+		{"空数组收窄到没有任何内置工具", `{"tools":{"builtin":[]}}`, []string{}, false},
+		{"更短的列表整体替换模型级", `{"tools":{"builtin":["code_execution"]}}`, []string{"code_execution"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			over, problems := Parse(tt.narrowing)
+			require.Empty(t, problems)
+			require.Empty(t, CheckSubset(base, over), "收窄必须是模型级的子集才允许保存")
+
+			effective := Merge(base, over)
+			assert.Equal(t, tt.wantBuiltin, effective.Tools.Builtin)
+			assert.Equal(t, tt.wantWebSearchOK, Satisfied(Evaluate(effective, needsWebSearch)))
+			assert.Equal(t, tt.wantWebSearchOK, slices.Contains(Summarize(effective).Capabilities, SummaryWebSearch))
+		})
+	}
+}
+
+// 控制器读取渠道收窄时会重新编码，空数组不能被 omitempty 吞掉，
+// 否则抽屉里看不到已保存的收窄，下次保存还会把它丢掉。
+func TestEncodeKeepsDeclaredEmptyBuiltinTools(t *testing.T) {
+	declared, problems := Parse(`{"tools":{"builtin":[]}}`)
+	require.Empty(t, problems)
+	encoded, err := Encode(declared)
+	require.NoError(t, err)
+	assert.Contains(t, encoded, `"builtin":[]`)
+
+	reparsed, problems := Parse(encoded)
+	require.Empty(t, problems)
+	require.NotNil(t, reparsed.Tools.Builtin)
+	assert.Empty(t, reparsed.Tools.Builtin)
+
+	undeclared, err := Encode(Spec{})
+	require.NoError(t, err)
+	assert.NotContains(t, undeclared, "builtin")
+}
+
 func TestExtractChatNeeds(t *testing.T) {
 	body := []byte(`{
 		"model":"m","stream":true,"max_tokens":512,"temperature":0.3,
@@ -151,7 +202,7 @@ func TestExtractChatNeeds(t *testing.T) {
 	assert.Equal(t, 0.1, *needs.FrequencyPenalty)
 	assert.Contains(t, needs.InputModalities, "image")
 	assert.Contains(t, needs.Mimes, "image/png")
-	assert.Greater(t, needs.EstimatedInputTokens, int64(0))
+	assert.Zero(t, needs.EstimatedInputTokens, "输入 token 估算取决于候选模型的家族，不在提取阶段算")
 }
 
 func TestSummarizeDoesNotInventBuiltinTools(t *testing.T) {

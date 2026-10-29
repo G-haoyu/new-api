@@ -641,7 +641,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		isFirstResponse: true,
 		RelayMode:       relayconstant.Path2RelayMode(c.Request.URL.Path),
 		RequestURLPath:  c.Request.URL.String(),
-		RequestHeaders:  cloneRequestHeaders(c),
+		RequestHeaders:  CloneRequestHeaders(c),
 		IsStream:        isStream,
 
 		StartTime:         startTime,
@@ -697,7 +697,8 @@ func requestUsesFastServiceTier(request dto.Request) bool {
 	return tier == "fast" || tier == "priority"
 }
 
-func cloneRequestHeaders(c *gin.Context) map[string]string {
+// CloneRequestHeaders 复制请求头供计费表达式的 header() 使用；选路阶段估价也复用它，保证两处口径一致。
+func CloneRequestHeaders(c *gin.Context) map[string]string {
 	if c == nil || c.Request == nil {
 		return nil
 	}

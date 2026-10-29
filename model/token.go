@@ -30,7 +30,8 @@ type Token struct {
 	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	AutoGroups         string         `json:"-" gorm:"type:text"`
-	RoutingPreference  string         `json:"-" gorm:"type:text"` // Scheduler 路由倾向(JSON)，仅通过专用接口读写
+	RoutingPreference  string         `json:"-" gorm:"type:text"`                      // Scheduler 路由倾向(JSON)，仅通过专用接口读写
+	AutoPreference     string         `json:"auto_preference" gorm:"type:varchar(16)"` // auto 选模型时能力与价格的偏好，空为平台默认；与 Scheduler 路由倾向无关
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
@@ -352,7 +353,7 @@ func (token *Token) Update() (err error) {
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
-		"allow_user_quota_query").Updates(token).Error
+		"allow_user_quota_query", "auto_preference").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

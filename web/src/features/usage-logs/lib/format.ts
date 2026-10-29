@@ -490,6 +490,8 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'user.oauth_unbind': 'Removed an OAuth binding for the user',
   // System settings
   'option.update': 'Updated system setting {{key}}',
+  'autorouter.rank_refresh': 'Started an auto router leaderboard refresh',
+  'autorouter.rank_restore': 'Restored the built-in auto router ranking',
   'option.passkey_domains':
     'Updated Passkey domains: removed {{domains}}; affected {{known}}; unknown {{unknown}}',
   'option.passkey_domains_confirmed':

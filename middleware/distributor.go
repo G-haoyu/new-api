@@ -16,8 +16,10 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -150,17 +152,83 @@ func Distribute() func(c *gin.Context) {
 							}
 						}
 					}
-					usable := map[string]bool{}
-					result, err := service.ResolveAutoModel(c, func(candidate string) bool {
-						if ok, seen := usable[candidate]; seen {
-							return ok
+					refusals := map[string]string{}
+					channels := map[string][]int{}
+					// 选路阶段估价：只读价格配置，不预扣、不写额度。
+					userSetting, _ := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
+					pricer := helper.NewRoutingPricer(c, func(candidate string) int64 {
+						return service.RoutingInputTokens(c, candidate)
+					}, userSetting.AcceptUnsetRatioModel)
+					quotes := map[string]helper.RoutingQuote{}
+					quoteOf := func(candidate string) helper.RoutingQuote {
+						if quote, seen := quotes[candidate]; seen {
+							return quote
 						}
-						ok := (!modelLimitEnable || TokenModelLimitAllows(tokenModelLimit, candidate)) &&
-							(enabled == nil || enabled[candidate] || enabled[ratio_setting.FormatMatchingModelName(candidate)]) &&
-							len(usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)) > 0 &&
-							(capabilityGate == nil || capabilityGate.Allows(candidate))
-						usable[candidate] = ok
-						return ok
+						// 令牌分组是 auto 时，计费分组是第一个对该模型有可用渠道的自动分组，倍率因模型而异；
+						// 固定分组下所有候选的倍率相同，在归一化里抵消。
+						userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+						billingGroup := usingGroup
+						if usingGroup == "auto" {
+							for _, group := range service.GetRequestAutoGroups(c, userGroup) {
+								if len(model.GetEnabledChannelIDsForGroupModel(group, candidate)) > 0 {
+									billingGroup = group
+									break
+								}
+							}
+						}
+						groupRatio, special := ratio_setting.GetGroupGroupRatio(userGroup, billingGroup)
+						if !special {
+							groupRatio = ratio_setting.GetGroupRatio(billingGroup)
+						}
+						quotes[candidate] = pricer.Quote(candidate, groupRatio)
+						return quotes[candidate]
+					}
+					channelsOf := func(candidate string) []int {
+						channelIDs, seen := channels[candidate]
+						if !seen {
+							channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
+							channels[candidate] = channelIDs
+						}
+						return channelIDs
+					}
+					// refusal 说明候选为什么不能服务这个请求，能服务时返回空串。候选按"模型+渠道"判定：
+					// 至少有一个可用渠道的生效能力满足请求，渠道级收窄在这里就生效，
+					// 不会选中一个渠道全被收窄淘汰的模型再 503。没有价格的模型计费时会直接失败，
+					// 所以任何路径都不选它们。判定顺序就是留痕里原因的优先级。
+					refusal := func(candidate string, ignoreClientReasoning bool) string {
+						key := candidate
+						if ignoreClientReasoning {
+							key += "|auto-reasoning"
+						}
+						if reason, seen := refusals[key]; seen {
+							return reason
+						}
+						reason := ""
+						switch {
+						case modelLimitEnable && !TokenModelLimitAllows(tokenModelLimit, candidate):
+							reason = autorouter.ReasonTokenLimit
+						case enabled != nil && !enabled[candidate] && !enabled[ratio_setting.FormatMatchingModelName(candidate)]:
+							reason = autorouter.ReasonGroupDisabled
+						case len(channelsOf(candidate)) == 0:
+							reason = autorouter.ReasonNoChannel
+						case quoteOf(candidate).Kind == helper.RoutingUnpriced:
+							reason = autorouter.ReasonUnpriced
+						case capabilityGate != nil && !capabilityGate.AllowsAnyChannel(candidate, channelsOf(candidate), ignoreClientReasoning):
+							reason = autorouter.ReasonCapability
+						}
+						refusals[key] = reason
+						return reason
+					}
+					result, err := service.ResolveAutoModel(c, service.AutoCandidates{
+						Serves: func(candidate string, ignoreClientReasoning bool) bool {
+							return refusal(candidate, ignoreClientReasoning) == ""
+						},
+						Why:      func(candidate string) string { return refusal(candidate, true) },
+						Channels: func(candidate string) []int { return channels[candidate] },
+						Price: func(candidate string) (float64, bool) {
+							quote := quoteOf(candidate)
+							return quote.PricePerMillion, quote.Kind == helper.RoutingPerToken
+						},
 					})
 					if capabilityGate != nil {
 						capabilityGate.LogSummary(c)
@@ -174,6 +242,17 @@ func Distribute() func(c *gin.Context) {
 						return
 					}
 					modelRequest.Model = result.ResolvedModel
+					// 透传渠道（全局或渠道级）不重建请求体而是原样转发存储的字节，
+					// 所以 auto 定下的结论要直接写进存储的请求体：model 改成解析后的模型
+					// （否则上游收到的仍是 "auto"，而计费和日志记的是解析后的模型），
+					// 推理档位写进入站协议自己的字段。非透传渠道也读这份请求体。
+					protocol, _ := service.AutoRouterProtocol(c.Request.URL.Path)
+					if err := rewriteJSONBody(c, func(body []byte) ([]byte, error) {
+						return autorouter.PatchBody(body, protocol, result.ResolvedModel, result.EffortAction, result.AppliedEffort)
+					}); err != nil {
+						abortWithOpenAiMessage(c, http.StatusInternalServerError, "failed to rewrite the auto routed request: "+err.Error())
+						return
+					}
 				}
 			}
 		}

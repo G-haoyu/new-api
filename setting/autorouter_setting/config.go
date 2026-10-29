@@ -2,6 +2,12 @@ package autorouter_setting
 
 import (
 	_ "embed"
+	"maps"
+	"math"
+	"os"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -20,18 +26,28 @@ var taskModelsJSON []byte
 var shippedRanking struct {
 	TaskModels    map[string][]string `json:"task_models"`
 	DefaultModels []string            `json:"default_models"`
+	RankSources   map[string]string   `json:"rank_sources"`
+	// TaskScores 是内嵌文件里 evidence 的榜单分，不是文件顶层字段，由 init 填入。
+	TaskScores map[string]map[string]float64 `json:"-"`
 }
 
 // AutoRouterSetting configures resolution of the "auto" model. Option keys are
-// autorouter_setting.<json name>; map and list values are stored as JSON. The
-// jev endpoint, key and model come from the JEV_ENDPOINT, JEV_API_KEY and
-// JEV_MODEL environment variables.
+// autorouter_setting.<json name>; map and list values are stored as JSON.
 type AutoRouterSetting struct {
 	Enabled          bool `json:"enabled"`
 	JevTimeoutMs     int  `json:"jev_timeout_ms"`
 	MaxRunes         int  `json:"max_runes"`
 	PreviousMaxRunes int  `json:"previous_max_runes"`
 	CacheTTLSeconds  int  `json:"cache_ttl_seconds"`
+	// The jev connection and the leaderboard keys. An empty value falls back to
+	// the environment variable of the same service (see Connections); the *_api_key
+	// options are write-only and never returned by the options API.
+	JevEndpoint           string `json:"jev_endpoint"`
+	JevModel              string `json:"jev_model"`
+	JevAPIKey             string `json:"jev_api_key"`
+	ArtificialAnalysisKey string `json:"artificial_analysis_api_key"`
+	DesignArenaKey        string `json:"design_arena_api_key"`
+	OpenRouterKey         string `json:"openrouter_api_key"`
 	// TaskModels maps a task type or task class to base model names in
 	// preference order. A model supports an effort when the effort-suffixed
 	// name (e.g. gpt-5-high) is usable; the bare name is its provider default
@@ -56,6 +72,59 @@ type AutoRouterSetting struct {
 	UpgradeBenefit         float64  `json:"upgrade_benefit"`
 	MinTaskTypeProbability float64  `json:"min_task_type_probability"`
 	ContinuationTaskChange float64  `json:"continuation_task_change"`
+	// TaskScores maps a task type or task class to the leaderboard score of
+	// each of its models, the quality side of the quality/price choice. It is
+	// generated together with TaskModels and overwritten by every ranking
+	// refresh; like TaskModels it is ignored while the stored lists predate the
+	// current task types.
+	TaskScores map[string]map[string]float64 `json:"task_scores"`
+	// DefaultPreference is the preference of a key that sets none: capability,
+	// balanced or cost.
+	DefaultPreference string `json:"default_preference"`
+	// CostWeights maps a preference to the most leaderboard score (0 to 1) a model
+	// may give up for being cheaper. The pick never falls below the best score by
+	// more than this; zero means the best-scored model always wins. A preference
+	// missing from the map uses its built-in weight.
+	CostWeights map[string]float64 `json:"cost_weights"`
+	// RouteLogMode decides which auto requests leave a routing log: off, decisions
+	// (a request that called the classifier, or found no model at all) or all.
+	// RouteLogRetentionDays is how long those logs are kept; a ClickHouse log
+	// database expires them through the table TTL instead.
+	RouteLogMode          string `json:"route_log_mode"`
+	RouteLogRetentionDays int    `json:"route_log_retention_days"`
+}
+
+// The values of RouteLogMode.
+const (
+	RouteLogOff       = "off"
+	RouteLogDecisions = "decisions"
+	RouteLogAll       = "all"
+)
+
+const (
+	DefaultRouteLogRetentionDays = 7
+	MaxRouteLogRetentionDays     = 365
+)
+
+// RouteLogModes lists the accepted values of RouteLogMode.
+var RouteLogModes = []string{RouteLogOff, RouteLogDecisions, RouteLogAll}
+
+// RouteLogRetention is how long routing logs are kept. A stored value outside
+// the accepted range (the options API refuses it, a direct database edit does
+// not) counts as the default, so the cleanup never deletes by a nonsense cutoff.
+func (s *AutoRouterSetting) RouteLogRetention() time.Duration {
+	days := s.RouteLogRetentionDays
+	if days < 1 || days > MaxRouteLogRetentionDays {
+		days = DefaultRouteLogRetentionDays
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// defaultCostWeights are the weights of preferences the option leaves out.
+var defaultCostWeights = map[string]float64{
+	autorouter.PreferenceCapability: 0,
+	autorouter.PreferenceBalanced:   0.07,
+	autorouter.PreferenceCost:       0.3,
 }
 
 var autoRouterSetting = AutoRouterSetting{
@@ -70,6 +139,10 @@ var autoRouterSetting = AutoRouterSetting{
 	UpgradeBenefit:           0.5,
 	MinTaskTypeProbability:   0.5,
 	ContinuationTaskChange:   0.5,
+	DefaultPreference:        autorouter.PreferenceBalanced,
+	CostWeights:              maps.Clone(defaultCostWeights),
+	RouteLogMode:             RouteLogDecisions,
+	RouteLogRetentionDays:    DefaultRouteLogRetentionDays,
 }
 
 func init() {
@@ -78,6 +151,29 @@ func init() {
 	}
 	if err := common.Unmarshal(taskModelsJSON, &shippedRanking); err != nil {
 		panic("autorouter_setting: task_models.json: " + err.Error())
+	}
+	// 内嵌文件里每个画像的 evidence 带着各模型的榜单分，就是 task_scores 的初始值。
+	// 选项里的和内嵌的各用一份，选项加载时不会改到内嵌的。
+	var seed struct {
+		Evidence map[string][]struct {
+			Model string  `json:"model"`
+			Score float64 `json:"score"`
+		} `json:"evidence"`
+	}
+	if err := common.Unmarshal(taskModelsJSON, &seed); err != nil {
+		panic("autorouter_setting: task_models.json evidence: " + err.Error())
+	}
+	autoRouterSetting.TaskScores = make(map[string]map[string]float64, len(seed.Evidence))
+	shippedRanking.TaskScores = make(map[string]map[string]float64, len(seed.Evidence))
+	for profile, entries := range seed.Evidence {
+		stored := make(map[string]float64, len(entries))
+		shipped := make(map[string]float64, len(entries))
+		for _, entry := range entries {
+			stored[entry.Model] = entry.Score
+			shipped[entry.Model] = entry.Score
+		}
+		autoRouterSetting.TaskScores[profile] = stored
+		shippedRanking.TaskScores[profile] = shipped
 	}
 	config.GlobalConfig.Register("autorouter_setting", &autoRouterSetting)
 }
@@ -92,24 +188,135 @@ func (s *AutoRouterSetting) RankingCurrent() bool {
 	return s.RankSources["taxonomy_version"] == autorouter.TaxonomyVersion
 }
 
-// Ranking returns the task and default lists to route by: the stored ones,
-// or the embedded ones while the stored lists predate the current task types.
-func (s *AutoRouterSetting) Ranking() (taskModels map[string][]string, defaultModels []string) {
-	if s.RankingCurrent() {
-		return s.TaskModels, s.DefaultModels
-	}
-	return shippedRanking.TaskModels, shippedRanking.DefaultModels
+// Ranking is the leaderboard the router routes by. Its lists and scores come
+// from one source: they are generated together, and scores of an older task
+// taxonomy must never be paired with lists of a newer one.
+type Ranking struct {
+	TaskModels    map[string][]string
+	DefaultModels []string
+	TaskScores    map[string]map[string]float64
+	Sources       map[string]string
 }
 
-func (s *AutoRouterSetting) Policy() autorouter.Policy {
-	taskModels, defaultModels := s.Ranking()
+// Ranking returns the stored ranking, or the embedded one while the stored
+// ranking predates the current task types.
+func (s *AutoRouterSetting) Ranking() Ranking {
+	if s.RankingCurrent() {
+		return Ranking{TaskModels: s.TaskModels, DefaultModels: s.DefaultModels, TaskScores: s.TaskScores, Sources: s.RankSources}
+	}
+	return Ranking{
+		TaskModels:    shippedRanking.TaskModels,
+		DefaultModels: shippedRanking.DefaultModels,
+		TaskScores:    shippedRanking.TaskScores,
+		Sources:       shippedRanking.RankSources,
+	}
+}
+
+// Policy builds the routing policy for one request. preference is the key's own;
+// one that is empty or unknown uses DefaultPreference, and that falling back to
+// balanced when it is unknown too.
+func (s *AutoRouterSetting) Policy(preference string) autorouter.Policy {
+	ranking := s.Ranking()
+	for _, candidate := range []string{preference, s.DefaultPreference, autorouter.PreferenceBalanced} {
+		if slices.Contains(autorouter.Preferences, candidate) {
+			preference = candidate
+			break
+		}
+	}
+	weight, set := s.CostWeights[preference]
+	if !set {
+		weight = defaultCostWeights[preference]
+	}
 	return autorouter.Policy{
-		TaskModels:             taskModels,
-		DefaultModels:          defaultModels,
+		TaskModels:             ranking.TaskModels,
+		DefaultModels:          ranking.DefaultModels,
 		DifficultyEfforts:      s.DifficultyEfforts,
 		DefaultEffort:          s.DefaultEffort,
 		UpgradeBenefit:         s.UpgradeBenefit,
 		MinTaskTypeProbability: s.MinTaskTypeProbability,
 		ContinuationTaskChange: s.ContinuationTaskChange,
+		TaskScores:             ranking.TaskScores,
+		Preference:             preference,
+		CostWeight:             scoreWeight(weight),
 	}
+}
+
+// scoreWeight 把榜单分尺度（0 到 1）上的权重限制在 [0, 1]。
+// strconv.ParseFloat 接受 "NaN"，而 NaN 会让质量/成本选择的比较全部为假，必须在这里挡住。
+func scoreWeight(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	return min(max(value, 0), 1)
+}
+
+// Where a connection value came from.
+const (
+	SourceOption = "option"
+	SourceEnv    = "env"
+)
+
+// Connection is one connection value; Source is empty when it is not set anywhere.
+type Connection struct {
+	Value  string
+	Source string
+}
+
+// Connections are the jev connection and the leaderboard keys the router uses.
+// A value stored in the options wins; an empty one falls back to the environment
+// variable that deployments used before these options existed.
+type Connections struct {
+	JevEndpoint           Connection
+	JevModel              Connection
+	JevAPIKey             Connection
+	ArtificialAnalysisKey Connection
+	DesignArenaKey        Connection
+	OpenRouterKey         Connection
+}
+
+func resolveConnection(option, envName string) Connection {
+	if value := strings.TrimSpace(option); value != "" {
+		return Connection{Value: value, Source: SourceOption}
+	}
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return Connection{Value: value, Source: SourceEnv}
+	}
+	return Connection{}
+}
+
+func (s *AutoRouterSetting) Connections() Connections {
+	return Connections{
+		JevEndpoint:           resolveConnection(s.JevEndpoint, "JEV_ENDPOINT"),
+		JevModel:              resolveConnection(s.JevModel, "JEV_MODEL"),
+		JevAPIKey:             resolveConnection(s.JevAPIKey, "JEV_API_KEY"),
+		ArtificialAnalysisKey: resolveConnection(s.ArtificialAnalysisKey, "ARTIFICIAL_ANALYSIS_API_KEY"),
+		DesignArenaKey:        resolveConnection(s.DesignArenaKey, "DESIGN_ARENA_API_KEY"),
+		OpenRouterKey:         resolveConnection(s.OpenRouterKey, "OPENROUTER_API_KEY"),
+	}
+}
+
+// RankKeysReady reports whether a leaderboard refresh can run: it needs the
+// Artificial Analysis key, and Design Arena either directly or through OpenRouter.
+func (c Connections) RankKeysReady() bool {
+	return c.ArtificialAnalysisKey.Value != "" && (c.DesignArenaKey.Value != "" || c.OpenRouterKey.Value != "")
+}
+
+// ShippedOptions returns the embedded ranking as stored option values, the state
+// a restore puts the router back in.
+func ShippedOptions() (map[string]string, error) {
+	values := map[string]any{
+		"autorouter_setting.task_models":    shippedRanking.TaskModels,
+		"autorouter_setting.task_scores":    shippedRanking.TaskScores,
+		"autorouter_setting.default_models": shippedRanking.DefaultModels,
+		"autorouter_setting.rank_sources":   shippedRanking.RankSources,
+	}
+	options := make(map[string]string, len(values))
+	for key, value := range values {
+		encoded, err := common.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		options[key] = string(encoded)
+	}
+	return options, nil
 }

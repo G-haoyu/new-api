@@ -53,6 +53,7 @@ func TestMain(m *testing.M) {
 		&ChannelModelStatus{},
 		&ChannelModelEvent{},
 		&CapabilityGateEvent{},
+		&AutoRouteLog{},
 		&TopUp{},
 		&SubscriptionPlan{},
 		&SubscriptionOrder{},

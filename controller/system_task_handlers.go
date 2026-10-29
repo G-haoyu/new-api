@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +30,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(channelModelRecoveryHandler{})
 	service.RegisterSystemTaskHandler(capabilityGateEventCleanupHandler{})
+	service.RegisterSystemTaskHandler(autoRouteLogCleanupHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
@@ -48,8 +48,7 @@ func (autoRouterRankHandler) Type() string { return model.SystemTaskTypeAutoRout
 
 func (autoRouterRankHandler) Enabled() bool {
 	setting := autorouter_setting.GetAutoRouterSetting()
-	return setting.Enabled && setting.RankRefreshEnabled && os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY") != "" &&
-		(os.Getenv("DESIGN_ARENA_API_KEY") != "" || os.Getenv("OPENROUTER_API_KEY") != "")
+	return setting.Enabled && setting.RankRefreshEnabled && setting.Connections().RankKeysReady()
 }
 
 // Interval is the refresh period, or a short retry delay while the stored
@@ -71,20 +70,29 @@ func (autoRouterRankHandler) NewPayload() any { return nil }
 // refresh only delays the next ranking. rank_sources is written last and
 // marks a complete update.
 func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	connections := autorouter_setting.GetAutoRouterSetting().Connections()
 	cfg := modelrank.DefaultConfig()
-	cfg.AAKey = os.Getenv("ARTIFICIAL_ANALYSIS_API_KEY")
-	cfg.DAKey = os.Getenv("DESIGN_ARENA_API_KEY")
-	cfg.OpenRouterKey = os.Getenv("OPENROUTER_API_KEY")
+	cfg.AAKey = connections.ArtificialAnalysisKey.Value
+	cfg.DAKey = connections.DesignArenaKey.Value
+	cfg.OpenRouterKey = connections.OpenRouterKey.Value
 	mapping, err := modelrank.Build(ctx, cfg)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
+	}
+	taskScores := make(map[string]map[string]float64, len(mapping.Evidence))
+	for taskType, entries := range mapping.Evidence {
+		taskScores[taskType] = make(map[string]float64, len(entries))
+		for _, entry := range entries {
+			taskScores[taskType][entry.Model] = entry.Score
+		}
 	}
 	options := []struct {
 		key   string
 		value any
 	}{
 		{"autorouter_setting.task_models", mapping.TaskModels},
+		{"autorouter_setting.task_scores", taskScores},
 		{"autorouter_setting.default_models", mapping.DefaultModels},
 		{"autorouter_setting.rank_sources", mapping.Sources},
 	}
@@ -164,6 +172,33 @@ func (capabilityGateEventCleanupHandler) NewPayload() any { return nil }
 func (capabilityGateEventCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
 	deleted, err := model.CleanupCapabilityGateEvents(ctx, time.Now().Add(-retention).Unix())
+	summary := map[string]any{"deleted": deleted}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// autoRouteLogCleanupHandler 清理超过保留期的选路日志。和门控事件的清理一样是独立任务，
+// 不依赖 auto 是否开启：关掉 auto 之后遗留的日志仍然要按保留期过期。
+// ClickHouse 日志库靠表 TTL 过期，HasAutoRouteLogsBefore 对它恒为 false。
+type autoRouteLogCleanupHandler struct{}
+
+func (autoRouteLogCleanupHandler) Type() string { return model.SystemTaskTypeAutoRouteLogClean }
+
+func (autoRouteLogCleanupHandler) Enabled() bool {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	return model.HasAutoRouteLogsBefore(time.Now().Add(-retention).Unix())
+}
+
+func (autoRouteLogCleanupHandler) Interval() time.Duration { return time.Hour }
+
+func (autoRouteLogCleanupHandler) NewPayload() any { return nil }
+
+func (autoRouteLogCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	deleted, err := model.CleanupAutoRouteLogs(ctx, time.Now().Add(-retention).Unix())
 	summary := map[string]any{"deleted": deleted}
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)

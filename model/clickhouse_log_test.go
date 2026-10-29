@@ -86,6 +86,7 @@ func TestClickHouseLogCreateTableSQL(t *testing.T) {
 	assert.Contains(t, withoutTTL, "PARTITION BY toYYYYMM(toDateTime(created_at))")
 	assert.Contains(t, withoutTTL, "ORDER BY (created_at, request_id)")
 	assert.Contains(t, withoutTTL, "fast_mode UInt8 DEFAULT 0")
+	assert.Contains(t, withoutTTL, "auto_routed UInt8 DEFAULT 0")
 	assert.NotContains(t, withoutTTL, "TTL ")
 
 	withTTL := clickHouseLogCreateTableSQL(30)
@@ -145,16 +146,29 @@ func TestEnsureLogRequestId(t *testing.T) {
 }
 
 // ClickHouse 绕过 AutoMigrate，建表语句靠手工维护；少一列会让整批 INSERT 失败。
-func TestClickHouseCapabilityGateEventCreateTableSQLCoversEveryColumn(t *testing.T) {
-	parsed, err := schema.Parse(&CapabilityGateEvent{}, &sync.Map{}, schema.NamingStrategy{})
-	require.NoError(t, err)
+func TestClickHouseTelemetryCreateTableSQLCoversEveryColumn(t *testing.T) {
+	tests := []struct {
+		name   string
+		table  string
+		entity any
+		ddl    func(ttlDays int) string
+	}{
+		{"capability gate events", "capability_gate_events", &CapabilityGateEvent{}, clickHouseCapabilityGateEventCreateTableSQL},
+		{"auto route logs", "auto_route_logs", &AutoRouteLog{}, clickHouseAutoRouteLogCreateTableSQL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := schema.Parse(tt.entity, &sync.Map{}, schema.NamingStrategy{})
+			require.NoError(t, err)
 
-	ddl := clickHouseCapabilityGateEventCreateTableSQL(30)
-	assert.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS capability_gate_events")
-	assert.Contains(t, ddl, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
-	assert.NotContains(t, clickHouseCapabilityGateEventCreateTableSQL(0), "TTL ")
-	for _, field := range parsed.Fields {
-		assert.Regexp(t, "(?m)^\\s*`?"+field.DBName+"`? ", ddl, "column %s is missing from the ClickHouse DDL", field.DBName)
+			ddl := tt.ddl(30)
+			assert.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS "+tt.table)
+			assert.Contains(t, ddl, "TTL toDateTime(created_at) + INTERVAL 30 DAY DELETE")
+			assert.NotContains(t, tt.ddl(0), "TTL ")
+			for _, field := range parsed.Fields {
+				assert.Regexp(t, "(?m)^\\s*`?"+field.DBName+"`? ", ddl, "column %s is missing from the ClickHouse DDL", field.DBName)
+			}
+		})
 	}
 }
 
