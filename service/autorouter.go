@@ -329,6 +329,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		return result, route.Err
 	}
 	c.Set(ginKeyAutoRouterResult, result)
+	common.SetContextKey(c, constant.ContextKeyAutoRouted, true)
 	if result.Decision != nil && result.Decision.TaskType != autorouter.TaskTypeUnknown &&
 		common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload) == "" {
 		common.SetContextKey(c, constant.ContextKeySchedulerWorkload, result.Decision.TaskType)

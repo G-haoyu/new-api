@@ -127,6 +127,7 @@ func TestResolveAutoModelCachesDecisionPerInstruction(t *testing.T) {
 	assert.Nil(t, second.Jev, "a cache hit must not carry jev output")
 	assert.Equal(t, int32(1), calls.Load())
 	assert.Equal(t, "code.build", common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload))
+	assert.True(t, common.GetContextKeyBool(c, constant.ContextKeyAutoRouted), "every resolved request is marked, a cache hit included")
 
 	_, err = ResolveAutoModel(newAutoRouterContext(9102, body), allModelsAvailable)
 	require.NoError(t, err)
@@ -258,9 +259,11 @@ func TestResolveAutoModelSkipsJevWhenNothingIsRoutable(t *testing.T) {
 	var calls atomic.Int32
 	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
 
-	_, err := ResolveAutoModel(newAutoRouterContext(9412, `{"messages":[{"role":"user","content":"hard"}]}`), candidatesFrom(func(string) bool { return false }))
+	c := newAutoRouterContext(9412, `{"messages":[{"role":"user","content":"hard"}]}`)
+	_, err := ResolveAutoModel(c, candidatesFrom(func(string) bool { return false }))
 	require.Error(t, err)
 	assert.Equal(t, int32(0), calls.Load(), "没有任何可用模型时不该花一次 jev 调用")
+	assert.False(t, common.GetContextKeyBool(c, constant.ContextKeyAutoRouted), "a request that resolved to no model is not marked")
 }
 
 // 候选的用户价格从 AutoCandidates.Price 进来，可信的判断在榜单分接近的模型里选更便宜的。

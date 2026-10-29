@@ -33,6 +33,9 @@ const (
 	// ContextKeyTokenAutoPreference holds the token's capability/price preference for the "auto" model.
 	// It has nothing to do with the Scheduler's routing preference above.
 	ContextKeyTokenAutoPreference ContextKey = "token_auto_preference"
+	// ContextKeyAutoRouted is true once the "auto" model has been resolved to a concrete model
+	// for this request, so the usage log can tell it apart from one that asked for that model.
+	ContextKeyAutoRouted ContextKey = "auto_routed"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

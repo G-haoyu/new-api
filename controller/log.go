@@ -60,6 +60,16 @@ func validateLogSpecialFilterTimeRange(c *gin.Context, streamError bool, retry b
 	return false
 }
 
+// autoRoutedFromQuery reads the optional auto_routed filter; a missing or unreadable
+// value keeps every log, since the filter only narrows a search.
+func autoRoutedFromQuery(c *gin.Context) *bool {
+	autoRouted, err := strconv.ParseBool(c.Query("auto_routed"))
+	if err != nil {
+		return nil
+	}
+	return &autoRouted
+}
+
 // logFilterFromQuery reads the log search shared by the log list and the log
 // export. Username and channel are read only for administrators.
 func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
@@ -75,6 +85,7 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 		Group:             c.Query("group"),
 		RequestId:         c.Query("request_id"),
 		UpstreamRequestId: c.Query("upstream_request_id"),
+		AutoRouted:        autoRoutedFromQuery(c),
 	}
 	if admin {
 		filter.Username = c.Query("username")
@@ -274,7 +285,7 @@ func GetLogsStat(c *gin.Context) {
 	if !ok || !validateLogSpecialFilterTimeRange(c, streamError, retry, startTimestamp, endTimestamp) {
 		return
 	}
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry)
+	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry, autoRoutedFromQuery(c))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -315,7 +326,7 @@ func GetLogsSelfStat(c *gin.Context) {
 	if !ok || !validateLogSpecialFilterTimeRange(c, streamError, retry, startTimestamp, endTimestamp) {
 		return
 	}
-	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry)
+	quotaNum, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, streamError, retry, autoRoutedFromQuery(c))
 	if err != nil {
 		common.ApiError(c, err)
 		return

@@ -517,6 +517,9 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS fast_mode UInt8 DEFAULT 0").Error; err != nil {
 		return err
 	}
+	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS auto_routed UInt8 DEFAULT 0").Error; err != nil {
+		return err
+	}
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS iself_email String DEFAULT ''").Error; err != nil {
 		return err
 	}
@@ -575,6 +578,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	use_time Int32 DEFAULT 0,
 	is_stream UInt8 DEFAULT 0,
 	fast_mode UInt8 DEFAULT 0,
+	auto_routed UInt8 DEFAULT 0,
 	channel_id Int32 DEFAULT 0,
 	token_id Int32 DEFAULT 0,
 	`+"`group`"+` String DEFAULT '',
