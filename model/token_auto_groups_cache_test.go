@@ -41,6 +41,26 @@ func TestTokenAllowUserQuotaQueryRoundTripsThroughRedisHashCache(t *testing.T) {
 	assert.Positive(t, server.TTL(getTokenCacheKey(token.Key)))
 }
 
+func TestTokenAutoPreferenceRoundTripsThroughRedisHashCache(t *testing.T) {
+	server := useUserCacheMiniRedis(t)
+	token := Token{Id: 44, UserId: 7, Key: "token-auto-preference-cache-key", Name: "auto-preference-cache", AutoPreference: "cost"}
+
+	initialized, err := cacheInitToken(token)
+	require.NoError(t, err)
+	require.Equal(t, 1, initialized)
+	cached, err := cacheGetTokenByKey(token.Key)
+	require.NoError(t, err)
+	assert.Equal(t, "cost", cached.AutoPreference)
+	assert.Positive(t, server.TTL(getTokenCacheKey(token.Key)), "新字段占了 ARGV 位置，过期时间的下标要跟着后移")
+
+	// 升级前写进缓存的令牌没有这个字段：读出来为空，走平台默认，不报错。
+	legacyKey := "token-auto-preference-legacy-key"
+	server.HSet(getTokenCacheKey(legacyKey), "Id", "45", "UserId", "7", "Name", "legacy")
+	legacy, err := cacheGetTokenByKey(legacyKey)
+	require.NoError(t, err)
+	assert.Empty(t, legacy.AutoPreference)
+}
+
 func TestTokenUpdateSynchronouslyNarrowsPreheatedAutoGroupsCache(t *testing.T) {
 	truncateTables(t)
 	useUserCacheMiniRedis(t)

@@ -372,6 +372,8 @@ func runTokenMigrationCompatibilityTest(t *testing.T, db *gorm.DB, dialect strin
 	}
 	require.True(t, db.Migrator().HasColumn(&model.Token{}, "allow_user_quota_query"))
 	assert.False(t, migratedToken.AllowUserQuotaQuery, "tokens created before the upgrade keep user quota queries off")
+	require.True(t, db.Migrator().HasColumn(&model.Token{}, "auto_preference"))
+	assert.Empty(t, migratedToken.AutoPreference, "tokens created before the upgrade follow the platform default preference")
 
 	inserted := model.Token{
 		UserId:             8,
@@ -636,6 +638,66 @@ func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
 				}
 				require.NoError(t, common.Unmarshal(response.Data, &returned))
 				assert.Equal(t, tc.want, returned.AllowUserQuotaQuery)
+			}
+		})
+	}
+}
+
+func TestTokenAutoPreferenceOnCreateAndUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		target   string
+		stored   *string // nil creates the token through the API
+		field    any     // nil omits auto_preference from the request
+		want     string
+		rejected bool
+	}{
+		{name: "create without the field leaves the platform default", target: "/api/token/"},
+		{name: "create with a preference", target: "/api/token/", field: "cost", want: "cost"},
+		{name: "create with an empty preference", target: "/api/token/", field: ""},
+		{name: "create with an unknown preference is rejected", target: "/api/token/", field: "turbo", rejected: true},
+		{name: "update without the field keeps the stored preference", target: "/api/token/", stored: common.GetPointer("cost"), want: "cost"},
+		{name: "update changes it", target: "/api/token/", stored: common.GetPointer("cost"), field: "capability", want: "capability"},
+		{name: "update with an empty value returns to the platform default", target: "/api/token/", stored: common.GetPointer("cost"), field: ""},
+		{name: "update with an unknown preference is rejected and keeps the stored one", target: "/api/token/", stored: common.GetPointer("cost"), field: "turbo", want: "cost", rejected: true},
+		{name: "status update leaves it alone", target: "/api/token/?status_only=true", stored: common.GetPointer("cost"), field: "capability", want: "cost"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			body := map[string]any{"name": "auto-preference", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled}
+			if tc.field != nil {
+				body["auto_preference"] = tc.field
+			}
+			var recorder *httptest.ResponseRecorder
+			if tc.stored == nil {
+				var ctx *gin.Context
+				ctx, recorder = newAuthenticatedContext(t, http.MethodPost, tc.target, body, 1)
+				AddToken(ctx)
+			} else {
+				token := seedToken(t, db, 1, "auto-preference", "auto-preference-key")
+				require.NoError(t, db.Model(token).Update("auto_preference", *tc.stored).Error)
+				body["id"] = token.Id
+				var ctx *gin.Context
+				ctx, recorder = newAuthenticatedContext(t, http.MethodPut, tc.target, body, 1)
+				UpdateToken(ctx)
+			}
+			response := decodeAPIResponse(t, recorder)
+			assert.Equal(t, !tc.rejected, response.Success, response.Message)
+
+			var saved []model.Token
+			require.NoError(t, db.Where("name = ?", "auto-preference").Find(&saved).Error)
+			if tc.rejected && tc.stored == nil {
+				assert.Empty(t, saved, "被拒绝的创建不留下令牌")
+				return
+			}
+			require.Len(t, saved, 1)
+			assert.Equal(t, tc.want, saved[0].AutoPreference)
+			if !tc.rejected {
+				var returned struct {
+					AutoPreference string `json:"auto_preference"`
+				}
+				require.NoError(t, common.Unmarshal(response.Data, &returned))
+				assert.Equal(t, tc.want, returned.AutoPreference)
 			}
 		})
 	}
