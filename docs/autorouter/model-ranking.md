@@ -159,7 +159,7 @@ jev 返回各二级类的概率。设概率最高的二级类为 `leaf`，其一
 
 思考强度、`larger_model_benefit` 提档、同任务延续（`task_change < continuation_task_change` 时沿用上一次的模型、思考强度不降）的规则不变。`ResolveVariant` 解析思考强度变体的规则不变，只补了一处：档位不在档位表里时也探测 `-medium` 后缀。“可用”的含义见第 7.3 节。
 
-路由日志与 trace 记录 `task_type`（jev 选中的二级类）、`route_profile`（实际使用的画像）和 `route_fallback`（`leaf` / `class` / `default`），用于复核分类和兜底的发生频率。消费日志的 `admin_info.auto_router` 带完整的决策过程，包括第 7.3 节的比较明细，成功和失败的请求都写，样例见第 7.4 节。
+路由日志与 trace 记录 `task_type`（jev 选中的二级类）、`route_profile`（实际使用的画像）和 `route_fallback`（`leaf` / `class` / `default`），用于复核分类和兜底的发生频率。消费日志的 `admin_info.auto_router` 带完整的决策过程，包括第 7.3 节的比较明细，成功和失败的请求都写，样例见第 7.4 节。一次请求是怎么一步步走到最后那个模型的，另存在选路日志里，见第 7.5 节。
 
 ### 7.3 质量与价格的比较
 
@@ -393,11 +393,42 @@ w 从 0.07 调到 0.075，下限降低，`mimo-v2.6-pro`（0.9288 分，0.54 美
 - `pick` 只在做过质量/价格比较时出现。`weight` 是这次用的 w，`band` 是候选带，`discount` 是价格折扣，`utility` 是折后分，`chosen` 是选中的。沿用上一轮模型和按列表顺序取第一个时没有 `pick`。线上日志里的数值是完整精度，不是示例里的四位小数。
 - `effort` 是难度给出的期望档位，`applied_effort` 是按模型的渠道声明收敛后真正写进请求体的档位，`effort_action` 是 `set`（写入）、`keep`（不碰客户端字段）或 `strip`（模型不支持推理，去掉客户端字段）。`effort_override` 为 true 表示这是可信的判断，覆盖了客户端的推理字段。`effort_in_body` 为 true 表示档位写进请求体、模型名保持裸名；为 false 时档位拼在模型名后缀上（如 `gpt-5-high`）。
 
+### 7.5 选路日志
+
+消费日志只记结果。要还原一次请求怎么走到最后那个模型，看选路日志（系统设置 → Auto 路由 → 选路日志，管理员可看）。每个 auto 请求最多一行，用请求 id 和使用日志对上；使用日志详情里的“Auto 路由”小节有“查看选路过程”按钮，没有详细日志时退回这里的消费日志摘要。
+
+一行记的是：
+
+- 请求长什么样：协议、人类轮数、指令和上一句的字数、有没有被截断。只记长度，不记内容。
+- 判断从哪来：现调了 jev、命中判断缓存、jev 刚失败过（60 秒内不重试）、jev 调用失败、会话继承、后台辅助请求、没有可分类的指令，或者根本没有模型能服务。
+- 判断可不可信，不可信的原因（jev 没答、答案没有难度、没有任何任务类型或大类的概率够高）。
+- 有上一轮路由时，是否延续，以及任务变化值对阈值。
+- 难度怎么变成档位：难度对应的档位、是否因大模型收益提了一档、是否被上一轮的档位抬高。
+- 各榜单依次试了什么，每一级的结果（质量/价格比较选出、按列表顺序取第一个、没有可用的、沿用上一轮），以及榜单里分数够高却没被选中的模型各自的原因：令牌的模型白名单不允许、分组里没启用、没有启用的渠道、没有配价格、渠道能力不满足请求、按次计费没法比价、被客户端自己的推理设置排除。每个榜单最多记 8 个，其余只计数。
+- 没有任何模型能服务时，按原因汇总所有榜单里的模型个数，并各列几个例子。
+
+这些只进选路日志，不进消费日志的 `admin_info.auto_router`，免得每条消费日志都变大。
+
+记哪些请求由 `autorouter_setting.route_log_mode` 决定，改了立即生效：
+
+| 值 | 记什么 |
+| --- | --- |
+| `off` | 不记 |
+| `decisions`（默认） | 真正做了决定的请求：这次现调了 jev（无论成败），或者找不到任何模型 |
+| `all` | 所有 auto 请求。命中判断缓存的后续请求、后台辅助请求、会话继承得到的结果都是在重复之前的决定，量大，只有这一档才记 |
+
+日志写在日志库里（`LOG_SQL_DSN` 为空时与主库同库），由异步 writer 批量写入，不在请求路径上：队列写满时丢弃并计数，不会拖慢选路；写入失败只记日志。队列容量、每批条数、最长等待毫秒数、清理时每块删除的行数用 `AUTO_ROUTE_LOG_BUFFER_SIZE`（默认 4096）、`AUTO_ROUTE_LOG_BATCH_SIZE`（200）、`AUTO_ROUTE_LOG_FLUSH_MS`（2000）、`AUTO_ROUTE_LOG_CLEANUP_CHUNK`（1000）调整，范围见 `.env.example`。每行的完整过程（`detail`）不超过 32KB，超出时依次去掉比较候选带、整个路由结果。
+
+保留期是 `autorouter_setting.route_log_retention_days`（默认 7，范围 1-365）。非 ClickHouse 日志库由系统任务 `auto_route_log_cleanup` 每小时分块删除过期行；ClickHouse 日志库靠建表 TTL（`LOG_SQL_CLICKHOUSE_TTL_DAYS`）过期，不走这个任务，也不受保留天数影响。
+
+读取接口：`GET /api/auto-route-logs/`（分页，按请求 id、用户、模型、结果、判断来源、任务类型和时间筛选，列表不带 `detail`）和 `GET /api/auto-route-logs/:request_id`（单条，带解码后的 `detail`；没有这条日志时 `data` 为 `null`，不是错误）。都需要管理员，访问令牌需要 `log:read`。
+
 ## 8. 在线刷新
 
 沿用系统任务 `autorouter_rank`：master 节点在数据库租约下按 `rank_refresh_interval_hours`（默认 24，最小 1）执行，依次写入 `task_models`、`task_scores`、`default_models`、`rank_sources`，其他节点经配置同步生效，不需要重启。任一来源失败或任一画像没有模型时不写配置，线上保留上一份榜单。
 
-- **启用条件**：`autorouter_setting.enabled` 与 `rank_refresh_enabled` 为 true，且进程环境变量有 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY` 之一。OpenRouter 模型列表是公开接口，不需要 key。
+- **启用条件**：`autorouter_setting.enabled` 与 `rank_refresh_enabled` 为 true，且有 Artificial Analysis 的 key，以及 Design Arena 或 OpenRouter 的 key 之一。key 优先取系统设置（Auto 路由 → 基础）里存的值，没存时回退到同名环境变量，见下表。OpenRouter 模型列表是公开接口，不需要 key。
+- **管理**：系统设置（Auto 路由 → 榜单）可以看当前生效的榜单、立即刷新、恢复内置榜单；jev 的地址、模型、密钥和三个榜单来源的 key 也在界面里配。`*_api_key` 类选项只写不读，选项接口不会返回它们的值，状态接口只说明每个值来自选项、环境变量还是没设。
 - **网络**：网关需能访问 `openrouter.ai`、`livebench.ai`、`hf-mirror.com`、`artificialanalysis.ai`、`www.designarena.ai`。不再逐模型查询端点延迟，一次刷新通常在一分钟内完成。
 - **数据新鲜度**：按 OpenRouter 目录的上架时间（`created`）取每个来源评过分的最新 10 个候选（`-stale-probe`），某项指标在这 10 个里都没有数据时视为停更，本轮不参与打分，记入 `rank_sources.stale_metrics` 和刷新记录。来源评过分的候选不足 10 个时不做判断；视觉指标只看支持图像输入的候选。
 - **分类版本**：`rank_sources` 记录 `taxonomy_version`。启动或配置同步时若已存的版本与代码中的分类不一致，运行时改用内置 `task_models.json`，并立即触发一次刷新，不等周期。`task_scores` 与 `task_models` 按同一个版本判定，一起退回内置的，避免旧分类下的分数配上新分类的列表。
@@ -412,6 +443,10 @@ w 从 0.07 调到 0.075，下限降低，`mimo-v2.6-pro`（0.9288 分，0.54 美
 | `autorouter_setting.default_preference` | `balanced` | 令牌没设 auto 偏好时用的偏好：`capability`、`balanced`、`cost`；不认识的值按 `balanced` |
 | `autorouter_setting.cost_weights` | `{"capability":0,"balanced":0.07,"cost":0.3}` | 第 7.3 节各偏好的 w：为了价格最多让出的榜单分；JSON 里没写的偏好用内置值，负数和 NaN 按 0，大于 1 按 1 |
 | `autorouter_setting.rank_sources` | 内置榜单 | 各来源快照日期、生成时间、`taxonomy_version` |
+| `autorouter_setting.jev_endpoint`、`jev_model`、`jev_api_key` | 空 | jev 的地址、模型和密钥；为空时分别回退到环境变量 `JEV_ENDPOINT`、`JEV_MODEL`、`JEV_API_KEY`。写入前服务端校验：地址必须是 http/https，密钥和模型不能含空白或换行 |
+| `autorouter_setting.artificial_analysis_api_key`、`design_arena_api_key`、`openrouter_api_key` | 空 | 三个榜单来源的 key；为空时回退到下面同名的环境变量 |
+| `autorouter_setting.route_log_mode` | `decisions` | 第 7.5 节：选路日志记哪些请求，`off`、`decisions`、`all` |
+| `autorouter_setting.route_log_retention_days` | `7` | 选路日志保留天数，1-365 |
 | 环境变量 `ARTIFICIAL_ANALYSIS_API_KEY` | 无 | Artificial Analysis 免费接口所需；未设置时不刷新 |
 | 环境变量 `DESIGN_ARENA_API_KEY` | 无 | Design Arena 接口所需（`sk_live_` 开头，经 designarena.ai/developers/apply 申请）；未设置时经 OpenRouter 读取 |
 | 环境变量 `OPENROUTER_API_KEY` | 无 | 未设置 `DESIGN_ARENA_API_KEY` 时读取 OpenRouter 转发的 Design Arena 数据 |
@@ -434,6 +469,12 @@ w 从 0.07 调到 0.075，下限降低，`mimo-v2.6-pro`（0.9288 分，0.54 美
 | `controller/system_task_handlers.go` | 刷新任务的启用条件改为检查 `ARTIFICIAL_ANALYSIS_API_KEY`，以及 `DESIGN_ARENA_API_KEY` 或 `OPENROUTER_API_KEY`；刷新时同时写 `task_scores` |
 | `middleware/distributor.go`、`relay/helper/price.go` | 候选按“模型 + 渠道”判定可用；`RoutingPricer` 按用户侧价格给候选报价，只读价格配置，不写 `PriceData`、不碰额度 |
 | `service/autorouter.go`、`service/log_info_generate.go` | 调用 jev 前先检查有没有可用模型；比较过程写进 `admin_info.auto_router` |
+| `pkg/autorouter/trace.go`、`policy.go`、`select.go` | 第 7.5 节：`SelectRoute` 多收一个可为 nil 的 `trace` 参数，记判断是否可信、是否延续、难度怎么变成档位、各榜单试了什么，以及比较里被跳过的模型和原因（只进 trace，`Pick` 里的这部分字段不导出，消费日志的摘要不变大）；`Policy.ExplainUnroutable` 按原因汇总 |
+| `model/auto_route_log.go`、`service/auto_route_log.go`、`service/event_writer.go` | 选路日志表、按 `route_log_mode` 决定记不记、异步批量写入（与能力门控事件共用泛型 writer）、详情超过 32KB 时精简、过期清理（`purgeBefore`，也供能力门控用） |
+| `controller/auto_route_log.go`、`controller/autorouter.go`、`controller/system_task_handlers.go`、`router/api-router.go` | 选路日志的列表和按请求 id 取单条；auto 管理接口（状态、有效榜单、立即刷新、恢复内置）；清理任务 `auto_route_log_cleanup`；访问令牌路由表登记上述接口 |
+| `setting/autorouter_setting/` | 另外：jev 连接和三个榜单来源 key 改走选项（为空回退环境变量）；`route_log_mode`、`route_log_retention_days`；所有 `autorouter_setting.*` 写入前由服务端校验，避免存进去却因为解析失败永远不生效 |
+| `web/src/features/system-settings/autorouter/` | 系统设置里的“Auto 路由”分类：基础、偏好与成本、判断与推理强度、榜单、选路日志五节；选路日志含记录设置、日志列表和选路过程抽屉（`route-log/`） |
+| `web/src/features/usage-logs/` | 使用日志里标出 auto 请求并能按它筛选（`auto_routed` 列，老数据的空值按“不是 auto”算）；详情里的“Auto 路由”小节和“查看选路过程” |
 
 ## 10. 已知限制
 
