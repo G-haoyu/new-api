@@ -133,6 +133,7 @@ var HoidcSsoApi = ""
 var HoidcPlatformId = ""
 var HoidcAllowSignup = false
 var HoidcEnforceSso = false
+var HoidcRedirectOrigin = ""
 var SsoSyncEnabled = false
 var SsoUserListApiUrl = ""
 var SsoUserListPlatformId = ""

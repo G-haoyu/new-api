@@ -16,8 +16,11 @@ ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
 ENV GOEXPERIMENT=greenteagc
 
 WORKDIR /build
-RUN go env -w GOPROXY=https://goproxy.cn,direct \
-    && go env -w GOSUMDB=sum.golang.google.cn
+# Defaults suit builds inside mainland China; overseas builders override them.
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+RUN go env -w GOPROXY=${GOPROXY} \
+    && go env -w GOSUMDB=${GOSUMDB}
 ADD go.mod go.sum ./
 # relaykit and tokenkit are local submodules referenced via replace; their
 # go.mod files must be present for go mod download to resolve the main module graph.

@@ -27,7 +27,13 @@ func SsoHoidcLogin(c *gin.Context) {
 		redirect = "/"
 	}
 
-	serverAddr := strings.TrimRight(system_setting.ServerAddress, "/")
+	serverAddr := ""
+	if common.HoidcRedirectOrigin != "" {
+		serverAddr = strings.TrimRight(common.HoidcRedirectOrigin, "/")
+	}
+	if serverAddr == "" {
+		serverAddr = strings.TrimRight(system_setting.ServerAddress, "/")
+	}
 	if serverAddr == "" {
 		scheme := "http"
 		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
@@ -91,6 +97,9 @@ func SsoHoidcCallback(c *gin.Context) {
 	}
 
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
+
+	c.Set("login_method", "sso_hoidc")
+	recordLoginAudit(user, c)
 
 	redirectUrl := redirect
 	if strings.Contains(redirectUrl, "?") {

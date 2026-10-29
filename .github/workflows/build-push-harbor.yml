@@ -1,0 +1,108 @@
+name: Build & push image (Harbor)
+
+# Releases are cut on demand: merging to prod builds nothing; pushing a
+# release-* tag on a prod commit builds and pushes that version.
+# Every push to dev builds dev-<sha12> and dev-latest for the test environment.
+# Runs on the self-hosted Tokyo runner. Never add pull_request triggers here:
+# the repository is public and fork PRs must not execute on this machine.
+on:
+  push:
+    branches:
+      - dev
+    tags:
+      - 'release-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer dev push supersedes the build in progress; release builds always finish.
+concurrency:
+  group: build-push-harbor-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+env:
+  HARBOR_HOST: registry.intsig.net
+  IMAGE_REPO: registry.intsig.net/noc_maas/new-api
+  HARBOR_USERNAME: robot$noc_maas_robot
+
+jobs:
+  build-push:
+    name: Build & push (linux/amd64)
+    runs-on: [self-hosted, overseas]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      # Release tags must point at a commit on prod and become the image tag
+      # as-is. Branch pushes and manual runs build <branch>-<sha12>.
+      - name: Resolve tag & write VERSION
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^release-[A-Za-z0-9_.-]{1,100}$'; then
+              echo "::error::Tag '$REF_NAME' is not a valid image tag"
+              exit 1
+            fi
+            git fetch --no-tags origin prod
+            if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+              echo "::error::Tag '$REF_NAME' does not point at a commit on prod"
+              exit 1
+            fi
+            TAG="$REF_NAME"
+            LATEST_TAG="prod-latest"
+          else
+            BRANCH_TAG=$(printf '%s' "$REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g')
+            TAG="${BRANCH_TAG}-$(git rev-parse --short=12 HEAD)"
+            LATEST_TAG="${BRANCH_TAG}-latest"
+          fi
+          echo "$TAG" > VERSION
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Harbor
+        env:
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: printf '%s' "$HARBOR_PASSWORD" | docker login "$HARBOR_HOST" --username "$HARBOR_USERNAME" --password-stdin
+
+      # Plain docker build (default driver) so the build and push use the
+      # host's /etc/hosts entry for Harbor and keep the local layer cache.
+      - name: Build
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
+        run: |
+          docker build --progress=plain \
+            --build-arg GOPROXY=https://proxy.golang.org,direct \
+            --build-arg GOSUMDB=sum.golang.org \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --tag "$IMAGE_REPO:$TAG" \
+            --tag "$IMAGE_REPO:$LATEST_TAG" \
+            .
+
+      - name: Push
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          LATEST_TAG: ${{ steps.version.outputs.latest_tag }}
+        run: |
+          docker push "$IMAGE_REPO:$TAG"
+          docker push "$IMAGE_REPO:$LATEST_TAG"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE_REPO:$TAG")
+          {
+            echo "### Image"
+            echo '```'
+            echo "$IMAGE_REPO:$TAG"
+            echo "$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of Harbor
+        if: always()
+        run: docker logout "$HARBOR_HOST"

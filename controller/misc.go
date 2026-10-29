@@ -92,6 +92,7 @@ func GetStatus(c *gin.Context) {
 		"password_register_enabled":     common.PasswordRegisterEnabled,
 		"hoidc_enabled":                 common.HoidcEnabled,
 		"hoidc_enforce_sso":             common.HoidcEnforceSso,
+		"hoidc_redirect_origin":         common.HoidcRedirectOrigin,
 		"default_use_auto_group":        setting.DefaultUseAutoGroup,
 
 		"password_login_encryption_enabled": common.PasswordLoginEncryptionEnabled,
