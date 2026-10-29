@@ -159,6 +159,8 @@ func main() {
 	// Capability gate events are written off the request path in batches; every
 	// node serves requests, so every node runs a writer.
 	service.StartCapabilityGateEventWriter()
+	// Routing logs of auto requests go through the same kind of batched writer.
+	service.StartAutoRouteLogWriter()
 
 	// Wire task polling adaptor factory (breaks service -> relay import cycle).
 	// Must run before the system task runner starts: the async_task_poll handler
@@ -262,6 +264,7 @@ func main() {
 	}
 	// 在数据库关闭之前把队列里剩余的门控事件写完。
 	service.StopCapabilityGateEventWriter()
+	service.StopAutoRouteLogWriter()
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()

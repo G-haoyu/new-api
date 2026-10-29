@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -180,6 +181,30 @@ func TestShippedOptionsPassValidationAndRestoreTheCurrentRanking(t *testing.T) {
 	assert.Equal(t, shippedRanking.DefaultModels, s.DefaultModels)
 }
 
+// 选路日志默认只记做了决定的请求，保留 7 天；两个选项按键加载，保留期超出范围时清理任务按默认值算，
+// 不会拿一个荒谬的截止时间去删数据。
+func TestRouteLogOptionsLoadByKeyAndRetentionFallsBackToTheDefault(t *testing.T) {
+	setting := GetAutoRouterSetting()
+	saved := *setting
+	t.Cleanup(func() { *setting = saved })
+	assert.Equal(t, RouteLogDecisions, setting.RouteLogMode)
+	assert.Equal(t, 7*24*time.Hour, setting.RouteLogRetention())
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"autorouter_setting.route_log_mode":           "all",
+		"autorouter_setting.route_log_retention_days": "30",
+	}))
+	assert.Equal(t, RouteLogAll, setting.RouteLogMode)
+	assert.Equal(t, 30*24*time.Hour, setting.RouteLogRetention())
+
+	for _, days := range []int{0, -3, MaxRouteLogRetentionDays + 1} {
+		setting.RouteLogRetentionDays = days
+		assert.Equal(t, 7*24*time.Hour, setting.RouteLogRetention(), "stored %d days", days)
+	}
+	setting.RouteLogRetentionDays = MaxRouteLogRetentionDays
+	assert.Equal(t, time.Duration(MaxRouteLogRetentionDays)*24*time.Hour, setting.RouteLogRetention())
+}
+
 // 加载时解析失败的值会被跳过，所以写入前就要拦住，否则存进去却永远不生效。
 func TestValidateOption(t *testing.T) {
 	tests := []struct {
@@ -223,6 +248,16 @@ func TestValidateOption(t *testing.T) {
 		{"autorouter_setting.default_models", `["a"]`, true},
 		{"autorouter_setting.rank_sources", `{"taxonomy_version":"3"}`, true},
 		{"autorouter_setting.rank_sources", `{"taxonomy_version":3}`, false},
+		{"autorouter_setting.route_log_mode", "off", true},
+		{"autorouter_setting.route_log_mode", "decisions", true},
+		{"autorouter_setting.route_log_mode", "all", true},
+		{"autorouter_setting.route_log_mode", "everything", false},
+		{"autorouter_setting.route_log_mode", "", false},
+		{"autorouter_setting.route_log_retention_days", "7", true},
+		{"autorouter_setting.route_log_retention_days", "365", true},
+		{"autorouter_setting.route_log_retention_days", "366", false},
+		{"autorouter_setting.route_log_retention_days", "0", false},
+		{"autorouter_setting.route_log_retention_days", "1.5", false},
 		{"autorouter_setting.jev_endpoint", "", true},
 		{"autorouter_setting.jev_endpoint", "https://jev.example/v1/decisions", true},
 		{"autorouter_setting.jev_endpoint", "ftp://jev.example", false},

@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/service/capability"
@@ -690,6 +693,218 @@ func TestResolveAutoModelTrace(t *testing.T) {
 			assert.NotContains(t, string(summary), leaked)
 		}
 	})
+}
+
+// captureAutoRouteLogs 把进程级选路日志 writer 换成录制用的（批大小 1，每条单独交付）。
+// 返回的函数停掉 writer，按写入顺序给出收到的全部日志，只能调用一次。
+func captureAutoRouteLogs(t *testing.T) func() []model.AutoRouteLog {
+	t.Helper()
+	batches := make(chan []model.AutoRouteLog, 64)
+	writer := newEventWriter("auto route log", 64, 1, time.Hour, func(batch []*model.AutoRouteLog) error {
+		delivered := make([]model.AutoRouteLog, 0, len(batch))
+		for _, entry := range batch {
+			delivered = append(delivered, *entry)
+		}
+		batches <- delivered
+		return nil
+	})
+	autoRouteLogs.Store(writer)
+	t.Cleanup(func() { autoRouteLogs.Store(nil) })
+	return func() []model.AutoRouteLog {
+		autoRouteLogs.Store(nil)
+		writer.shutdown(time.Second)
+		close(batches)
+		var logs []model.AutoRouteLog
+		for batch := range batches {
+			logs = append(logs, batch...)
+		}
+		return logs
+	}
+}
+
+// 选路日志按 route_log_mode 决定记哪些请求：decisions 只记做了决定的（现调 jev，或者找不到任何模型），
+// 命中判断缓存、辅助请求这类重复的只有 all 才记。
+func TestResolveAutoModelRouteLogModes(t *testing.T) {
+	tests := []struct {
+		mode string
+		want []string // 每条日志的 outcome/judgment
+	}{
+		{autorouter_setting.RouteLogOff, nil},
+		{autorouter_setting.RouteLogDecisions, []string{"routed/live", "failed/unroutable"}},
+		{autorouter_setting.RouteLogAll, []string{"routed/live", "routed/cache", "routed/auxiliary", "failed/unroutable"}},
+		{"not-a-mode", nil},
+	}
+	for index, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			var calls atomic.Int32
+			useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+			autorouter_setting.GetAutoRouterSetting().RouteLogMode = tt.mode
+			collect := captureAutoRouteLogs(t)
+			tokenID := 9950 + index
+			hard := `{"messages":[{"role":"user","content":"hard"}]}`
+
+			for _, body := range []string{hard, hard, `{"messages":[{"role":"user","content":"[SUGGESTION MODE: next prompt]"}]}`} {
+				_, err := ResolveAutoModel(newAutoRouterContext(tokenID, body), allModelsAvailable)
+				require.NoError(t, err)
+			}
+			_, err := ResolveAutoModel(newAutoRouterContext(tokenID, hard), candidatesFrom(func(string) bool { return false }))
+			require.Error(t, err)
+
+			var got []string
+			for _, entry := range collect() {
+				got = append(got, entry.Outcome+"/"+entry.Judgment)
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("a failed jev call is a decision, the failure marker after it is not", func(t *testing.T) {
+		failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		t.Cleanup(failing.Close)
+		useAutoRouterSetting(t, failing.URL, 1000)
+		autorouter_setting.GetAutoRouterSetting().RouteLogMode = autorouter_setting.RouteLogDecisions
+		collect := captureAutoRouteLogs(t)
+
+		for range 2 {
+			_, err := ResolveAutoModel(newAutoRouterContext(9959, `{"messages":[{"role":"user","content":"hard"}]}`), allModelsAvailable)
+			require.NoError(t, err)
+		}
+
+		var got []string
+		for _, entry := range collect() {
+			got = append(got, entry.Outcome+"/"+entry.Judgment)
+		}
+		assert.Equal(t, []string{"routed/live_failed"}, got)
+	})
+}
+
+func TestAutoRouteLogRowCarriesTheRequestAndTheOutcome(t *testing.T) {
+	var calls atomic.Int32
+	useAutoRouterSetting(t, fakeJev(t, &calls, 0).URL, 1000)
+	collect := captureAutoRouteLogs(t)
+	newContext := func(tokenID int, requestID, body string) *gin.Context {
+		c := newAutoRouterContext(tokenID, body)
+		c.Set(common.RequestIdKey, requestID)
+		common.SetContextKey(c, constant.ContextKeyUserId, 42)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "vip")
+		return c
+	}
+	_, err := ResolveAutoModel(newContext(9960, "req-routed", `{"messages":[{"role":"user","content":"hard"}]}`), allModelsAvailable)
+	require.NoError(t, err)
+	_, err = ResolveAutoModel(newContext(9960, "req-failed", `{"messages":[{"role":"user","content":"hard"}]}`), candidatesFrom(func(string) bool { return false }))
+	require.Error(t, err)
+
+	logs := collect()
+	require.Len(t, logs, 2)
+	routed, failed := logs[0], logs[1]
+	assert.Equal(t, model.AutoRouteLog{
+		CreatedAt: routed.CreatedAt, RequestId: "req-routed", UserId: 42, TokenId: 9960, UsingGroup: "vip",
+		Outcome: model.AutoRouteOutcomeRouted, Judgment: autorouter.JudgmentLive, Source: autorouter.SourceJev,
+		TaskType: "code.build", Model: "coder", Effort: "xhigh", Preference: autorouter.PreferenceBalanced,
+		JevLatencyMs: routed.JevLatencyMs, Detail: routed.Detail,
+	}, routed)
+	assert.NotZero(t, routed.CreatedAt)
+
+	var detail map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(routed.Detail, &detail))
+	assert.Equal(t, "coder-xhigh", detail["result"].(map[string]any)["resolved_model"])
+	assert.Equal(t, autorouter.JudgmentLive, detail["trace"].(map[string]any)["judgment"])
+	assert.NotContains(t, detail, "error")
+
+	assert.Equal(t, model.AutoRouteOutcomeFailed, failed.Outcome)
+	assert.Equal(t, "req-failed", failed.RequestId)
+	assert.Equal(t, autorouter.JudgmentUnroutable, failed.Judgment)
+	assert.Empty(t, failed.Model, "没选出模型就没有模型和档位")
+	assert.Empty(t, failed.Effort)
+	assert.Contains(t, failed.Detail, "no available model")
+}
+
+func TestNewAutoRouteLogDerivesEffortLatencyAndColumnWidths(t *testing.T) {
+	route := func(model, resolved string) autorouter.Result {
+		return autorouter.Result{Route: autorouter.Route{Model: model}, ResolvedModel: resolved, Trace: &autorouter.Trace{}}
+	}
+	inBody := route("reasoner", "reasoner")
+	inBody.EffortInBody, inBody.AppliedEffort = true, "high"
+	clientOwn := route("reasoner", "reasoner")
+	clientOwn.EffortInBody = true
+	tests := []struct {
+		name   string
+		result autorouter.Result
+		want   string
+	}{
+		{"effort written into the body", inBody, "high"},
+		{"the client's own effort is kept", clientOwn, ""},
+		{"effort in the model name", route("coder", "coder-high"), "high"},
+		{"bare model runs at the provider's default", route("coder", "coder"), ""},
+	}
+	c := newAutoRouterContext(9961, "{}")
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, newAutoRouteLog(c, &tt.result, nil).Effort, tt.name)
+	}
+
+	calledJev := route("coder", "coder")
+	calledJev.Jev = &autorouter.JevCall{LatencyMs: 37}
+	assert.Equal(t, int64(37), newAutoRouteLog(c, &calledJev, nil).JevLatencyMs)
+	assert.Zero(t, newAutoRouteLog(c, &inBody, nil).JevLatencyMs, "没调 jev 的请求没有延迟")
+
+	long := route(strings.Repeat("长", 300), "x")
+	long.Decision = &autorouter.Decision{TaskType: strings.Repeat("t", 100)}
+	entry := newAutoRouteLog(c, &long, nil)
+	assert.Len(t, []rune(entry.Model), 255, "超出列宽的值要截断，否则整批 INSERT 会失败")
+	assert.Len(t, entry.TaskType, 64)
+}
+
+// 详情超过上限时依次去掉最占地方的部分：比较候选带、整个路由结果，最后只剩一个空对象。
+func TestEncodeAutoRouteDetailShrinksToFit(t *testing.T) {
+	band := make([]autorouter.Candidate, 2000)
+	probabilities := make(map[string]float64, 4000)
+	ladder := make([]autorouter.LadderStep, 1500)
+	for i := range band {
+		band[i] = autorouter.Candidate{Model: "model-" + strconv.Itoa(i), Score: 0.9, Price: 1}
+	}
+	for i := range 4000 {
+		probabilities["task-"+strconv.Itoa(i)] = 0.5
+	}
+	for i := range ladder {
+		ladder[i] = autorouter.LadderStep{Profile: "general", Outcome: autorouter.OutcomeNone}
+	}
+	build := func(pick *autorouter.Pick, decision *autorouter.Decision, steps []autorouter.LadderStep) *autorouter.Result {
+		return &autorouter.Result{
+			Route: autorouter.Route{Model: "coder"}, Pick: pick, Decision: decision,
+			Trace: &autorouter.Trace{Judgment: autorouter.JudgmentLive, Ladder: steps},
+		}
+	}
+	tests := []struct {
+		name       string
+		result     *autorouter.Result
+		wantResult bool
+		wantPick   bool
+		wantTrace  bool
+	}{
+		{"fits as is", build(&autorouter.Pick{Chosen: "coder", Band: band[:3]}, nil, nil), true, true, true},
+		{"the comparison band goes first", build(&autorouter.Pick{Chosen: "coder", Band: band}, nil, nil), true, false, true},
+		{"then the route result", build(nil, &autorouter.Decision{TaskTypeProbabilities: probabilities}, nil), false, false, true},
+		{"nothing fits", build(nil, nil, ladder), false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded := encodeAutoRouteDetail(tt.result, errors.New("no model"))
+
+			assert.LessOrEqual(t, len(encoded), model.AutoRouteLogDetailMax)
+			var detail map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(encoded, &detail))
+			assert.Equal(t, tt.wantResult, detail["result"] != nil, "result")
+			assert.Equal(t, tt.wantTrace, detail["trace"] != nil, "trace")
+			if tt.wantResult {
+				assert.Equal(t, tt.wantPick, detail["result"].(map[string]any)["pick"] != nil, "pick")
+			}
+			if tt.wantTrace {
+				assert.Equal(t, "no model", detail["error"])
+			}
+		})
+	}
 }
 
 func TestAutoRouterListedOnlyWhenResolvable(t *testing.T) {

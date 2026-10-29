@@ -30,6 +30,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(channelModelRecoveryHandler{})
 	service.RegisterSystemTaskHandler(capabilityGateEventCleanupHandler{})
+	service.RegisterSystemTaskHandler(autoRouteLogCleanupHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
@@ -171,6 +172,33 @@ func (capabilityGateEventCleanupHandler) NewPayload() any { return nil }
 func (capabilityGateEventCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
 	deleted, err := model.CleanupCapabilityGateEvents(ctx, time.Now().Add(-retention).Unix())
+	summary := map[string]any{"deleted": deleted}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// autoRouteLogCleanupHandler 清理超过保留期的选路日志。和门控事件的清理一样是独立任务，
+// 不依赖 auto 是否开启：关掉 auto 之后遗留的日志仍然要按保留期过期。
+// ClickHouse 日志库靠表 TTL 过期，HasAutoRouteLogsBefore 对它恒为 false。
+type autoRouteLogCleanupHandler struct{}
+
+func (autoRouteLogCleanupHandler) Type() string { return model.SystemTaskTypeAutoRouteLogClean }
+
+func (autoRouteLogCleanupHandler) Enabled() bool {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	return model.HasAutoRouteLogsBefore(time.Now().Add(-retention).Unix())
+}
+
+func (autoRouteLogCleanupHandler) Interval() time.Duration { return time.Hour }
+
+func (autoRouteLogCleanupHandler) NewPayload() any { return nil }
+
+func (autoRouteLogCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	deleted, err := model.CleanupAutoRouteLogs(ctx, time.Now().Add(-retention).Unix())
 	summary := map[string]any{"deleted": deleted}
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)

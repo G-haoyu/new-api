@@ -63,6 +63,12 @@ func ValidateOption(key, value string) error {
 		if !slices.Contains(autorouter.Preferences, value) {
 			return common.NewMessage("Unknown preference {{preference}}", map[string]any{"preference": value})
 		}
+	case "route_log_mode":
+		if !slices.Contains(RouteLogModes, value) {
+			return common.NewMessage("Unknown routing log mode {{mode}}", map[string]any{"mode": value})
+		}
+	case "route_log_retention_days":
+		return integerInRange(value, 1, MaxRouteLogRetentionDays)
 	case "cost_weights":
 		var weights map[string]float64
 		if !decodeJSON(value, &weights) {

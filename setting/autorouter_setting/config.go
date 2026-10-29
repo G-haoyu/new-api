@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -85,6 +86,38 @@ type AutoRouterSetting struct {
 	// more than this; zero means the best-scored model always wins. A preference
 	// missing from the map uses its built-in weight.
 	CostWeights map[string]float64 `json:"cost_weights"`
+	// RouteLogMode decides which auto requests leave a routing log: off, decisions
+	// (a request that called the classifier, or found no model at all) or all.
+	// RouteLogRetentionDays is how long those logs are kept; a ClickHouse log
+	// database expires them through the table TTL instead.
+	RouteLogMode          string `json:"route_log_mode"`
+	RouteLogRetentionDays int    `json:"route_log_retention_days"`
+}
+
+// The values of RouteLogMode.
+const (
+	RouteLogOff       = "off"
+	RouteLogDecisions = "decisions"
+	RouteLogAll       = "all"
+)
+
+const (
+	DefaultRouteLogRetentionDays = 7
+	MaxRouteLogRetentionDays     = 365
+)
+
+// RouteLogModes lists the accepted values of RouteLogMode.
+var RouteLogModes = []string{RouteLogOff, RouteLogDecisions, RouteLogAll}
+
+// RouteLogRetention is how long routing logs are kept. A stored value outside
+// the accepted range (the options API refuses it, a direct database edit does
+// not) counts as the default, so the cleanup never deletes by a nonsense cutoff.
+func (s *AutoRouterSetting) RouteLogRetention() time.Duration {
+	days := s.RouteLogRetentionDays
+	if days < 1 || days > MaxRouteLogRetentionDays {
+		days = DefaultRouteLogRetentionDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // defaultCostWeights are the weights of preferences the option leaves out.
@@ -108,6 +141,8 @@ var autoRouterSetting = AutoRouterSetting{
 	ContinuationTaskChange:   0.5,
 	DefaultPreference:        autorouter.PreferenceBalanced,
 	CostWeights:              maps.Clone(defaultCostWeights),
+	RouteLogMode:             RouteLogDecisions,
+	RouteLogRetentionDays:    DefaultRouteLogRetentionDays,
 }
 
 func init() {

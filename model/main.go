@@ -361,6 +361,7 @@ func migrateDB() error {
 		&ChannelModelCapability{},
 		&ChannelModelEvent{},
 		&CapabilityGateEvent{},
+		&AutoRouteLog{},
 		&Log{},
 		&Midjourney{},
 		&TopUp{},
@@ -434,6 +435,7 @@ func migrateDBFast() error {
 		{&ChannelModelCapability{}, "ChannelModelCapability"},
 		{&ChannelModelEvent{}, "ChannelModelEvent"},
 		{&CapabilityGateEvent{}, "CapabilityGateEvent"},
+		{&AutoRouteLog{}, "AutoRouteLog"},
 		{&Log{}, "Log"},
 		{&Midjourney{}, "Midjourney"},
 		{&TopUp{}, "TopUp"},
@@ -506,7 +508,7 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{}, &CapabilityGateEvent{})
+	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{}, &CapabilityGateEvent{}, &AutoRouteLog{})
 }
 
 func migrateClickHouseLogDB() error {
@@ -535,7 +537,13 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseCapabilityGateEventCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseTableTTL("capability_gate_events", ttlDays)
+	if err := syncClickHouseTableTTL("capability_gate_events", ttlDays); err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseAutoRouteLogCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	return syncClickHouseTableTTL("auto_route_logs", ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -681,6 +689,34 @@ CREATE TABLE IF NOT EXISTS capability_gate_events (
 	user_id Int32 DEFAULT 0,
 	token_id Int32 DEFAULT 0,
 	using_group String DEFAULT ''
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+// clickHouseAutoRouteLogCreateTableSQL mirrors the AutoRouteLog struct; keep the
+// two in sync by hand because AutoMigrate is bypassed for ClickHouse. Rows expire
+// through the table TTL (LOG_SQL_CLICKHOUSE_TTL_DAYS), not through the retention
+// option that the cleanup task applies to other databases.
+func clickHouseAutoRouteLogCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS auto_route_logs (
+	id Int64 DEFAULT 0,
+	created_at Int64 DEFAULT 0,
+	request_id String DEFAULT '',
+	user_id Int32 DEFAULT 0,
+	token_id Int32 DEFAULT 0,
+	using_group String DEFAULT '',
+	outcome String DEFAULT '',
+	judgment String DEFAULT '',
+	`+"`source`"+` String DEFAULT '',
+	task_type String DEFAULT '',
+	`+"`model`"+` String DEFAULT '',
+	effort String DEFAULT '',
+	preference String DEFAULT '',
+	jev_latency_ms Int64 DEFAULT 0,
+	detail String DEFAULT ''
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))

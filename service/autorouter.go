@@ -357,6 +357,7 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		"auto_router_preference": result.Preference,
 	}
 	otelRuntime.FinishObservation(routeSpan, route)
+	recordAutoRoute(c, result, route.Err)
 	if !ok {
 		return result, route.Err
 	}
