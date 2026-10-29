@@ -120,9 +120,11 @@ func TestAutoRouterStatusHidesSecretsAndRestoreReturnsToTheEmbeddedRanking(t *te
 		JevReady      bool              `json:"jev_ready"`
 		RankKeysReady bool              `json:"rank_keys_ready"`
 		Sources       map[string]string `json:"sources"`
+		RankSources   map[string]string `json:"rank_sources"`
 	}
 	require.NoError(t, common.Unmarshal(response.Data, &status))
 	assert.True(t, status.JevReady)
+	assert.NotEmpty(t, status.RankSources["generated_at"], "状态里带当前榜单的来源快照，前端不必为此拉整份榜单")
 	assert.False(t, status.RankKeysReady, "没有 Artificial Analysis 的 key")
 	assert.Equal(t, "option", status.Sources["jev_api_key"])
 	assert.Equal(t, "env", status.Sources["openrouter_api_key"])

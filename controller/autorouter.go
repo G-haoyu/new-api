@@ -25,6 +25,7 @@ func GetAutoRouterStatus(c *gin.Context) {
 		"rank_keys_ready":  connections.RankKeysReady(),
 		"ranking_current":  setting.RankingCurrent(),
 		"taxonomy_version": autorouter.TaxonomyVersion,
+		"rank_sources":     setting.Ranking().Sources,
 		"sources": map[string]string{
 			"jev_endpoint":                connections.JevEndpoint.Source,
 			"jev_model":                   connections.JevModel.Source,
