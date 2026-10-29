@@ -468,6 +468,14 @@ func SetApiRouter(router *gin.Engine) {
 			autoRouterRoute.POST("/ranking/restore", controller.RestoreAutoRouterRanking)
 		}
 
+		// 选路日志只读，和使用日志一样管理员可看。
+		autoRouteLogRoute := apiRouter.Group("/auto-route-logs")
+		autoRouteLogRoute.Use(middleware.AdminAuth())
+		{
+			autoRouteLogRoute.GET("/", controller.GetAutoRouteLogs)
+			autoRouteLogRoute.GET("/:request_id", controller.GetAutoRouteLog)
+		}
+
 		// Deployments (model deployment management)
 		deploymentsRoute := apiRouter.Group("/deployments")
 		deploymentsRoute.Use(middleware.AdminAuth())

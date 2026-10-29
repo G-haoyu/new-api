@@ -54,6 +54,88 @@ func TestAutoRouteLogsAreInsertedInChunksAndCleanedUpByAge(t *testing.T) {
 	}
 }
 
+func TestAutoRouteLogsCanBeFilteredOrderedAndFetchedByRequestId(t *testing.T) {
+	require.NoError(t, LOG_DB.Exec("DELETE FROM auto_route_logs").Error)
+	t.Cleanup(func() { LOG_DB.Exec("DELETE FROM auto_route_logs") })
+	require.NoError(t, BatchInsertAutoRouteLogs([]*AutoRouteLog{
+		{CreatedAt: 100, RequestId: "req-1", UserId: 1, Model: "model-a", Outcome: AutoRouteOutcomeRouted, Judgment: "live", TaskType: "code.build", Detail: `{"n":1}`},
+		{CreatedAt: 200, RequestId: "req-2", UserId: 2, Model: "model-a", Outcome: AutoRouteOutcomeFailed, Judgment: "unroutable", Detail: `{"n":2}`},
+		{CreatedAt: 300, RequestId: "req-3", UserId: 1, Model: "model-b", Outcome: AutoRouteOutcomeRouted, Judgment: "cache", TaskType: "general.chat", Detail: `{"n":3}`},
+	}))
+
+	all, total, err := GetAutoRouteLogs(AutoRouteLogQuery{})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total)
+	require.Len(t, all, 3)
+	assert.Equal(t, []string{"req-3", "req-2", "req-1"}, []string{all[0].RequestId, all[1].RequestId, all[2].RequestId})
+	for _, entry := range all {
+		assert.Empty(t, entry.Detail, "列表不带 detail")
+	}
+
+	for name, tt := range map[string]struct {
+		query AutoRouteLogQuery
+		want  []string
+	}{
+		"by user":             {AutoRouteLogQuery{UserId: 1}, []string{"req-3", "req-1"}},
+		"by model":            {AutoRouteLogQuery{Model: "model-a"}, []string{"req-2", "req-1"}},
+		"by outcome":          {AutoRouteLogQuery{Outcome: AutoRouteOutcomeFailed}, []string{"req-2"}},
+		"by judgment":         {AutoRouteLogQuery{Judgment: "cache"}, []string{"req-3"}},
+		"by task type":        {AutoRouteLogQuery{TaskType: "code.build"}, []string{"req-1"}},
+		"by request id":       {AutoRouteLogQuery{RequestId: " req-2 "}, []string{"req-2"}},
+		"from a time":         {AutoRouteLogQuery{StartTime: 150}, []string{"req-3", "req-2"}},
+		"until a time":        {AutoRouteLogQuery{EndTime: 250}, []string{"req-2", "req-1"}},
+		"filters combine":     {AutoRouteLogQuery{UserId: 1, Model: "model-a"}, []string{"req-1"}},
+		"nothing matches":     {AutoRouteLogQuery{Model: "model-z"}, nil},
+		"a page past the end": {AutoRouteLogQuery{Offset: 5}, nil},
+	} {
+		got, count, err := GetAutoRouteLogs(tt.query)
+		require.NoError(t, err, name)
+		var ids []string
+		for _, entry := range got {
+			ids = append(ids, entry.RequestId)
+		}
+		assert.Equal(t, tt.want, ids, name)
+		if name != "a page past the end" {
+			assert.Equal(t, int64(len(tt.want)), count, name)
+		}
+	}
+
+	page, total, err := GetAutoRouteLogs(AutoRouteLogQuery{Offset: 1, Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), total, "总数不受分页影响")
+	require.Len(t, page, 1)
+	assert.Equal(t, "req-2", page[0].RequestId)
+
+	found, ok, err := GetAutoRouteLogByRequestId("req-2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, `{"n":2}`, found.Detail, "单条带 detail")
+	assert.Equal(t, AutoRouteOutcomeFailed, found.Outcome)
+
+	for _, missing := range []string{"nope", "", "   "} {
+		_, ok, err = GetAutoRouteLogByRequestId(missing)
+		require.NoError(t, err)
+		assert.False(t, ok, "request id %q", missing)
+	}
+}
+
+func TestGetAutoRouteLogsClampsThePageSize(t *testing.T) {
+	require.NoError(t, LOG_DB.Exec("DELETE FROM auto_route_logs").Error)
+	t.Cleanup(func() { LOG_DB.Exec("DELETE FROM auto_route_logs") })
+	logs := make([]*AutoRouteLog, 150)
+	for i := range logs {
+		logs[i] = &AutoRouteLog{CreatedAt: int64(1 + i), Detail: "{}"}
+	}
+	require.NoError(t, BatchInsertAutoRouteLogs(logs))
+
+	for limit, want := range map[int]int{0: 20, -5: 20, 7: 7, 100: 100, 1000: 100} {
+		page, total, err := GetAutoRouteLogs(AutoRouteLogQuery{Limit: limit})
+		require.NoError(t, err)
+		assert.Len(t, page, want, "limit %d", limit)
+		assert.Equal(t, int64(150), total)
+	}
+}
+
 // PostgreSQL 一条语句最多 65535 个绑定参数，而 AUTO_ROUTE_LOG_BATCH_SIZE 最大可调到 10000 行，
 // 所以再大的一批也不能拼成一条 INSERT。SQLite 本身不卡这个上限，靠统计每条语句的参数个数来守住。
 func TestBatchInsertAutoRouteLogsKeepsEveryStatementUnderThePostgresParameterLimit(t *testing.T) {

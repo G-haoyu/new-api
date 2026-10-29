@@ -2,6 +2,9 @@ package model
 
 import (
 	"context"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
 )
 
 // 一次 auto 请求的选路结果。
@@ -47,8 +50,9 @@ type AutoRouteLog struct {
 	Preference string `json:"preference" gorm:"type:varchar(16)"`
 	// JevLatencyMs 只在这次请求调过 jev 时有值。
 	JevLatencyMs int64 `json:"jev_latency_ms"`
-	// Detail 是完整的选路过程（JSON），不超过 AutoRouteLogDetailMax 字节。
-	Detail string `json:"detail" gorm:"type:text"`
+	// Detail 是完整的选路过程（JSON），不超过 AutoRouteLogDetailMax 字节。列表查询不取这一列，
+	// omitempty 让列表的每一行不带这个键，免得空串被当成"这条日志没有过程"。
+	Detail string `json:"detail,omitempty" gorm:"type:text"`
 }
 
 // BatchInsertAutoRouteLogs 向日志库追加一批留痕，调用方是异步 writer。
@@ -57,6 +61,88 @@ func BatchInsertAutoRouteLogs(logs []*AutoRouteLog) error {
 		return nil
 	}
 	return LOG_DB.CreateInBatches(logs, autoRouteLogInsertChunk).Error
+}
+
+// AutoRouteLogQuery 是选路日志列表的筛选条件，零值的字段不参与筛选。
+type AutoRouteLogQuery struct {
+	RequestId string
+	UserId    int
+	Model     string
+	Outcome   string
+	Judgment  string
+	TaskType  string
+	StartTime int64
+	EndTime   int64
+	Offset    int
+	Limit     int
+}
+
+// GetAutoRouteLogs 按时间倒序返回一页选路日志。列表不带 detail：一页最多 100 行，
+// 每行 detail 可达 32KB，要看过程的去按请求 id 取单条。
+func GetAutoRouteLogs(query AutoRouteLogQuery) ([]AutoRouteLog, int64, error) {
+	db := LOG_DB.Model(&AutoRouteLog{})
+	// struct 条件只带非零字段，空的筛选项不会参与查询；列名也由 GORM 按方言加引号。
+	db = db.Where(&AutoRouteLog{
+		RequestId: strings.TrimSpace(query.RequestId),
+		UserId:    query.UserId,
+		Model:     strings.TrimSpace(query.Model),
+		Outcome:   strings.TrimSpace(query.Outcome),
+		Judgment:  strings.TrimSpace(query.Judgment),
+		TaskType:  strings.TrimSpace(query.TaskType),
+	})
+	if query.StartTime > 0 {
+		db = db.Where("created_at >= ?", query.StartTime)
+	}
+	if query.EndTime > 0 {
+		db = db.Where("created_at <= ?", query.EndTime)
+	}
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	limit := query.Limit
+	if limit < 1 {
+		limit = 20
+	}
+	limit = min(limit, 100)
+	offset := max(query.Offset, 0)
+	clickHouse := common.UsingLogDatabase(common.DatabaseTypeClickHouse)
+	order := "id DESC"
+	if clickHouse {
+		order = clickHouseLogOrder("")
+	}
+	var logs []AutoRouteLog
+	if err := db.Omit("detail").Order(order).Offset(offset).Limit(limit).Find(&logs).Error; err != nil {
+		return nil, 0, err
+	}
+	if clickHouse {
+		// ClickHouse 没有自增主键，id 恒为 0；给前端分配页内唯一的展示 id。
+		for i := range logs {
+			logs[i].Id = int64(offset + i + 1)
+		}
+	}
+	return logs, total, nil
+}
+
+// GetAutoRouteLogByRequestId 返回一次请求的选路日志（含 detail）。found 为 false 表示没有：
+// 没开记录、记录模式没覆盖这类请求、或已过保留期，调用方应当把它当成正常情况。
+func GetAutoRouteLogByRequestId(requestId string) (log AutoRouteLog, found bool, err error) {
+	requestId = strings.TrimSpace(requestId)
+	if requestId == "" {
+		return AutoRouteLog{}, false, nil
+	}
+	order := "id DESC"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		order = clickHouseLogOrder("")
+	}
+	var logs []AutoRouteLog
+	if err := LOG_DB.Where(&AutoRouteLog{RequestId: requestId}).Order(order).Limit(1).Find(&logs).Error; err != nil {
+		return AutoRouteLog{}, false, err
+	}
+	if len(logs) == 0 {
+		return AutoRouteLog{}, false, nil
+	}
+	return logs[0], true, nil
 }
 
 // CleanupAutoRouteLogs 分块删除 before 之前的留痕，每块行数由

@@ -29,7 +29,7 @@ func setupAutoRouterControllerTest(t *testing.T) *gorm.DB {
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.SystemTask{}, &model.SystemTaskLock{}, &model.Option{}, &model.AuditLog{}, &model.User{}))
+	require.NoError(t, db.AutoMigrate(&model.SystemTask{}, &model.SystemTaskLock{}, &model.Option{}, &model.AuditLog{}, &model.User{}, &model.AutoRouteLog{}))
 
 	previousDB, previousLogDB, previousOptions := model.DB, model.LOG_DB, common.OptionMap
 	model.DB, model.LOG_DB, common.OptionMap = db, db, map[string]string{}
@@ -164,4 +164,61 @@ func TestAutoRouterStatusHidesSecretsAndRestoreReturnsToTheEmbeddedRanking(t *te
 	}
 	assert.Equal(t, len(setting.DefaultModels), profiles["general"], "general 画像用 default_models")
 	assert.Equal(t, len(setting.TaskModels["code.build"]), profiles["code.build"])
+}
+
+func callAutoRouteLogHandler(t *testing.T, handler gin.HandlerFunc, target string, params gin.Params) tokenAPIResponse {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, target, nil)
+	c.Params = params
+	handler(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response tokenAPIResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return response
+}
+
+func TestAutoRouteLogEndpointsListWithoutDetailAndReturnTheProcessByRequestId(t *testing.T) {
+	setupAutoRouterControllerTest(t)
+	require.NoError(t, model.BatchInsertAutoRouteLogs([]*model.AutoRouteLog{
+		{CreatedAt: 100, RequestId: "req-ok", UserId: 1, Model: "coder", Outcome: model.AutoRouteOutcomeRouted, Detail: `{"result":{"resolved_model":"coder-high"},"trace":{"judgment":"live"}}`},
+		{CreatedAt: 200, RequestId: "req-failed", UserId: 2, Outcome: model.AutoRouteOutcomeFailed, Detail: `{"error":"no model"}`},
+		{CreatedAt: 300, RequestId: "req-broken", UserId: 2, Outcome: model.AutoRouteOutcomeRouted, Detail: `not json`},
+	}))
+
+	list := callAutoRouteLogHandler(t, GetAutoRouteLogs, "/api/auto-route-logs/?user_id=2&page_size=10", nil)
+	require.True(t, list.Success, list.Message)
+	var page struct {
+		Items []map[string]any `json:"items"`
+		Total int64            `json:"total"`
+	}
+	require.NoError(t, common.Unmarshal(list.Data, &page))
+	assert.Equal(t, int64(2), page.Total)
+	require.Len(t, page.Items, 2)
+	assert.Equal(t, "req-broken", page.Items[0]["request_id"], "按时间倒序")
+	for _, item := range page.Items {
+		assert.NotContains(t, item, "detail", "列表不带 detail")
+	}
+
+	one := callAutoRouteLogHandler(t, GetAutoRouteLog, "/api/auto-route-logs/req-ok", gin.Params{{Key: "request_id", Value: "req-ok"}})
+	require.True(t, one.Success, one.Message)
+	var entry struct {
+		RequestId string         `json:"request_id"`
+		Model     string         `json:"model"`
+		Detail    map[string]any `json:"detail"`
+	}
+	require.NoError(t, common.Unmarshal(one.Data, &entry))
+	assert.Equal(t, "req-ok", entry.RequestId)
+	assert.Equal(t, "coder", entry.Model)
+	assert.Equal(t, "live", entry.Detail["trace"].(map[string]any)["judgment"], "detail 是对象，不是一段 JSON 文本")
+
+	broken := callAutoRouteLogHandler(t, GetAutoRouteLog, "/api/auto-route-logs/req-broken", gin.Params{{Key: "request_id", Value: "req-broken"}})
+	require.True(t, broken.Success, broken.Message)
+	assert.Contains(t, string(broken.Data), `"detail":null`, "detail 损坏时其余列照样返回")
+	assert.Contains(t, string(broken.Data), `"request_id":"req-broken"`)
+
+	missing := callAutoRouteLogHandler(t, GetAutoRouteLog, "/api/auto-route-logs/nope", gin.Params{{Key: "request_id", Value: "nope"}})
+	assert.True(t, missing.Success, "没有这条日志是正常情况")
+	assert.Equal(t, "null", string(missing.Data))
 }
