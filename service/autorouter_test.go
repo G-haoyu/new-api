@@ -270,7 +270,6 @@ func TestResolveAutoModelPicksByQualityAndPrice(t *testing.T) {
 	setting := autorouter_setting.GetAutoRouterSetting()
 	setting.TaskModels = map[string][]string{"code.build": {"opus-m", "sonnet-m"}}
 	setting.TaskScores = map[string]map[string]float64{"code.build": {"opus-m": 0.97, "sonnet-m": 0.96}}
-	setting.CostLambda, setting.ScoreTieDelta = 0.05, 0.02
 	prices := map[string]float64{"opus-m": 8, "sonnet-m": 4}
 	candidates := func(withPrice func(string) (float64, bool)) AutoCandidates {
 		candidates := candidatesFrom(func(string) bool { return true })
@@ -289,6 +288,28 @@ func TestResolveAutoModelPicksByQualityAndPrice(t *testing.T) {
 		require.NotNil(t, result.Pick)
 		assert.Equal(t, "sonnet-m", result.Pick.Chosen)
 		assert.Len(t, result.Pick.Band, 2)
+		assert.Equal(t, autorouter.PreferenceBalanced, result.Preference, "没设偏好的 key 走平台默认，出厂是均衡")
+	})
+
+	t.Run("a key that prefers capability keeps the best score whatever it costs", func(t *testing.T) {
+		c := newAutoRouterContext(9804, body)
+		common.SetContextKey(c, constant.ContextKeyTokenAutoPreference, autorouter.PreferenceCapability)
+		result, err := ResolveAutoModel(c, candidates(func(model string) (float64, bool) { return prices[model], true }))
+		require.NoError(t, err)
+		assert.Equal(t, "opus-m-xhigh", result.ResolvedModel)
+		assert.Equal(t, autorouter.PreferenceCapability, result.Preference)
+		require.NotNil(t, result.Pick)
+		assert.Len(t, result.Pick.Band, 1)
+	})
+
+	t.Run("a key without a preference follows a changed platform default", func(t *testing.T) {
+		previous := setting.DefaultPreference
+		setting.DefaultPreference = autorouter.PreferenceCapability
+		t.Cleanup(func() { setting.DefaultPreference = previous })
+		result, err := ResolveAutoModel(newAutoRouterContext(9805, body), candidates(func(model string) (float64, bool) { return prices[model], true }))
+		require.NoError(t, err)
+		assert.Equal(t, "opus-m-xhigh", result.ResolvedModel)
+		assert.Equal(t, autorouter.PreferenceCapability, result.Preference)
 	})
 
 	t.Run("a model without a comparable price does not take part", func(t *testing.T) {

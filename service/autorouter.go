@@ -148,8 +148,8 @@ type AutoCandidates struct {
 // 写什么，由分发中间件落到请求体）；否则沿用旧办法，把档位拼在模型名后缀上。
 func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Result, error) {
 	setting := autorouter_setting.GetAutoRouterSetting()
-	policy := setting.Policy()
-	result := &autorouter.Result{Source: autorouter.SourceDefault}
+	policy := setting.Policy(common.GetContextKeyString(c, constant.ContextKeyTokenAutoPreference))
+	result := &autorouter.Result{Source: autorouter.SourceDefault, Preference: policy.Preference}
 	available := func(name string) bool { return candidates.Serves(name, false) }
 	overridable := func(name string) bool { return candidates.Serves(name, true) }
 	routing := autorouter.Candidates{Available: available, Overridable: overridable, Price: candidates.Price}
@@ -314,13 +314,15 @@ func ResolveAutoModel(c *gin.Context, candidates AutoCandidates) (*autorouter.Re
 		"route_fallback": result.Fallback(),
 		"source":         result.Source,
 		"resolved_model": result.ResolvedModel,
+		"preference":     result.Preference,
 	}
 	route.TraceMetadata = map[string]string{
-		"auto_router_model":    result.Model,
-		"auto_router_effort":   result.Effort,
-		"auto_router_profile":  result.Profile,
-		"auto_router_fallback": result.Fallback(),
-		"auto_router_source":   result.Source,
+		"auto_router_model":      result.Model,
+		"auto_router_effort":     result.Effort,
+		"auto_router_profile":    result.Profile,
+		"auto_router_fallback":   result.Fallback(),
+		"auto_router_source":     result.Source,
+		"auto_router_preference": result.Preference,
 	}
 	otelRuntime.FinishObservation(routeSpan, route)
 	if !ok {

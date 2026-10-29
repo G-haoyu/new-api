@@ -38,15 +38,20 @@ type Policy struct {
 	ContinuationTaskChange float64
 	// TaskScores maps a task type to the quality score of its models. A trusted
 	// decision picks among the scored models by quality and price; models
-	// without a score are only a fallback in TaskModels order.
+	// without a score are only a fallback in TaskModels order. The scores under
+	// DefaultProfile rank DefaultModels the same way.
 	TaskScores map[string]map[string]float64
-	// CostLambda is the largest quality score a model may give up for being
-	// cheaper than the priciest candidate, and ScoreTieDelta the score gap below
-	// which two candidates count as equally good (the cheaper one wins).
-	// Together they bound how far the pick can fall below the best score.
-	CostLambda    float64
-	ScoreTieDelta float64
+	// Preference names the choice this request's key made between capability and
+	// price, and CostWeight is the most quality score that choice lets a model give
+	// up for being cheaper. It bounds how far the pick can fall below the best
+	// score; zero means the best-scored model always wins.
+	Preference string
+	CostWeight float64
 }
+
+// DefaultProfile is the ranking DefaultModels follow when no task-specific
+// ranking applies.
+const DefaultProfile = "general"
 
 // Route is a routing choice before it is resolved to a usable model name.
 type Route struct {
@@ -117,8 +122,8 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates 
 		if previous != nil && ModelAvailable(previous.Model, available) {
 			return *previous, true, true, nil
 		}
-		model, found := firstAvailable(policy.DefaultModels, available)
-		return Route{Model: model, Effort: policy.DefaultEffort}, true, found, nil
+		model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, available, candidates.Price)
+		return Route{Model: model, Effort: policy.DefaultEffort}, true, found, picked
 	}
 
 	effort := policy.DefaultEffort
@@ -139,19 +144,28 @@ func SelectRoute(decision *Decision, previous *Route, policy Policy, candidates 
 		return Route{Profile: previous.Profile, Model: previous.Model, Effort: effort}, false, true, nil
 	}
 
-	servable := func(model string) bool { return ModelAvailable(model, overridable) }
 	for _, profile := range profiles {
-		if scores := policy.TaskScores[profile]; len(scores) > 0 && candidates.Price != nil {
-			if picked, found := pickByQualityCost(policy.TaskModels[profile], scores, policy.CostLambda, policy.ScoreTieDelta, servable, candidates.Price); found {
-				return Route{Profile: profile, Model: picked.Chosen, Effort: effort}, false, true, &picked
-			}
-		}
-		if model, found := firstAvailable(policy.TaskModels[profile], overridable); found {
-			return Route{Profile: profile, Model: model, Effort: effort}, false, true, nil
+		if model, picked, found := policy.choose(profile, policy.TaskModels[profile], overridable, candidates.Price); found {
+			return Route{Profile: profile, Model: model, Effort: effort}, false, true, picked
 		}
 	}
-	model, found := firstAvailable(policy.DefaultModels, overridable)
-	return Route{Model: model, Effort: effort}, false, found, nil
+	model, picked, found := policy.choose(DefaultProfile, policy.DefaultModels, overridable, candidates.Price)
+	return Route{Model: model, Effort: effort}, false, found, picked
+}
+
+// choose picks a model from one ranking's list. With scores and prices it
+// compares quality and price under the policy's preference; otherwise, or when no
+// scored model is servable, it takes the first available model in list order.
+// picked is set only for the comparison.
+func (p Policy) choose(profile string, models []string, available func(string) bool, price func(string) (float64, bool)) (string, *Pick, bool) {
+	if scores := p.TaskScores[profile]; len(scores) > 0 && price != nil {
+		servable := func(name string) bool { return ModelAvailable(name, available) }
+		if pick, ok := pickByQualityCost(models, scores, p.CostWeight, servable, price); ok {
+			return pick.Chosen, &pick, true
+		}
+	}
+	model, ok := firstAvailable(models, available)
+	return model, nil, ok
 }
 
 func firstAvailable(models []string, available func(model string) bool) (string, bool) {
@@ -231,6 +245,9 @@ type Result struct {
 	Route
 	Source   string    `json:"source"`
 	Decision *Decision `json:"decision,omitempty"`
+	// Preference is the capability/price preference this request ran under: the
+	// key's own, else the platform default.
+	Preference string `json:"preference,omitempty"`
 	// EffortInBody 表示档位写进请求体而不是拼在模型名后缀上：只有模型声明了
 	// 推理维度，并且裸模型名本身可用时才这样做，其余沿用后缀。
 	EffortInBody bool `json:"effort_in_body,omitempty"`

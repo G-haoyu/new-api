@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -431,13 +432,16 @@ func serveAutoRoutingRequest(t *testing.T, path string, tokenID int, body string
 }
 
 // serveAutoRoutingRequestIn 同 serveAutoRoutingRequest，但令牌分组可指定（例如 "auto"）。
-func serveAutoRoutingRequestIn(t *testing.T, path, usingGroup string, tokenID int, body string) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
+func serveAutoRoutingRequestIn(t *testing.T, path, usingGroup string, tokenID int, body string, setup ...func(*gin.Context)) (stored string, originalModel string, recorder *httptest.ResponseRecorder) {
 	t.Helper()
 	router := gin.New()
 	router.POST(path, RequestId(), func(c *gin.Context) {
 		common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
 		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
 		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
+		for _, apply := range setup {
+			apply(c)
+		}
 	}, Distribute(), func(c *gin.Context) {
 		storage, err := common.GetBodyStorage(c)
 		require.NoError(t, err)
@@ -669,7 +673,6 @@ func TestDistributeAutoPicksByQualityAndUserPrice(t *testing.T) {
 		s := autorouter_setting.GetAutoRouterSetting()
 		s.TaskModels = map[string][]string{"code.build": {"ghost-x", "opus-x", "sonnet-x"}}
 		s.TaskScores = map[string]map[string]float64{"code.build": {"ghost-x": 0.99, "opus-x": 0.97, "sonnet-x": 0.96}}
-		s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
 	}
 	pool := map[int][]string{1: {"opus-x"}, 2: {"sonnet-x"}, 3: {"ghost-x"}}
 	body := `{"model":"auto","messages":[{"role":"user","content":"fix the bug"}]}`
@@ -680,6 +683,17 @@ func TestDistributeAutoPicksByQualityAndUserPrice(t *testing.T) {
 		_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9801, body)
 		require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 		assert.Equal(t, "sonnet-x", originalModel)
+	})
+
+	t.Run("a key that prefers capability takes the best-scored priced model", func(t *testing.T) {
+		prepare(t, pool, []string{"opus-x"})
+		t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
+		_, originalModel, recorder := serveAutoRoutingRequestIn(t, "/v1/chat/completions", "default", 9806, body,
+			func(c *gin.Context) {
+				common.SetContextKey(c, constant.ContextKeyTokenAutoPreference, autorouter.PreferenceCapability)
+			})
+		require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "opus-x", originalModel, "同样的候选和价格，能力优先的 key 不拿便宜的 sonnet-x 换分数")
 	})
 
 	t.Run("the fallback never picks an unpriced model either", func(t *testing.T) {
@@ -735,7 +749,6 @@ func TestDistributeAutoPricesCandidatesInTheirOwnBillingGroup(t *testing.T) {
 	s := autorouter_setting.GetAutoRouterSetting()
 	s.TaskModels = map[string][]string{"code.build": {"exp-x", "cheap-y"}}
 	s.TaskScores = map[string]map[string]float64{"code.build": {"exp-x": 0.97, "cheap-y": 0.96}}
-	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
 	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
 
 	_, originalModel, recorder := serveAutoRoutingRequestIn(t, "/v1/chat/completions", "auto", 9804,
@@ -792,7 +805,6 @@ func TestDistributeAutoPricesTieredModelsAtTheirOwnEstimatedLength(t *testing.T)
 	s := autorouter_setting.GetAutoRouterSetting()
 	s.TaskModels = map[string][]string{"code.build": {"claude-opus-4-7-tier", "claude-sonnet-4-5-tier"}}
 	s.TaskScores = map[string]map[string]float64{"code.build": {"claude-opus-4-7-tier": 0.97, "claude-sonnet-4-5-tier": 0.96}}
-	s.CostLambda, s.ScoreTieDelta = 0.05, 0.02
 	t.Setenv("JEV_ENDPOINT", fakeJevFor(t, "code.build"))
 
 	_, originalModel, recorder := serveAutoRoutingRequest(t, "/v1/chat/completions", 9805, body)

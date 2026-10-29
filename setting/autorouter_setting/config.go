@@ -2,7 +2,9 @@ package autorouter_setting
 
 import (
 	_ "embed"
+	"maps"
 	"math"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/autorouter"
@@ -65,12 +67,21 @@ type AutoRouterSetting struct {
 	// refresh; like TaskModels it is ignored while the stored lists predate the
 	// current task types.
 	TaskScores map[string]map[string]float64 `json:"task_scores"`
-	// CostLambda is the largest score a model may give up for being cheaper, and
-	// ScoreTieDelta the score gap below which two models count as equally good
-	// and the cheaper one wins. The pick never falls below the best score by
-	// more than their sum; zero for both means the best-scored model always wins.
-	CostLambda    float64 `json:"cost_lambda"`
-	ScoreTieDelta float64 `json:"score_tie_delta"`
+	// DefaultPreference is the preference of a key that sets none: capability,
+	// balanced or cost.
+	DefaultPreference string `json:"default_preference"`
+	// CostWeights maps a preference to the most leaderboard score (0 to 1) a model
+	// may give up for being cheaper. The pick never falls below the best score by
+	// more than this; zero means the best-scored model always wins. A preference
+	// missing from the map uses its built-in weight.
+	CostWeights map[string]float64 `json:"cost_weights"`
+}
+
+// defaultCostWeights are the weights of preferences the option leaves out.
+var defaultCostWeights = map[string]float64{
+	autorouter.PreferenceCapability: 0,
+	autorouter.PreferenceBalanced:   0.07,
+	autorouter.PreferenceCost:       0.3,
 }
 
 var autoRouterSetting = AutoRouterSetting{
@@ -85,8 +96,8 @@ var autoRouterSetting = AutoRouterSetting{
 	UpgradeBenefit:           0.5,
 	MinTaskTypeProbability:   0.5,
 	ContinuationTaskChange:   0.5,
-	CostLambda:               0.05,
-	ScoreTieDelta:            0.02,
+	DefaultPreference:        autorouter.PreferenceBalanced,
+	CostWeights:              maps.Clone(defaultCostWeights),
 }
 
 func init() {
@@ -141,12 +152,25 @@ func (s *AutoRouterSetting) Ranking() (taskModels map[string][]string, defaultMo
 	return shippedRanking.TaskModels, shippedRanking.DefaultModels
 }
 
-func (s *AutoRouterSetting) Policy() autorouter.Policy {
+// Policy builds the routing policy for one request. preference is the key's own;
+// one that is empty or unknown uses DefaultPreference, and that falling back to
+// balanced when it is unknown too.
+func (s *AutoRouterSetting) Policy(preference string) autorouter.Policy {
 	taskModels, defaultModels := s.Ranking()
 	// 榜单分和任务列表同源：存的列表过期时一起退回内嵌的，否则旧分类下的分数会配上新分类的列表。
 	taskScores := s.TaskScores
 	if !s.RankingCurrent() {
 		taskScores = shippedRanking.TaskScores
+	}
+	for _, candidate := range []string{preference, s.DefaultPreference, autorouter.PreferenceBalanced} {
+		if slices.Contains(autorouter.Preferences, candidate) {
+			preference = candidate
+			break
+		}
+	}
+	weight, set := s.CostWeights[preference]
+	if !set {
+		weight = defaultCostWeights[preference]
 	}
 	return autorouter.Policy{
 		TaskModels:             taskModels,
@@ -157,8 +181,8 @@ func (s *AutoRouterSetting) Policy() autorouter.Policy {
 		MinTaskTypeProbability: s.MinTaskTypeProbability,
 		ContinuationTaskChange: s.ContinuationTaskChange,
 		TaskScores:             taskScores,
-		CostLambda:             scoreWeight(s.CostLambda),
-		ScoreTieDelta:          scoreWeight(s.ScoreTieDelta),
+		Preference:             preference,
+		CostWeight:             scoreWeight(weight),
 	}
 }
 

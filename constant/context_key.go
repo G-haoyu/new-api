@@ -30,6 +30,9 @@ const (
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
 	// ContextKeyTokenRoutingPreference holds the token's parsed *dto.RoutingPreference for Scheduler.
 	ContextKeyTokenRoutingPreference ContextKey = "token_routing_preference"
+	// ContextKeyTokenAutoPreference holds the token's capability/price preference for the "auto" model.
+	// It has nothing to do with the Scheduler's routing preference above.
+	ContextKeyTokenAutoPreference ContextKey = "token_auto_preference"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
