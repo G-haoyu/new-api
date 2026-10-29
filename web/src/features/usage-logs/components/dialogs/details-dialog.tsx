@@ -93,6 +93,7 @@ import {
 import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
+import { AutoRouteDetail } from './auto-route-detail'
 import { DetailRow, DetailSection } from './log-detail-layout'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
@@ -831,6 +832,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
             <PolicyDecisionRecord events={adminInfo.request_policy} />
           </DetailSection>
         ) : null}
+        {props.isAdmin && adminInfo?.auto_router && (
+          <AutoRouteDetail
+            requestId={props.log.request_id}
+            summary={adminInfo.auto_router}
+          />
+        )}
         {props.isAdmin && other?.admin_info?.quota_saturation && (
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
