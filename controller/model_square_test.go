@@ -203,6 +203,7 @@ func TestGetModelSquareListsRuleMatchedModelsWithChannels(t *testing.T) {
 	assert.Equal(t, "family-model-1", item.ModelName)
 	assert.True(t, strings.HasPrefix(item.CatalogKey, "m_"), "详情路由键按模型名编码")
 	assert.Equal(t, 10, item.ID, "元数据取命中的前缀声明行")
+	require.NotNil(t, item.Pricing, "列表条目带美元单价")
 	assert.Contains(t, item.Capabilities, "function_calling")
 	require.Len(t, item.Channels, 1)
 	assert.Equal(t, 7, item.Channels[0].ID)
@@ -228,4 +229,36 @@ func TestGetModelSquareListsRuleMatchedModelsWithChannels(t *testing.T) {
 	decodedName, ok := decodeModelSquareCatalogKey(slashed)
 	require.True(t, ok)
 	assert.Equal(t, "vendor/model-x", decodedName)
+}
+
+func TestModelSquarePricingFromPricing(t *testing.T) {
+	cacheRatio := 0.5
+	tests := []struct {
+		name    string
+		pricing model.Pricing
+		want    string
+	}{
+		{
+			name:    "token priced with cache",
+			pricing: model.Pricing{ModelRatio: 1.5, CompletionRatio: 2, CacheRatio: &cacheRatio},
+			want:    `{"input_price":3,"output_price":6,"cache_read_price":1.5}`,
+		},
+		{
+			name:    "token priced without cache",
+			pricing: model.Pricing{ModelRatio: 1.5, CompletionRatio: 2},
+			want:    `{"input_price":3,"output_price":6}`,
+		},
+		{
+			name:    "per call priced ignores ratios",
+			pricing: model.Pricing{QuotaType: 1, ModelPrice: 0.04, ModelRatio: 9, CompletionRatio: 9, CacheRatio: &cacheRatio},
+			want:    `{"input_price":0.04,"output_price":0.04}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := common.Marshal(modelSquarePricingFromPricing(tt.pricing))
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(got))
+		})
+	}
 }

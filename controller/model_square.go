@@ -17,6 +17,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// modelSquarePricing 是模型级 token 单价，单位为美元/百万 token，由倍率换算得到。
+// 按次计价的模型（quota_type=1）没有 token 单价，输入和输出都填每次调用的价格。
+type modelSquarePricing struct {
+	InputPrice     float64  `json:"input_price"`
+	OutputPrice    float64  `json:"output_price"`
+	CacheReadPrice *float64 `json:"cache_read_price,omitempty"`
+}
+
 type modelSquareItem struct {
 	ID                     int                            `json:"id"`
 	ModelName              string                         `json:"model_name"`
@@ -42,6 +50,7 @@ type modelSquareItem struct {
 	EndpointMap            map[string]common.EndpointInfo `json:"endpoint_map,omitempty"`
 	BillingMode            string                         `json:"billing_mode,omitempty"`
 	BillingExpr            string                         `json:"billing_expr,omitempty"`
+	Pricing                *modelSquarePricing            `json:"pricing,omitempty"`
 
 	// 能力摘要来自模型级 capabilities 声明；未声明时全部为空。
 	Capabilities     []string               `json:"capabilities,omitempty"`
@@ -93,6 +102,24 @@ type modelSquareRoute struct {
 	ChannelID    int
 	ModelMapping *string
 	Setting      *string
+}
+
+// modelSquarePricingFromPricing 把倍率换算成美元/百万 token 的单价：倍率 1 对应输入 2 美元，
+// 与前端 calculateTokenPrice 的换算一致。
+func modelSquarePricingFromPricing(pricing model.Pricing) *modelSquarePricing {
+	if pricing.QuotaType == 1 {
+		return &modelSquarePricing{InputPrice: pricing.ModelPrice, OutputPrice: pricing.ModelPrice}
+	}
+	inputPrice := pricing.ModelRatio * 2
+	result := &modelSquarePricing{
+		InputPrice:  inputPrice,
+		OutputPrice: inputPrice * pricing.CompletionRatio,
+	}
+	if pricing.CacheRatio != nil {
+		cacheReadPrice := inputPrice * *pricing.CacheRatio
+		result.CacheReadPrice = &cacheReadPrice
+	}
+	return result
 }
 
 func modelSquareItemFromModel(
@@ -149,6 +176,7 @@ func modelSquareItemFromModel(
 		}
 		item.BillingMode = pricing.BillingMode
 		item.BillingExpr = pricing.BillingExpr
+		item.Pricing = modelSquarePricingFromPricing(pricing)
 	}
 	return item
 }
