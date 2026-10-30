@@ -78,77 +78,6 @@ export interface Vendor {
   updated_time: number
 }
 
-/** Provider registry metadata used by the model square. */
-export interface Provider {
-  id: number
-  slug: string
-  display_name: string
-  icon?: string
-  website_url?: string
-  status_page_url?: string
-  headquarters?: string
-  byok_supported: boolean
-  prompt_training_policy?: string
-  retention_policy?: string
-  moderation_policy?: string
-  metadata_source_url?: string
-  metadata_verified_at?: number
-  status: number
-  created_time: number
-  updated_time: number
-}
-
-export interface GetProvidersResponse {
-  success: boolean
-  message?: string
-  data?: {
-    items: Provider[]
-    total: number
-    page: number
-    page_size: number
-  }
-}
-
-export interface ModelProviderPrice {
-  id: number
-  model_id: number
-  provider_slug: string
-  input_price: number
-  output_price: number
-  cache_read_price?: number | null
-  cache_write_price?: number | null
-  input_list_price?: number | null
-  output_list_price?: number | null
-  cache_read_list_price?: number | null
-  cache_write_list_price?: number | null
-  discount_rate?: number | null
-  source_url?: string
-  effective_at?: number
-  created_time: number
-  updated_time: number
-  model_name?: string
-  context_length?: number
-  max_output_tokens?: number
-  region?: string
-  precision?: string
-  quantization?: string
-  supported_parameters?: string
-  stream_cancellation?: boolean | null
-  free?: boolean | null
-  batch?: boolean | null
-}
-
-export interface ProviderModelRelation {
-  model_id: number
-  model_name: string
-  model_icon?: string
-  vendor_name?: string
-  vendor_icon?: string
-  configured: boolean
-  available: boolean
-  price?: ModelProviderPrice
-}
-
 /**
  * Prefill group entity
  */
@@ -427,7 +356,6 @@ export type ModelTabCategory =
   | 'metadata'
   | 'vendors'
   | 'deployments'
-  | 'providers'
 
 /**
  * Deployment entity from API

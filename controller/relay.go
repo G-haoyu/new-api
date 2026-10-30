@@ -206,12 +206,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	))
 
 	retryParam := &service.RetryParam{
-		Ctx:             c,
-		TokenGroup:      relayInfo.TokenGroup,
-		ModelName:       relayInfo.OriginModelName,
-		RequestPath:     c.Request.URL.Path,
-		ProviderRouting: getProviderRouting(c),
-		Retry:           common.GetPointer(0),
+		Ctx:         c,
+		TokenGroup:  relayInfo.TokenGroup,
+		ModelName:   relayInfo.OriginModelName,
+		RequestPath: c.Request.URL.Path,
+		Retry:       common.GetPointer(0),
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
@@ -332,7 +331,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
-		retryParam.ExcludeChannel(channel.Id)
 
 		if decision.Action != "retry" {
 			break
@@ -459,18 +457,6 @@ func finishInputFor(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.N
 	}
 
 	return in
-}
-
-func getProviderRouting(c *gin.Context) *model.ProviderRouting {
-	value, exists := common.GetContextKey(c, constant.ContextKeyProviderRouting)
-	if !exists {
-		return nil
-	}
-	routing, ok := value.(*model.ProviderRouting)
-	if !ok {
-		return nil
-	}
-	return routing
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
@@ -708,12 +694,11 @@ func executeTaskSubmissionWith(
 	}
 
 	retryParam := &service.RetryParam{
-		Ctx:             c,
-		TokenGroup:      relayInfo.TokenGroup,
-		ModelName:       relayInfo.OriginModelName,
-		RequestPath:     c.Request.URL.Path,
-		ProviderRouting: getProviderRouting(c),
-		Retry:           common.GetPointer(0),
+		Ctx:         c,
+		TokenGroup:  relayInfo.TokenGroup,
+		ModelName:   relayInfo.OriginModelName,
+		RequestPath: c.Request.URL.Path,
+		Retry:       common.GetPointer(0),
 	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
@@ -727,20 +712,6 @@ func executeTaskSubmissionWith(
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
-			if routing := getProviderRouting(c); routing != nil {
-				provider := channel.GetProviderSlug()
-				allowed := false
-				for _, requested := range routing.Order {
-					if requested == provider {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					taskErr = service.TaskErrorWrapperLocal(errors.New("provider routing conflicts with the locked channel"), "provider_routing_conflict", http.StatusForbidden)
-					break
-				}
-			}
 			policy.BeginAttempt(channel, relayInfo.UsingGroup)
 			if retryParam.GetRetry() > 0 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
@@ -795,7 +766,6 @@ func executeTaskSubmissionWith(
 				taskAPIError,
 				relayInfo)
 		}
-		retryParam.ExcludeChannel(channel.Id)
 
 		willRetry := decision.Action == "retry"
 		diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)

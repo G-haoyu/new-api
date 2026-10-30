@@ -35,7 +35,6 @@ import { ModelsDialogs } from './components/models-dialogs'
 import { ModelsPrimaryButtons } from './components/models-primary-buttons'
 import { ModelsProvider, useModels } from './components/models-provider'
 import { ModelsTable } from './components/models-table'
-import { ProvidersTable } from './components/providers-table'
 import { VendorsTable } from './components/vendors-table'
 import { useModelDeploymentSettings } from './hooks/use-model-deployment-settings'
 import { deploymentsQueryKeys } from './lib'
@@ -59,10 +58,6 @@ const SECTION_META: Record<
   deployments: {
     titleKey: 'Deployments',
     tabKey: 'Deployments',
-  },
-  providers: {
-    titleKey: 'Providers',
-    tabKey: 'Providers',
   },
 }
 
@@ -121,9 +116,6 @@ function ModelsContent() {
       </Button>
     )
     content = <DeploymentsSection />
-  } else if (activeSection === 'providers') {
-    content = <ProvidersTable />
-    actions = null
   }
 
   return (
