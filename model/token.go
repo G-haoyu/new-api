@@ -92,10 +92,6 @@ func (token *Token) SetRoutingPreference(preference *dto.RoutingPreference) erro
 	return nil
 }
 
-// GetRoutingPreferenceMode 读取 routing_preference 中的排序模式，扁平枚举形式。
-// 与 GetRoutingPreference 的区别：那个返回整个对象（未配置时为 nil），这个只取
-// Mode 且恒有值 —— 未配置或解析失败都回落 balanced，与 service 层的
-// schedulerDefaultMode 一致，所以坏数据只退回平台默认策略，不会让请求失败。
 func (token *Token) GetRoutingPreferenceMode() common.RoutingPreferenceMode {
 	preference, err := token.GetRoutingPreference()
 	if err != nil || preference == nil {
@@ -104,12 +100,6 @@ func (token *Token) GetRoutingPreferenceMode() common.RoutingPreferenceMode {
 	return common.NormalizeRoutingPreferenceMode(preference.Mode)
 }
 
-// SetRoutingPreferenceMode 把扁平枚举写进 routing_preference(JSON)。
-// 要清除整条偏好请用 SetRoutingPreference(nil)，本方法总是写入一个具体模式。
-//
-// balanced 也写显式 JSON 而非空串：Update() 用 Updates(struct) 会跳过零值，
-// 空串会导致「从 price 改回 balanced」静默写不进去。schedulerDefaultMode
-// 本身就是 balanced，显式写入与空值的调度行为完全一致。
 func (token *Token) SetRoutingPreferenceMode(mode common.RoutingPreferenceMode) error {
 	return token.SetRoutingPreference(&dto.RoutingPreference{
 		Mode: string(common.NormalizeRoutingPreferenceMode(string(mode))),

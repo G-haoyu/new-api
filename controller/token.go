@@ -50,13 +50,10 @@ func (r tokenRequest) validAutoPreference() bool {
 	return r.AutoPreference == nil || *r.AutoPreference == "" || slices.Contains(autorouter.Preferences, *r.AutoPreference)
 }
 
-// 刻意不暴露路由偏好：上游约定令牌列表/详情响应不携带该概念，读取走专用接口
-// GET /token/:id/routing-preference。token_routing_preference_test.go 用
-// strings.Contains(body, "routing_preference") 锁定了这一点，加任何含该子串的
-// 键都会被判定为泄露。
 type tokenResponse struct {
 	*model.Token
-	AutoGroups []string `json:"auto_groups"`
+	AutoGroups     []string                     `json:"auto_groups"`
+	PreferenceMode common.RoutingPreferenceMode `json:"preference_mode"`
 }
 
 func maxTokenQuota() int {
@@ -83,7 +80,11 @@ func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	if len(autoGroups) == 0 {
 		autoGroups = nil
 	}
-	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups}
+	return &tokenResponse{
+		Token:          &maskedToken,
+		AutoGroups:     autoGroups,
+		PreferenceMode: token.GetRoutingPreferenceMode(),
+	}
 }
 
 func buildMaskedTokenResponses(tokens []*model.Token) []*tokenResponse {
