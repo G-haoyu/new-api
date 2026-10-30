@@ -115,6 +115,7 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.GET("/self/groups", controller.GetUserGroups)
 				selfRoute.GET("/self", controller.GetSelf)
 				selfRoute.GET("/models", controller.GetUserModels)
+				selfRoute.GET("/models/meta", controller.GetUserModelsMeta)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.UpdateSelf)
 				selfRoute.DELETE("/self", middleware.DisableCache(), controller.DeleteSelf)
 				accessTokenRoute := selfRoute.Group("/access_tokens")
