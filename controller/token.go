@@ -384,6 +384,7 @@ func AddToken(c *gin.Context) {
 		CrossGroupRetry:    token.CrossGroupRetry,
 		AutoGroups:         token.AutoGroups,
 		Scene:              common.NormalizeTokenScene(string(token.Scene)),
+		RoutingMode:        common.NormalizeTokenRoutingMode(string(token.RoutingMode)),
 		Description:        token.Description,
 	}
 	cleanToken.AllowUserQuotaQuery = request.AllowUserQuotaQuery == nil || *request.AllowUserQuotaQuery
@@ -504,6 +505,7 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
 		cleanToken.Scene = common.NormalizeTokenScene(string(token.Scene))
+		cleanToken.RoutingMode = common.NormalizeTokenRoutingMode(string(token.RoutingMode))
 		cleanToken.Description = token.Description
 
 		if request.RoutingPreferenceMode != nil {
@@ -558,6 +560,7 @@ func UpdateToken(c *gin.Context) {
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},
 			{"auto_preference", previous.AutoPreference != cleanToken.AutoPreference},
 			{"scene", previous.Scene != cleanToken.Scene},
+			{"routing_mode", previous.RoutingMode != cleanToken.RoutingMode},
 			{"description", previous.Description != cleanToken.Description},
 			{"routing_preference", previous.RoutingPreference != cleanToken.RoutingPreference},
 		} {

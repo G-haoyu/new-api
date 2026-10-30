@@ -39,8 +39,9 @@ type Token struct {
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
 	// MaaS 改造字段
-	Scene       common.TokenScene `json:"scene" gorm:"type:varchar(16);default:'office'"`
-	Description string            `json:"description" gorm:"type:varchar(255);default:''"`
+	Scene       common.TokenScene       `json:"scene" gorm:"type:varchar(16);default:'office'"`
+	Description string                  `json:"description" gorm:"type:varchar(255);default:''"`
+	RoutingMode common.TokenRoutingMode `json:"routing_mode" gorm:"type:varchar(16);default:'smart'"`
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {
@@ -373,7 +374,8 @@ func (token *Token) Update() (err error) {
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
-		"allow_user_quota_query", "auto_preference", "scene", "description").Updates(token).Error
+		"allow_user_quota_query", "auto_preference", "scene", "description",
+		"routing_mode").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {
