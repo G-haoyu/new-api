@@ -359,7 +359,10 @@ func migrateDB() error {
 		&Redemption{},
 		&Ability{},
 		&ChannelModelStatus{},
+		&ChannelModelCapability{},
 		&ChannelModelEvent{},
+		&CapabilityGateEvent{},
+		&AutoRouteLog{},
 		&Log{},
 		&Midjourney{},
 		&TopUp{},
@@ -430,7 +433,10 @@ func migrateDBFast() error {
 		{&Redemption{}, "Redemption"},
 		{&Ability{}, "Ability"},
 		{&ChannelModelStatus{}, "ChannelModelStatus"},
+		{&ChannelModelCapability{}, "ChannelModelCapability"},
 		{&ChannelModelEvent{}, "ChannelModelEvent"},
+		{&CapabilityGateEvent{}, "CapabilityGateEvent"},
+		{&AutoRouteLog{}, "AutoRouteLog"},
 		{&Log{}, "Log"},
 		{&Midjourney{}, "Midjourney"},
 		{&TopUp{}, "TopUp"},
@@ -503,7 +509,7 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{})
+	return LOG_DB.AutoMigrate(&Log{}, &RelayAttempt{}, &CapabilityGateEvent{}, &AutoRouteLog{})
 }
 
 func migrateClickHouseLogDB() error {
@@ -512,6 +518,9 @@ func migrateClickHouseLogDB() error {
 		return err
 	}
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS fast_mode UInt8 DEFAULT 0").Error; err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS auto_routed UInt8 DEFAULT 0").Error; err != nil {
 		return err
 	}
 	if err := LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS iself_email String DEFAULT ''").Error; err != nil {
@@ -523,7 +532,19 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseRelayAttemptCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
-	return syncClickHouseTableTTL("relay_attempts", ttlDays)
+	if err := syncClickHouseTableTTL("relay_attempts", ttlDays); err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseCapabilityGateEventCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	if err := syncClickHouseTableTTL("capability_gate_events", ttlDays); err != nil {
+		return err
+	}
+	if err := LOG_DB.Exec(clickHouseAutoRouteLogCreateTableSQL(ttlDays)).Error; err != nil {
+		return err
+	}
+	return syncClickHouseTableTTL("auto_route_logs", ttlDays)
 }
 
 func clickHouseLogTTLDays() int {
@@ -566,6 +587,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	use_time Int32 DEFAULT 0,
 	is_stream UInt8 DEFAULT 0,
 	fast_mode UInt8 DEFAULT 0,
+	auto_routed UInt8 DEFAULT 0,
 	channel_id Int32 DEFAULT 0,
 	token_id Int32 DEFAULT 0,
 	`+"`group`"+` String DEFAULT '',
@@ -647,6 +669,59 @@ CREATE TABLE IF NOT EXISTS relay_attempts (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
 ORDER BY (created_at, channel_id, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+// clickHouseCapabilityGateEventCreateTableSQL mirrors the CapabilityGateEvent
+// struct; keep the two in sync by hand because AutoMigrate is bypassed for
+// ClickHouse. Rows expire through the table TTL, so no cleanup task touches it.
+func clickHouseCapabilityGateEventCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS capability_gate_events (
+	id Int64 DEFAULT 0,
+	`+"`mode`"+` String DEFAULT '',
+	`+"`model`"+` String DEFAULT '',
+	`+"`action`"+` String DEFAULT '',
+	channels_evaluated Int32 DEFAULT 0,
+	rejected_channels String DEFAULT '',
+	dimensions String DEFAULT '',
+	created_at Int64 DEFAULT 0,
+	rejected_count Int32 DEFAULT 0,
+	request_id String DEFAULT '',
+	user_id Int32 DEFAULT 0,
+	token_id Int32 DEFAULT 0,
+	using_group String DEFAULT ''
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+}
+
+// clickHouseAutoRouteLogCreateTableSQL mirrors the AutoRouteLog struct; keep the
+// two in sync by hand because AutoMigrate is bypassed for ClickHouse. Rows expire
+// through the table TTL (LOG_SQL_CLICKHOUSE_TTL_DAYS), not through the retention
+// option that the cleanup task applies to other databases.
+func clickHouseAutoRouteLogCreateTableSQL(ttlDays int) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS auto_route_logs (
+	id Int64 DEFAULT 0,
+	created_at Int64 DEFAULT 0,
+	request_id String DEFAULT '',
+	user_id Int32 DEFAULT 0,
+	token_id Int32 DEFAULT 0,
+	using_group String DEFAULT '',
+	outcome String DEFAULT '',
+	judgment String DEFAULT '',
+	`+"`source`"+` String DEFAULT '',
+	task_type String DEFAULT '',
+	`+"`model`"+` String DEFAULT '',
+	effort String DEFAULT '',
+	preference String DEFAULT '',
+	jev_latency_ms Int64 DEFAULT 0,
+	detail String DEFAULT ''
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
 }
 
 // syncClickHouseTableTTL reconciles the TTL of a log-database ClickHouse table.

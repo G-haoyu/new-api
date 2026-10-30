@@ -438,10 +438,43 @@ func SetApiRouter(router *gin.Engine) {
 			modelsRoute.GET("/missing", controller.GetMissingModels)
 			modelsRoute.GET("/", controller.GetAllModelsMeta)
 			modelsRoute.GET("/search", controller.SearchModelsMeta)
+			modelsRoute.GET("/capability-targets", controller.GetModelCapabilityTargets)
 			modelsRoute.GET("/:id", controller.GetModelMeta)
 			modelsRoute.POST("/", controller.CreateModelMeta)
 			modelsRoute.PUT("/", controller.UpdateModelMeta)
 			modelsRoute.DELETE("/:id", controller.DeleteModelMeta)
+		}
+
+		channelModelCapabilityRoute := apiRouter.Group("/channel-model-capabilities")
+		channelModelCapabilityRoute.Use(middleware.AdminAuth())
+		{
+			channelModelCapabilityRoute.GET("/", controller.GetChannelModelCapability)
+			channelModelCapabilityRoute.PUT("/", controller.SaveChannelModelCapability)
+			channelModelCapabilityRoute.PUT("/cost-multiplier", controller.SaveChannelModelCostMultiplier)
+			channelModelCapabilityRoute.DELETE("/", controller.DeleteChannelModelCapability)
+		}
+
+		capabilityGateRoute := apiRouter.Group("/capability-gate")
+		capabilityGateRoute.Use(middleware.AdminAuth())
+		{
+			capabilityGateRoute.GET("/events", controller.GetCapabilityGateEvents)
+		}
+
+		autoRouterRoute := apiRouter.Group("/autorouter")
+		autoRouterRoute.Use(middleware.RootAuth())
+		{
+			autoRouterRoute.GET("/status", controller.GetAutoRouterStatus)
+			autoRouterRoute.GET("/ranking", controller.GetAutoRouterRanking)
+			autoRouterRoute.POST("/ranking/refresh", controller.RefreshAutoRouterRanking)
+			autoRouterRoute.POST("/ranking/restore", controller.RestoreAutoRouterRanking)
+		}
+
+		// 选路日志只读，和使用日志一样管理员可看。
+		autoRouteLogRoute := apiRouter.Group("/auto-route-logs")
+		autoRouteLogRoute.Use(middleware.AdminAuth())
+		{
+			autoRouteLogRoute.GET("/", controller.GetAutoRouteLogs)
+			autoRouteLogRoute.GET("/:request_id", controller.GetAutoRouteLog)
 		}
 
 		// Deployments (model deployment management)

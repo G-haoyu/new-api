@@ -16,8 +16,10 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type ModelRequest struct {
@@ -74,11 +77,20 @@ func Distribute() func(c *gin.Context) {
 		if workload := strings.TrimSpace(modelRequest.Workload); workload != "" {
 			common.SetContextKey(c, constant.ContextKeySchedulerWorkload, workload)
 		}
+		// 能力门控在模型确定前构建：auto 用它筛候选模型，选定模型后再做渠道级收窄。
+		// 未配置、请求体不可用或没有任何模型级声明时返回 nil，行为与改动前一致。
+		capabilityGate := service.BuildCapabilityGate(c)
+		autoRouting := shouldSelectChannel && service.IsAutoRouterRequest(c, modelRequest.Model)
 		_, pinned, _ := constraints.ResolvedPin()
+		if pinned && autoRouting {
+			abortWithOpenAiMessage(c, http.StatusBadRequest, "model auto is not supported for a token pinned to a channel")
+			return
+		}
 		if !pinned {
 			// Select a channel for the user
 			// check token model mapping
 			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+			var tokenModelLimit map[string]bool
 			if modelLimitEnable {
 				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
 				if !ok {
@@ -86,12 +98,12 @@ func Distribute() func(c *gin.Context) {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
 					return
 				}
-				var tokenModelLimit map[string]bool
 				tokenModelLimit, ok = s.(map[string]bool)
 				if !ok {
 					tokenModelLimit = map[string]bool{}
 				}
-				if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) {
+				// "auto" is not a whitelist entry; it resolves to a whitelisted model below.
+				if !TokenModelLimitAllows(tokenModelLimit, modelRequest.Model) && !autoRouting {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
 					return
 				}
@@ -119,13 +131,153 @@ func Distribute() func(c *gin.Context) {
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, playgroundRequest.Group)
 					}
 				}
+
+				if autoRouting {
+					usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+					// The task and default lists hold every ranked model, each
+					// probed in up to five effort variants, so availability is
+					// memoized per request; without the memory cache every
+					// channel lookup is a query, so candidates are first narrowed
+					// to the groups' enabled models with one query per group.
+					var enabled map[string]bool
+					if !common.MemoryCacheEnabled {
+						enabled = map[string]bool{}
+						groups := []string{usingGroup}
+						if usingGroup == "auto" {
+							groups = service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+						}
+						for _, group := range groups {
+							for _, name := range model.GetGroupEnabledModels(group) {
+								enabled[name] = true
+							}
+						}
+					}
+					refusals := map[string]string{}
+					channels := map[string][]int{}
+					// 选路阶段估价：只读价格配置，不预扣、不写额度。
+					userSetting, _ := common.GetContextKeyType[dto.UserSetting](c, constant.ContextKeyUserSetting)
+					pricer := helper.NewRoutingPricer(c, func(candidate string) int64 {
+						return service.RoutingInputTokens(c, candidate)
+					}, userSetting.AcceptUnsetRatioModel)
+					quotes := map[string]helper.RoutingQuote{}
+					quoteOf := func(candidate string) helper.RoutingQuote {
+						if quote, seen := quotes[candidate]; seen {
+							return quote
+						}
+						// 令牌分组是 auto 时，计费分组是第一个对该模型有可用渠道的自动分组，倍率因模型而异；
+						// 固定分组下所有候选的倍率相同，在归一化里抵消。
+						userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+						billingGroup := usingGroup
+						if usingGroup == "auto" {
+							for _, group := range service.GetRequestAutoGroups(c, userGroup) {
+								if len(model.GetEnabledChannelIDsForGroupModel(group, candidate)) > 0 {
+									billingGroup = group
+									break
+								}
+							}
+						}
+						groupRatio, special := ratio_setting.GetGroupGroupRatio(userGroup, billingGroup)
+						if !special {
+							groupRatio = ratio_setting.GetGroupRatio(billingGroup)
+						}
+						quotes[candidate] = pricer.Quote(candidate, groupRatio)
+						return quotes[candidate]
+					}
+					channelsOf := func(candidate string) []int {
+						channelIDs, seen := channels[candidate]
+						if !seen {
+							channelIDs = usableChannelIDs(c, candidate, usingGroup, c.Request.URL.Path)
+							channels[candidate] = channelIDs
+						}
+						return channelIDs
+					}
+					// refusal 说明候选为什么不能服务这个请求，能服务时返回空串。候选按"模型+渠道"判定：
+					// 至少有一个可用渠道的生效能力满足请求，渠道级收窄在这里就生效，
+					// 不会选中一个渠道全被收窄淘汰的模型再 503。没有价格的模型计费时会直接失败，
+					// 所以任何路径都不选它们。判定顺序就是留痕里原因的优先级。
+					refusal := func(candidate string, ignoreClientReasoning bool) string {
+						key := candidate
+						if ignoreClientReasoning {
+							key += "|auto-reasoning"
+						}
+						if reason, seen := refusals[key]; seen {
+							return reason
+						}
+						reason := ""
+						switch {
+						case modelLimitEnable && !TokenModelLimitAllows(tokenModelLimit, candidate):
+							reason = autorouter.ReasonTokenLimit
+						case enabled != nil && !enabled[candidate] && !enabled[ratio_setting.FormatMatchingModelName(candidate)]:
+							reason = autorouter.ReasonGroupDisabled
+						case len(channelsOf(candidate)) == 0:
+							reason = autorouter.ReasonNoChannel
+						case quoteOf(candidate).Kind == helper.RoutingUnpriced:
+							reason = autorouter.ReasonUnpriced
+						case capabilityGate != nil && !capabilityGate.AllowsAnyChannel(candidate, channelsOf(candidate), ignoreClientReasoning):
+							reason = autorouter.ReasonCapability
+						}
+						refusals[key] = reason
+						return reason
+					}
+					result, err := service.ResolveAutoModel(c, service.AutoCandidates{
+						Serves: func(candidate string, ignoreClientReasoning bool) bool {
+							return refusal(candidate, ignoreClientReasoning) == ""
+						},
+						Why:      func(candidate string) string { return refusal(candidate, true) },
+						Channels: func(candidate string) []int { return channels[candidate] },
+						Price: func(candidate string) (float64, bool) {
+							quote := quoteOf(candidate)
+							return quote.PricePerMillion, quote.Kind == helper.RoutingPerToken
+						},
+					})
+					if capabilityGate != nil {
+						capabilityGate.LogSummary(c)
+					}
+					if err != nil {
+						if capabilityGate != nil && capabilityGate.AllEvaluatedRejected() {
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable, capabilityGate.ExplainModelRejection(), types.ErrorCodeModelNotFound)
+							return
+						}
+						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, err.Error(), types.ErrorCodeModelNotFound)
+						return
+					}
+					modelRequest.Model = result.ResolvedModel
+					// 透传渠道（全局或渠道级）不重建请求体而是原样转发存储的字节，
+					// 所以 auto 定下的结论要直接写进存储的请求体：model 改成解析后的模型
+					// （否则上游收到的仍是 "auto"，而计费和日志记的是解析后的模型），
+					// 推理档位写进入站协议自己的字段。非透传渠道也读这份请求体。
+					protocol, _ := service.AutoRouterProtocol(c.Request.URL.Path)
+					if err := rewriteJSONBody(c, func(body []byte) ([]byte, error) {
+						return autorouter.PatchBody(body, protocol, result.ResolvedModel, result.EffortAction, result.AppliedEffort)
+					}); err != nil {
+						abortWithOpenAiMessage(c, http.StatusInternalServerError, "failed to rewrite the auto routed request: "+err.Error())
+						return
+					}
+				}
 			}
 		}
 		if !pinned && shouldSelectChannel {
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectGroup string
+			allowedChannels := usableChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path)
+			if capabilityGate != nil {
+				narrowed := capabilityGate.FilterChannels(c, modelRequest.Model, allowedChannels)
+				if len(allowedChannels) > 0 && len(narrowed) == 0 {
+					capabilityGate.LogSummary(c)
+					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, capabilityGate.ExplainChannelRejection(modelRequest.Model), types.ErrorCodeModelNotFound)
+					return
+				}
+				if len(narrowed) != len(allowedChannels) {
+					constraints.AddFilter(taskdto.ChannelFilter{
+						Kind:              taskdto.FilterCapability,
+						AllowedChannelIDs: narrowed,
+					})
+					allowedChannels = narrowed
+				}
+				capabilityGate.LogSummary(c)
+			}
 			if service.SchedulerClient().Enabled {
-				setSchedulerAllowedChannelIDs(c, modelRequest.Model, usingGroup, c.Request.URL.Path)
+				common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, allowedChannels)
 			}
 			if service.SchedulerEnforcedForRequest(c) {
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
@@ -152,6 +304,10 @@ func Distribute() func(c *gin.Context) {
 					if candidateErr != nil || candidateChannel == nil || candidateChannel.Status != common.ChannelStatusEnabled ||
 						!channelSupportsRequestPath(candidateChannel, c.Request.URL.Path, modelRequest.Model) {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("scheduler candidate channel %d unavailable", candidate.ChannelID), types.ErrorCodeModelNotFound)
+						return
+					}
+					if !channelPassesCapabilityFilter(c, candidateChannel.Id) {
+						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, fmt.Sprintf("scheduler candidate channel %d rejected by capability constraints", candidate.ChannelID), types.ErrorCodeModelNotFound)
 						return
 					}
 					if usingGroup == "auto" {
@@ -224,10 +380,11 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
-// setSchedulerAllowedChannelIDs projects new-api's effective group/model
-// permissions into the Scheduler request. Scheduler ranks endpoints, but it
-// must never rank a channel outside the native permission scope.
-func setSchedulerAllowedChannelIDs(c *gin.Context, modelName, usingGroup, requestPath string) {
+// usableChannelIDs is new-api's effective group/model permission scope: the
+// enabled channels of the group (or auto groups) that serve the model on this
+// request path. Scheduler must never rank a channel outside it, and the auto
+// router only picks models that have one.
+func usableChannelIDs(c *gin.Context, modelName, usingGroup, requestPath string) []int {
 	groups := []string{usingGroup}
 	if usingGroup == "auto" {
 		groups = service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
@@ -248,7 +405,7 @@ func setSchedulerAllowedChannelIDs(c *gin.Context, modelName, usingGroup, reques
 		ids = append(ids, channelID)
 	}
 	slices.Sort(ids)
-	common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, ids)
+	return ids
 }
 
 // getModelFromRequest 从请求中读取模型信息
@@ -306,6 +463,23 @@ func channelMatchesExpectedTaskPlugin(c *gin.Context, channel *model.Channel, ex
 	}
 	plugin, ok := pinned.Generation.GetByChannelType(channel.Type)
 	return ok && plugin == pinned.Plugin
+}
+
+// channelPassesCapabilityFilter 复核渠道是否落在本请求的能力允许集内。
+// 没有能力过滤器时一律放行。
+func channelPassesCapabilityFilter(c *gin.Context, channelID int) bool {
+	for _, filter := range service.GetChannelConstraints(c).Filters {
+		if filter.Kind != taskdto.FilterCapability {
+			continue
+		}
+		if filter.AllowedChannelIDs == nil {
+			continue
+		}
+		if !slices.Contains(filter.AllowedChannelIDs, channelID) {
+			return false
+		}
+	}
+	return true
 }
 
 // channelSupportsRequestPath reports whether a channel can serve the request path.
@@ -403,7 +577,7 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 		return nil, errors.New("model must be provided once")
 	}
 
-	values := gjson.GetManyBytes(requestBody, "model", "group", "workload")
+	values := gjson.GetManyBytes(requestBody, "model", "group", "provider", "workload")
 	modelName, err := getJSONStringValue(values[0], "model")
 	if err != nil {
 		return nil, err
@@ -412,7 +586,28 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	workload, err := getJSONStringValue(values[2], "workload")
+	providerPresent := values[2].Exists() && values[2].Type != gjson.Null
+	cleanedBody, err := sjson.DeleteBytes(requestBody, "provider")
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove provider field: %w", err)
+	}
+	if string(cleanedBody) != string(requestBody) {
+		replacement, err := common.CreateBodyStorage(cleanedBody)
+		if err != nil {
+			return nil, err
+		}
+		_ = storage.Close()
+		c.Set(common.KeyBodyStorage, replacement)
+		storage = replacement
+	}
+	if providerPresent {
+		// 供应商层已移除。保留剥离动作是为了不让该字段透传给上游（部分供应商会 400），
+		// 但路由偏好不再生效，因此显式告警，避免管理员以为配置仍起作用。
+		logger.LogWarn(c.Request.Context(), common.LogText(
+			"request provider field is ignored: model=%s request_id=%s; provider routing has been removed",
+			modelName, c.GetString(common.RequestIdKey)))
+	}
+	workload, err := getJSONStringValue(values[3], "workload")
 	if err != nil {
 		return nil, err
 	}

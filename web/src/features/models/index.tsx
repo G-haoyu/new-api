@@ -35,6 +35,7 @@ import { ModelsDialogs } from './components/models-dialogs'
 import { ModelsPrimaryButtons } from './components/models-primary-buttons'
 import { ModelsProvider, useModels } from './components/models-provider'
 import { ModelsTable } from './components/models-table'
+import { CapabilitySettings } from './components/capability-settings'
 import { VendorsTable } from './components/vendors-table'
 import { useModelDeploymentSettings } from './hooks/use-model-deployment-settings'
 import { deploymentsQueryKeys } from './lib'
@@ -58,6 +59,10 @@ const SECTION_META: Record<
   deployments: {
     titleKey: 'Deployments',
     tabKey: 'Deployments',
+  },
+  capabilities: {
+    titleKey: 'Model channel capabilities',
+    tabKey: 'Capabilities',
   },
 }
 
@@ -116,6 +121,9 @@ function ModelsContent() {
       </Button>
     )
     content = <DeploymentsSection />
+  } else if (activeSection === 'capabilities') {
+    content = <CapabilitySettings />
+    actions = null
   }
 
   return (

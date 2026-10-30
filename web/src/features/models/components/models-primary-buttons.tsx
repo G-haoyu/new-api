@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useNavigate } from '@tanstack/react-router'
 import {
   Plus,
   MoreHorizontal,
@@ -41,6 +42,7 @@ import { useModels } from './models-provider'
 export function ModelsPrimaryButtons() {
   const { t } = useTranslation()
   const { setOpen, setCurrentRow } = useModels()
+  const navigate = useNavigate()
   const canPrice = useCanEditModelPricing()
 
   const handleCreateModel = () => {
@@ -64,6 +66,12 @@ export function ModelsPrimaryButtons() {
     setOpen('create-vendor') // Will be a separate vendors management dialog
   }
 
+  const handleManageCapabilities = () => {
+    void navigate({
+      to: '/models/$section',
+      params: { section: 'capabilities' },
+    })
+  }
   return (
     <div className='flex flex-wrap items-center gap-2'>
       <Button onClick={handleSync} variant='outline' size='sm'>
@@ -112,6 +120,13 @@ export function ModelsPrimaryButtons() {
 
           <DropdownMenuItem onClick={handleManageVendors}>
             {t('Manage Vendors')}
+            <DropdownMenuShortcut>
+              <Building2 className='h-4 w-4' />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+
+          <DropdownMenuItem onClick={handleManageCapabilities}>
+            {t('Model channel capabilities')}
             <DropdownMenuShortcut>
               <Building2 className='h-4 w-4' />
             </DropdownMenuShortcut>

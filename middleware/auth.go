@@ -701,6 +701,7 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, autoGroups)
 		}
 	}
+	common.SetContextKey(c, constant.ContextKeyTokenAutoPreference, token.AutoPreference)
 	if token.RoutingPreference != "" {
 		preference, err := token.GetRoutingPreference()
 		if err != nil {

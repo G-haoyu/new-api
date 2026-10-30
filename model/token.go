@@ -32,8 +32,10 @@ type Token struct {
 	AutoGroups         string  `json:"-" gorm:"type:text"`
 	// Scheduler 路由倾向(JSON)。整体读写用 Get/SetRoutingPreference，
 	// 只取排序模式用 Get/SetRoutingPreferenceMode。
-	RoutingPreference string         `json:"-" gorm:"type:text"`
-	DeletedAt         gorm.DeletedAt `gorm:"index"`
+	RoutingPreference string `json:"-" gorm:"type:text"`
+	// auto 选模型时能力与价格的偏好，空为平台默认；与 Scheduler 路由倾向无关
+	AutoPreference string         `json:"auto_preference" gorm:"type:varchar(16)"`
+	DeletedAt      gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
 	// MaaS 改造字段
@@ -381,7 +383,7 @@ func (token *Token) Update() (err error) {
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
-		"allow_user_quota_query", "scene", "description").Updates(token).Error
+		"allow_user_quota_query", "auto_preference", "scene", "description").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

@@ -18,10 +18,14 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestSignSchedulerRequestUsesCanonicalPayload(t *testing.T) {
@@ -44,6 +48,7 @@ func TestSignSchedulerRequestUsesCanonicalPayload(t *testing.T) {
 
 func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	var sentEstimate atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer scheduler-test" {
 			t.Fatalf("missing scheduler auth")
@@ -61,6 +66,7 @@ func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 		if request.MaxOutputTokens != 123 {
 			t.Fatalf("max output estimate=%d", request.MaxOutputTokens)
 		}
+		sentEstimate.Store(int64(request.EstimatedInputTokens))
 		if len(request.AllowedChannelIDs) != 2 || request.AllowedChannelIDs[0] != 4 || request.AllowedChannelIDs[1] != 7 {
 			t.Fatalf("allowed channel scope=%v", request.AllowedChannelIDs)
 		}
@@ -70,7 +76,9 @@ func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 	defer server.Close()
 	ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second, RuntimeHighWatermark: 0.75})
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","max_tokens":123}`))
+	body := `{"model":"m","max_tokens":123,"messages":[{"role":"user","content":"` +
+		strings.Repeat("summarize the scheduler retry policy ", 30) + `"}]}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	c.Set(common.RequestIdKey, "req1")
 	common.SetContextKey(c, constant.ContextKeyChannelId, 7)
 	common.SetContextKey(c, constant.ContextKeySchedulerAllowedChannelIDs, []int{4, 7})
@@ -78,6 +86,11 @@ func TestRunSchedulerShadowStoresOnlyMetadata(t *testing.T) {
 	if err := RunSchedulerShadow(c, "m", "default"); err != nil {
 		t.Fatal(err)
 	}
+	// 决策请求带的是选路阶段按这个模型估算的输入长度，不再恒为 0；同一个值留给重试预留和遥测用。
+	routingEstimate := RoutingInputTokens(c, "m")
+	require.Greater(t, routingEstimate, int64(100), "消息文本要算进去")
+	assert.Equal(t, routingEstimate, sentEstimate.Load())
+	assert.Equal(t, int(routingEstimate), common.GetContextKeyInt(c, constant.ContextKeyRoutingInputTokens))
 	if got := common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID); got != "d1" {
 		t.Fatalf("decision=%s", got)
 	}
@@ -504,6 +517,9 @@ func TestReportSchedulerShadowAttemptReleasesReservation(t *testing.T) {
 		if got.InputTokens != 13 || got.OutputTokens != 5 || !got.StreamStarted || got.TTFTMS != 42 {
 			t.Fatalf("attempt metrics=%+v", got)
 		}
+		if got.EstimatedTokens != 321 {
+			t.Fatalf("attempt estimate=%d, want the routing estimate", got.EstimatedTokens)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -524,6 +540,7 @@ func TestReportSchedulerShadowAttemptReleasesReservation(t *testing.T) {
 	common.SetContextKey(c, constant.ContextKeySchedulerOutputTokens, 5)
 	common.SetContextKey(c, constant.ContextKeySchedulerStreamStarted, true)
 	common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, 42)
+	common.SetContextKey(c, constant.ContextKeyRoutingInputTokens, 321)
 	c.Set(string(constant.ContextKeyRequestStartTime), time.Now().Add(-time.Millisecond))
 	c.Writer.WriteHeader(http.StatusOK)
 	if err := ReportSchedulerShadowAttempt(c); err != nil {
@@ -679,6 +696,73 @@ func TestRunSchedulerShadowRejectsIncompleteResponse(t *testing.T) {
 	}
 }
 
+func TestRunSchedulerShadowRecordsDecisionSpan(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	newTracedContext := func(t *testing.T) (*gin.Context, *tracetest.InMemoryExporter) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)))
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request = c.Request.WithContext(observability.ContextWithRuntimeForTest(c.Request.Context(), provider))
+		c.Set(common.RequestIdKey, "traced")
+		return c, exporter
+	}
+	attr := func(span tracetest.SpanStub, key string) string {
+		for _, kv := range span.Attributes {
+			if string(kv.Key) == key {
+				return kv.Value.AsString()
+			}
+		}
+		return ""
+	}
+
+	t.Run("shadow success", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"decision_id":"d9","catalog_version":"catalog-v1","candidates":[{"endpoint_id":"ep1","channel_id":7,"key_index":0,"model":"m","reason":["healthy"]}]}`))
+		}))
+		defer server.Close()
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "shadow", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter := newTracedContext(t)
+		common.SetContextKey(c, constant.ContextKeyChannelId, 7)
+		require.NoError(t, RunSchedulerShadow(c, "m", "default"))
+
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		span := spans[0]
+		assert.Equal(t, "newapi.scheduler.decide", span.Name)
+		assert.Equal(t, "shadow", attr(span, "langfuse.observation.metadata.mode"))
+		assert.Equal(t, "d9", attr(span, "langfuse.observation.metadata.decision_id"))
+		assert.Equal(t, "true", attr(span, "langfuse.observation.metadata.shadow_match"))
+		assert.Contains(t, attr(span, "langfuse.observation.input"), `"request_id":"traced"`)
+		assert.Contains(t, attr(span, "langfuse.observation.output"), `"endpoint_id":"ep1"`)
+		assert.Empty(t, attr(span, "langfuse.observation.level"))
+	})
+
+	t.Run("failure level follows mode", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "enforced", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter := newTracedContext(t)
+		require.Error(t, RunSchedulerShadow(c, "m", "default"))
+		spans := exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assert.Equal(t, "enforced", attr(spans[0], "langfuse.observation.metadata.mode"))
+		assert.Equal(t, codes.Error, spans[0].Status.Code)
+
+		ConfigureSchedulerClientForTest(SchedulerClientConfig{Enabled: true, Mode: "shadow", BaseURL: server.URL, Token: "scheduler-test", Timeout: time.Second})
+		c, exporter = newTracedContext(t)
+		require.Error(t, RunSchedulerShadow(c, "m", "default"))
+		spans = exporter.GetSpans()
+		require.Len(t, spans, 1)
+		assert.NotEqual(t, codes.Error, spans[0].Status.Code)
+		assert.Equal(t, "WARNING", attr(spans[0], "langfuse.observation.level"))
+	})
+}
+
 func TestSchedulerCandidateForRetryIsEnforcedOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -757,6 +841,7 @@ func TestSchedulerCanaryUsesStableHashAndDisabledConfig(t *testing.T) {
 
 func TestReserveSchedulerCandidateUsesDecisionAndAttempt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	var reserved atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/reserve" {
 			t.Fatalf("path=%s", r.URL.Path)
@@ -764,6 +849,11 @@ func TestReserveSchedulerCandidateUsesDecisionAndAttempt(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer scheduler-test" {
 			t.Fatalf("missing scheduler auth")
 		}
+		var request schedulerReserveRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode reserve request: %v", err)
+		}
+		reserved.Store(int64(request.EstimatedTokens))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"reservation_id":"retry-res"}`))
 	}))
@@ -773,12 +863,18 @@ func TestReserveSchedulerCandidateUsesDecisionAndAttempt(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(common.RequestIdKey, "req1")
 	common.SetContextKey(c, constant.ContextKeySchedulerDecisionID, "d1")
+	common.SetContextKey(c, constant.ContextKeyRoutingInputTokens, 321)
 	if err := ReserveSchedulerCandidate(c, SchedulerCandidate{EndpointID: "ep2"}, 2); err != nil {
 		t.Fatal(err)
 	}
 	if got := common.GetContextKeyString(c, constant.ContextKeySchedulerReservationID); got != "retry-res" {
 		t.Fatalf("reservation=%s", got)
 	}
+	assert.Equal(t, int64(321), reserved.Load(), "调度器还没给出预留估算时，重试预留用选路阶段的估算")
+
+	common.SetContextKey(c, constant.ContextKeySchedulerEstimatedTokens, 77)
+	require.NoError(t, ReserveSchedulerCandidate(c, SchedulerCandidate{EndpointID: "ep3"}, 3))
+	assert.Equal(t, int64(77), reserved.Load(), "调度器给出的预留估算优先")
 }
 
 func TestRecordSchedulerUsageNormalizesOpenAIAndClaudeFields(t *testing.T) {

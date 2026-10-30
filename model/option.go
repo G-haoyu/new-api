@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/performance_setting"
@@ -337,7 +338,7 @@ func validateOptionValue(key string, value string) error {
 	if key == "OtelCaptureMode" && !observability.IsValidContentCaptureMode(value) {
 		return fmt.Errorf("invalid OTel capture mode: %s (expected full, error, or off)", value)
 	}
-	return nil
+	return autorouter_setting.ValidateOption(key, value)
 }
 
 func normalizeOptionValue(key string, value string) string {

@@ -8,7 +8,14 @@ const (
 	ContextKeyEstimatedTokens ContextKey = "estimated_tokens"
 
 	ContextKeyOriginalModel    ContextKey = "original_model"
+	ContextKeyCapabilityGate   ContextKey = "capability_gate"
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
+
+	// 选路阶段共用的输入 token 估算器，见 service.RoutingInputTokens。
+	ContextKeyRoutingInputEstimator ContextKey = "routing_input_estimator"
+	// 选路阶段估算的输入 token 数，调度器的 decide、reserve 和 attempt 读它；
+	// 不复用 ContextKeyEstimatedTokens，那个会被 GenRelayInfo 当作计费用的初值。
+	ContextKeyRoutingInputTokens ContextKey = "routing_input_tokens"
 
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"
@@ -23,7 +30,13 @@ const (
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
 	// ContextKeyTokenRoutingPreference holds the token's parsed *dto.RoutingPreference for Scheduler.
 	ContextKeyTokenRoutingPreference ContextKey = "token_routing_preference"
-	ContextKeyTokenScene             ContextKey = "token_scene"
+	// ContextKeyTokenAutoPreference holds the token's capability/price preference for the "auto" model.
+	// It has nothing to do with the Scheduler's routing preference above.
+	ContextKeyTokenAutoPreference ContextKey = "token_auto_preference"
+	// ContextKeyAutoRouted is true once the "auto" model has been resolved to a concrete model
+	// for this request, so the usage log can tell it apart from one that asked for that model.
+	ContextKeyAutoRouted ContextKey = "auto_routed"
+	ContextKeyTokenScene ContextKey = "token_scene"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

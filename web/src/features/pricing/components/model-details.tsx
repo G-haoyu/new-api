@@ -27,6 +27,7 @@ import {
   Info,
   Layers,
   Maximize2,
+  Server,
   Sparkles,
   Timer,
   Zap,
@@ -111,6 +112,7 @@ import type {
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
+import { ModelDetailsChannels } from './model-details-channels'
 import { ModelDetailsPerformance } from './model-details-performance'
 
 // ----------------------------------------------------------------------------
@@ -532,7 +534,7 @@ function ModelBackendProviderSection(props: { model: PricingModel }) {
 
   if (model.vendor_name) {
     cells.push(
-      <CatalogInfoCell key='provider' label={t('Provider')}>
+      <CatalogInfoCell key='provider' label={t('Model vendor')}>
         <CatalogTextValue>{model.vendor_name}</CatalogTextValue>
       </CatalogInfoCell>
     )
@@ -639,8 +641,8 @@ export function ModelSquareDetailPage(props: ModelDetailsContentProps) {
   const { t } = useTranslation()
   const model = props.model
   const modelIcon = model.icon || model.vendor_icon
-  const displayInputPrice = formatPrice(model, 'input', 'M', false, 1, 1)
-  const displayOutputPrice = formatPrice(model, 'output', 'M', false, 1, 1)
+  const inputPrice = formatPrice(model, 'input', 'M', false, 1, 1)
+  const outputPrice = formatPrice(model, 'output', 'M', false, 1, 1)
   const priceSource = t('Platform default price')
   const context = model.context_length
     ? formatCatalogTokenCount(model.context_length)
@@ -722,13 +724,13 @@ export function ModelSquareDetailPage(props: ModelDetailsContentProps) {
           />
           <ModelSquareMetric
             label={t('Input')}
-            value={`${displayInputPrice} / 1M`}
+            value={`${inputPrice} / 1M`}
             icon={Zap}
             hint={priceSource}
           />
           <ModelSquareMetric
             label={t('Output')}
-            value={`${displayOutputPrice} / 1M`}
+            value={`${outputPrice} / 1M`}
             icon={Zap}
             hint={priceSource}
           />
@@ -745,39 +747,27 @@ export function ModelSquareDetailPage(props: ModelDetailsContentProps) {
         </div>
       </header>
 
-      <div className='grid gap-8 lg:grid-cols-[180px_minmax(0,1fr)]'>
-        <aside className='lg:sticky lg:top-4 lg:self-start'>
-          <nav className='flex gap-1 overflow-x-auto lg:flex-col'>
-            {[['api', t('API'), Code2]].map(([id, label, Icon]) => {
-              const NavIcon = Icon as React.ComponentType<{
-                className?: string
-              }>
-              return (
-                <a
-                  key={id as string}
-                  href={`#${id}`}
-                  className='text-muted-foreground hover:bg-muted hover:text-foreground flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors'
-                >
-                  <NavIcon className='size-4' />
-                  {label as string}
-                </a>
-              )
-            })}
-          </nav>
-        </aside>
+      {Array.isArray(model.channels) && (
+        <section id='channels' className='scroll-mt-6 space-y-4'>
+          <h2 className='flex items-center gap-2 text-xl font-semibold'>
+            <Server className='size-5' />
+            {t('Serving channels')}
+          </h2>
+          <div className='bg-card rounded-xl border p-4 sm:p-6'>
+            <ModelDetailsChannels model={model} />
+          </div>
+        </section>
+      )}
 
-        <main className='min-w-0 space-y-10'>
-          <section id='api' className='scroll-mt-6 space-y-4'>
-            <h2 className='flex items-center gap-2 text-xl font-semibold'>
-              <Code2 className='size-5' />
-              {t('API')}
-            </h2>
-            <div className='bg-card rounded-xl border p-4 sm:p-6'>
-              <ModelDetailsApi model={model} endpointMap={props.endpointMap} />
-            </div>
-          </section>
-        </main>
-      </div>
+      <section id='api' className='scroll-mt-6 space-y-4'>
+        <h2 className='flex items-center gap-2 text-xl font-semibold'>
+          <Code2 className='size-5' />
+          {t('API')}
+        </h2>
+        <div className='bg-card rounded-xl border p-4 sm:p-6'>
+          <ModelDetailsApi model={model} endpointMap={props.endpointMap} />
+        </div>
+      </section>
     </div>
   )
 }
@@ -1202,7 +1192,7 @@ function GroupPricingSection(props: GroupPricingSectionProps) {
       <SectionTitle>{t('Pricing by Group')}</SectionTitle>
       <Tabs key={props.model.model_name} defaultValue={variants[0].plugin_key}>
         <TabsList
-          aria-label={t('Provider')}
+          aria-label={t('Billing plugin')}
           className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'
         >
           {variants.map((variant) => (
@@ -1638,7 +1628,7 @@ function ProviderGroupPricingSection(
   )
 }
 
-const TAB_VALUES = ['overview', 'performance', 'api'] as const
+const TAB_VALUES = ['overview', 'performance', 'channels', 'api'] as const
 type TabValue = (typeof TAB_VALUES)[number]
 
 const TAB_META: Record<
@@ -1647,6 +1637,7 @@ const TAB_META: Record<
 > = {
   overview: { icon: Info, labelKey: 'Overview' },
   performance: { icon: HeartPulse, labelKey: 'Performance' },
+  channels: { icon: Server, labelKey: 'Channels' },
   api: { icon: Code2, labelKey: 'API' },
 }
 
@@ -1680,13 +1671,25 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
     simpleTaskPricing ||
     taskTiers.length === 0
 
+  // The pricing page predates the channel listing; only the model square
+  // publishes channels, so hide the tab instead of showing a misleading empty state.
+  const hasChannelData = Array.isArray(props.model.channels)
+  const tabValues = hasChannelData
+    ? TAB_VALUES
+    : TAB_VALUES.filter((value) => value !== 'channels')
+
   return (
     <div className='@container/details space-y-4'>
       <ModelHeader model={props.model} />
 
       <Tabs defaultValue='overview' className='gap-4'>
-        <TabsList className='bg-muted/60 grid w-full grid-cols-3 gap-1 rounded-lg p-1 group-data-horizontal/tabs:h-auto'>
-          {TAB_VALUES.map((value) => {
+        <TabsList
+          className={cn(
+            'bg-muted/60 grid w-full gap-1 rounded-lg p-1 group-data-horizontal/tabs:h-auto',
+            hasChannelData ? 'grid-cols-4' : 'grid-cols-3'
+          )}
+        >
+          {tabValues.map((value) => {
             const Icon = TAB_META[value].icon
             return (
               <TabsTrigger
@@ -1744,6 +1747,12 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
         <TabsContent value='performance' className='outline-none'>
           <ModelDetailsPerformance model={props.model} />
         </TabsContent>
+
+        {hasChannelData && (
+          <TabsContent value='channels' className='outline-none'>
+            <ModelDetailsChannels model={props.model} />
+          </TabsContent>
+        )}
 
         <TabsContent value='api' className='outline-none'>
           <ModelDetailsApi

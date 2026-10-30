@@ -36,7 +36,7 @@ services:
       - CONSUL_HTTP_TOKEN=${CONSUL_HTTP_TOKEN:-}
       # Optional exact key under clickhouse in the decoded KV JSON (e.g. ch_maas_log).
       - CONSUL_CLICKHOUSE_CONFIG_KEY=${CONSUL_CLICKHOUSE_CONFIG_KEY:-}
-      - oRELAY_ATTEMPT_LOG_ENABLED=true
+      - RELAY_ATTEMPT_LOG_ENABLED=true
       - RELAY_ATTEMPT_LOG_SAMPLE_RATE=1
       - RELAY_ATTEMPT_LOG_BUFFER_SIZE=4096
       - RELAY_ATTEMPT_LOG_BATCH_SIZE=200

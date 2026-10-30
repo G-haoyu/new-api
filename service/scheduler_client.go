@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/observability"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 )
@@ -968,7 +969,7 @@ func ReserveSchedulerCandidate(c *gin.Context, candidate SchedulerCandidate, att
 	}
 	estimatedTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerEstimatedTokens)
 	if estimatedTokens <= 0 {
-		estimatedTokens = common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+		estimatedTokens = common.GetContextKeyInt(c, constant.ContextKeyRoutingInputTokens)
 	}
 	body := schedulerReserveRequest{RequestID: c.GetString(common.RequestIdKey), DecisionID: common.GetContextKeyString(c, constant.ContextKeySchedulerDecisionID), AttemptNo: attemptNo, EndpointID: candidate.EndpointID, EstimatedTokens: estimatedTokens}
 	payload, err := common.Marshal(body)
@@ -1091,7 +1092,7 @@ func schedulerEffectivePolicy(c *gin.Context) (map[string]any, error) {
 // RunSchedulerShadow is best-effort by design: errors never alter native
 // channel selection. A successful response is stored only as request metadata;
 // Enforced candidate consumption is a separate, explicitly gated phase.
-func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
+func RunSchedulerShadow(c *gin.Context, modelName, group string) (err error) {
 	if SchedulerKillSwitchActive() {
 		return nil
 	}
@@ -1099,6 +1100,26 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if !config.Enabled || len(config.URLs()) == 0 || config.Token == "" {
 		return nil
 	}
+	enforced := SchedulerEnforcedForRequest(c)
+	mode := "shadow"
+	if enforced {
+		mode = "enforced"
+	}
+	otelRuntime := observability.FromContext(c.Request.Context())
+	decideCtx, decideSpan := otelRuntime.StartSchedulerDecision(c.Request.Context())
+	decide := observability.Observation{Metadata: map[string]string{"mode": mode}}
+	defer func() {
+		if err != nil {
+			// A shadow decision never affects routing, so its failure is only
+			// a degradation; an enforced one fails the request.
+			if enforced {
+				decide.Err = err
+			} else {
+				decide.Warning = err.Error()
+			}
+		}
+		otelRuntime.FinishObservation(decideSpan, decide)
+	}()
 	if !schedulerCircuitAllows(time.Now()) {
 		return ErrSchedulerTemporarilyUnavailable
 	}
@@ -1115,7 +1136,9 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 		requestID = common.NewRequestId()
 		c.Set(common.RequestIdKey, requestID)
 	}
-	estimatedInput := common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+	// RoutingInputTokens 已限制在 int32 范围内，转 int 不会溢出。后面重试预留和尝试遥测读同一个值。
+	estimatedInput := int(RoutingInputTokens(c, modelName))
+	common.SetContextKey(c, constant.ContextKeyRoutingInputTokens, estimatedInput)
 	maxOutput := schedulerMaxOutputTokens(c)
 	body := schedulerRequest{RequestID: requestID, UserID: int64(c.GetInt("id")), TokenID: int64(c.GetInt("token_id")), Group: group, Model: modelName, Workload: common.GetContextKeyString(c, constant.ContextKeySchedulerWorkload), Capabilities: schedulerCapabilities(c), Policy: policy, EstimatedInputTokens: estimatedInput, MaxOutputTokens: maxOutput, PreferredChannelID: common.GetContextKeyInt(c, constant.ContextKeySchedulerAffinityChannelID)}
 	if affinity, ok := GetChannelAffinityStatsContext(c); ok {
@@ -1124,11 +1147,12 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if allowed, ok := common.GetContextKeyType[[]int](c, constant.ContextKeySchedulerAllowedChannelIDs); ok {
 		body.AllowedChannelIDs = append([]int(nil), allowed...)
 	}
+	decide.Input = body
 	payload, err := common.Marshal(body)
 	if err != nil {
 		return err
 	}
-	outcome, err := schedulerDoRequestWithFallback(c.Request.Context(), config, http.MethodPost, "/v1/schedule", payload, true)
+	outcome, err := schedulerDoRequestWithFallback(decideCtx, config, http.MethodPost, "/v1/schedule", payload, true)
 	if err != nil {
 		return err
 	}
@@ -1142,6 +1166,8 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 	if err := common.DecodeJson(bytes.NewReader(outcome.body), &scheduled); err != nil {
 		return err
 	}
+	decide.Output = scheduled
+	decide.Metadata["decision_id"] = scheduled.DecisionID
 	if scheduled.DecisionID == "" || scheduled.CatalogVersion == "" || len(scheduled.Candidates) == 0 {
 		return fmt.Errorf("scheduler returned incomplete response")
 	}
@@ -1173,6 +1199,9 @@ func RunSchedulerShadow(c *gin.Context, modelName, group string) error {
 		}
 	}
 	common.SetContextKey(c, constant.ContextKeySchedulerShadowMatch, match)
+	if !enforced {
+		decide.Metadata["shadow_match"] = strconv.FormatBool(match)
+	}
 	schedulerCircuitSuccess(time.Now())
 	return nil
 }
@@ -1433,7 +1462,7 @@ func schedulerEstimatedTokens(c *gin.Context) int {
 	if estimate := common.GetContextKeyInt(c, constant.ContextKeySchedulerEstimatedTokens); estimate > 0 {
 		return estimate
 	}
-	return common.GetContextKeyInt(c, constant.ContextKeyEstimatedTokens)
+	return common.GetContextKeyInt(c, constant.ContextKeyRoutingInputTokens)
 }
 
 func postSchedulerAttempt(c *gin.Context, config SchedulerClientConfig, attempt schedulerAttempt) error {

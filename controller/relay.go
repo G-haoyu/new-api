@@ -33,7 +33,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -268,7 +267,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		attemptCtx := attemptParentCtx
 		var attemptSpan trace.Span
 		if otelRuntime != nil {
-			attemptCtx, attemptSpan = otelRuntime.StartAttempt(attemptParentCtx, relayInfo, channel.Id, channel.Type, channel.Name)
+			attemptCtx, attemptSpan = otelRuntime.StartAttempt(attemptParentCtx)
 		}
 		func() {
 			c.Request = c.Request.WithContext(attemptCtx)
@@ -287,14 +286,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				newAPIError = relayHandler(c, relayInfo)
 			}
 		}()
-		if otelRuntime != nil {
-			attemptSpan.SetAttributes(attribute.String("new_api.upstream_model", relayInfo.UpstreamModelName))
-			if newAPIError == nil {
-				otelRuntime.FinishSpan(attemptSpan, nil)
-			} else {
-				otelRuntime.FinishSpan(attemptSpan, newAPIError)
-			}
-		}
 		attemptStatus := http.StatusOK
 		if newAPIError != nil {
 			attemptStatus = newAPIError.StatusCode
@@ -305,6 +296,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		if streamStarted && !relayInfo.FirstResponseTime.IsZero() && !relayInfo.StartTime.IsZero() {
 			common.SetContextKey(c, constant.ContextKeySchedulerTTFTMS, int(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
+		}
+		if otelRuntime != nil {
+			var attemptErr error
+			if newAPIError != nil {
+				attemptErr = newAPIError
+			}
+			var streamStatus *relaycommon.StreamStatus
+			if streamStarted {
+				streamStatus = relayInfo.StreamStatus
+			}
+			otelRuntime.FinishAttempt(attemptCtx, attemptSpan, observability.AttemptTarget{
+				RetryIndex:    relayInfo.RetryIndex,
+				ChannelID:     channel.Id,
+				ChannelName:   channel.Name,
+				ChannelType:   channel.Type,
+				UpstreamModel: relayInfo.UpstreamModelName,
+			}, attemptStatus, streamStatus, attemptErr)
 		}
 		inputTokens := common.GetContextKeyInt(c, constant.ContextKeySchedulerInputTokens)
 		if inputTokens == 0 {

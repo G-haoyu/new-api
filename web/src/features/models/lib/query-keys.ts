@@ -41,6 +41,18 @@ export const vendorsQueryKeys = {
   detail: (id: number) => [...vendorsQueryKeys.all, 'detail', id] as const,
 }
 
+export const capabilityTargetsQueryKeys = {
+  all: ['capability-targets'] as const,
+  list: (filters?: Record<string, unknown>) =>
+    [...capabilityTargetsQueryKeys.all, 'list', filters] as const,
+}
+
+export const channelModelCapabilityQueryKeys = {
+  all: ['channel-model-capabilities'] as const,
+  detail: (channelId: number, model: string) =>
+    [...channelModelCapabilityQueryKeys.all, channelId, model] as const,
+}
+
 /**
  * React Query cache keys for prefill groups
  */

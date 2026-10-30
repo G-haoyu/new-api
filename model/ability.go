@@ -349,9 +349,19 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 		}
 	}
 
+	if err := pruneChannelModelCapabilitiesLocked(tx, channel.Id, models_); err != nil {
+		if isNewTx {
+			tx.Rollback()
+		}
+		return err
+	}
+
 	// 如果是新创建的事务，需要提交
 	if isNewTx {
-		return tx.Commit().Error
+		if err := tx.Commit().Error; err != nil {
+			return err
+		}
+		return InitCapabilityCache()
 	}
 
 	return nil

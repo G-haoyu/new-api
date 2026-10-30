@@ -554,6 +554,10 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 			tx.Rollback()
 			return 0, err
 		}
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelModelCapability{}).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 		result := tx.Where("id in (?)", chunk).Delete(&Channel{})
 		if result.Error != nil {
 			tx.Rollback()
@@ -571,6 +575,7 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	for _, channelID := range ids {
 		cacheClearChannelModelStatuses(channelID)
 	}
+	_ = InitCapabilityCache()
 	return deletedCount, nil
 }
 
@@ -614,13 +619,10 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
-	var err error
-	err = DB.Create(channel).Error
-	if err != nil {
+	if err := DB.Create(channel).Error; err != nil {
 		return err
 	}
-	err = channel.AddAbilities(nil)
-	return err
+	return channel.AddAbilities(nil)
 }
 
 func (channel *Channel) Update() error {
@@ -701,6 +703,10 @@ func (channel *Channel) Delete() error {
 		tx.Rollback()
 		return err
 	}
+	if err := tx.Where("channel_id = ?", channel.Id).Delete(&ChannelModelCapability{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Where("channel_id = ?", channel.Id).Delete(&Ability{}).Error; err != nil {
 		tx.Rollback()
 		return err
@@ -713,6 +719,7 @@ func (channel *Channel) Delete() error {
 		return err
 	}
 	cacheClearChannelModelStatuses(channel.Id)
+	_ = InitCapabilityCache()
 	return nil
 }
 
@@ -1183,7 +1190,8 @@ func (channel *Channel) validateCostMultiplierModels(costMultiplier map[string]f
 	return nil
 }
 
-func (channel *Channel) GetSetting() dto.ChannelSettings {	setting := dto.ChannelSettings{}
+func (channel *Channel) GetSetting() dto.ChannelSettings {
+	setting := dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {

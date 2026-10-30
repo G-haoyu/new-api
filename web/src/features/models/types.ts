@@ -26,6 +26,7 @@ import { z } from 'zod'
  * Bound channel information
  */
 export interface BoundChannel {
+  id: number
   name: string
   type: number
 }
@@ -46,6 +47,7 @@ export interface Model {
   tags?: string
   vendor_id?: number
   endpoints?: string
+  capabilities?: string
   context_length?: number
   parameter_count?: string
   release_date?: string
@@ -76,6 +78,46 @@ export interface Vendor {
   status: number
   created_time: number
   updated_time: number
+}
+
+/** 能力设置页的模型 → 渠道清单。 */
+export interface CapabilityTargetChannel {
+  id: number
+  name: string
+  type: number
+  configured: boolean
+  /** 渠道对该模型的费用倍率；0 表示未配置（按 1 处理）。 */
+  cost_multiplier: number
+}
+
+export interface CapabilityTarget {
+  id: number
+  model_name: string
+  /** 命中的模型级声明行名称；精确模型时与 model_name 相同。 */
+  declaration_name: string
+  /** 声明行的匹配规则：0 精确、1 前缀、2 包含、3 后缀。 */
+  name_rule: number
+  capabilities?: string
+  /** 没有模型级声明命中时只能配置渠道倍率，不能收窄能力。 */
+  declared: boolean
+  channels: CapabilityTargetChannel[]
+}
+
+export interface CapabilityTargetsPage {
+  items: CapabilityTarget[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ChannelModelCapabilityDetail {
+  channel_id: number
+  model: string
+  configured: boolean
+  capabilities: string
+  model_capabilities: string
+  effective: string
+  cost_multiplier: number
 }
 
 /**
@@ -356,6 +398,7 @@ export type ModelTabCategory =
   | 'metadata'
   | 'vendors'
   | 'deployments'
+  | 'capabilities'
 
 /**
  * Deployment entity from API

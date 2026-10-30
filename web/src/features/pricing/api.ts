@@ -18,11 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
 
-import type {
-  ModelSquareData,
-  PricingData,
-  PricingModel,
-} from './types'
+import type { ModelSquareData, PricingData, PricingModel } from './types'
 
 // ----------------------------------------------------------------------------
 // Pricing APIs

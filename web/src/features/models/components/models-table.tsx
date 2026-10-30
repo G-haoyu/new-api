@@ -21,7 +21,11 @@ import { getRouteApi } from '@tanstack/react-router'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { DataTablePage, useDataTable } from '@/components/data-table'
+import {
+  DataTableDetailRow,
+  DataTablePage,
+  useDataTable,
+} from '@/components/data-table'
 import { ErrorState } from '@/components/error-state'
 import { useModelPricing } from '@/features/model-pricing/api'
 import { useMediaQuery } from '@/hooks'
@@ -36,6 +40,7 @@ import { DEFAULT_PAGE_SIZE } from '../constants'
 import { modelsQueryKeys, vendorsQueryKeys } from '../lib'
 import type { ModelSquareState } from '../types'
 import { DataTableBulkActions } from './data-table-bulk-actions'
+import { ModelMatchedModels } from './model-matched-models'
 import { useModelsColumns } from './models-columns'
 import { useModels } from './models-provider'
 
@@ -181,11 +186,7 @@ export function ModelsTable() {
   let pricingState: 'loading' | 'error' | undefined
   if (pricingQuery.isError) pricingState = 'error'
   else if (pricingQuery.isLoading) pricingState = 'loading'
-  const columns = useModelsColumns(
-    vendors,
-    pricingQuery.data,
-    pricingState
-  )
+  const columns = useModelsColumns(vendors, pricingQuery.data, pricingState)
 
   // React Table instance
   const { table } = useDataTable({
@@ -213,6 +214,7 @@ export function ModelsTable() {
     onGlobalFilterChange,
     manualPagination: true,
     manualFiltering: true,
+    withExpandedRowModel: true,
     ensurePageInRange,
   })
 
@@ -253,6 +255,11 @@ export function ModelsTable() {
       }
       skeletonKeyPrefix='model-skeleton'
       applyHeaderSize
+      renderRowDetail={(row) => (
+        <DataTableDetailRow row={row}>
+          <ModelMatchedModels model={row.original} />
+        </DataTableDetailRow>
+      )}
       pinnedColumns={[
         { columnId: 'model_name', side: 'left' },
         { columnId: 'actions', side: 'right' },

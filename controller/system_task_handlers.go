@@ -14,22 +14,106 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/autorouter/modelrank"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/autorouter_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
-// update, and async task polling (Midjourney / Suno / video) jobs into the
+// update, auto router ranking and async task polling (Midjourney / Suno /
+// video) jobs into the
 // system task framework so a DB lease dedups execution across multiple master
 // instances and each run is recorded as one task row. Call this before
 // service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
 	service.RegisterSystemTaskHandler(channelModelRecoveryHandler{})
+	service.RegisterSystemTaskHandler(capabilityGateEventCleanupHandler{})
+	service.RegisterSystemTaskHandler(autoRouteLogCleanupHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(autoRouterRankHandler{})
 	service.RegisterSystemTaskHandler(ssoUserSyncHandler{})
+}
+
+// autoRouterRankHandler regenerates the auto router's task → model lists from
+// public leaderboards. One node builds them under the task lease and writes
+// the options; the others pick them up through the option sync, so a new
+// ranking takes effect everywhere without a restart.
+type autoRouterRankHandler struct{}
+
+func (autoRouterRankHandler) Type() string { return model.SystemTaskTypeAutoRouterRank }
+
+func (autoRouterRankHandler) Enabled() bool {
+	setting := autorouter_setting.GetAutoRouterSetting()
+	return setting.Enabled && setting.RankRefreshEnabled && setting.Connections().RankKeysReady()
+}
+
+// Interval is the refresh period, or a short retry delay while the stored
+// ranking predates the current task types, so a new taxonomy gets its ranking
+// without waiting a whole period.
+func (autoRouterRankHandler) Interval() time.Duration {
+	setting := autorouter_setting.GetAutoRouterSetting()
+	if !setting.RankingCurrent() {
+		return autoRouterRankRetryInterval
+	}
+	return time.Duration(max(setting.RankRefreshIntervalHours, 1)) * time.Hour
+}
+
+const autoRouterRankRetryInterval = 10 * time.Minute
+
+func (autoRouterRankHandler) NewPayload() any { return nil }
+
+// Run leaves the current lists in place when any source fails, so a failed
+// refresh only delays the next ranking. rank_sources is written last and
+// marks a complete update.
+func (autoRouterRankHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	connections := autorouter_setting.GetAutoRouterSetting().Connections()
+	cfg := modelrank.DefaultConfig()
+	cfg.AAKey = connections.ArtificialAnalysisKey.Value
+	cfg.DAKey = connections.DesignArenaKey.Value
+	cfg.OpenRouterKey = connections.OpenRouterKey.Value
+	mapping, err := modelrank.Build(ctx, cfg)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	taskScores := make(map[string]map[string]float64, len(mapping.Evidence))
+	for taskType, entries := range mapping.Evidence {
+		taskScores[taskType] = make(map[string]float64, len(entries))
+		for _, entry := range entries {
+			taskScores[taskType][entry.Model] = entry.Score
+		}
+	}
+	options := []struct {
+		key   string
+		value any
+	}{
+		{"autorouter_setting.task_models", mapping.TaskModels},
+		{"autorouter_setting.task_scores", taskScores},
+		{"autorouter_setting.default_models", mapping.DefaultModels},
+		{"autorouter_setting.rank_sources", mapping.Sources},
+	}
+	for _, option := range options {
+		value, err := common.Marshal(option.value)
+		if err == nil {
+			err = model.UpdateOption(option.key, string(value))
+		}
+		if err != nil {
+			finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+			return
+		}
+	}
+	summary := map[string]any{"rank_sources": mapping.Sources, "default_models": len(mapping.DefaultModels)}
+	if len(mapping.StaleMetrics) > 0 {
+		summary["stale_metrics"] = mapping.StaleMetrics
+	}
+	for profile, models := range mapping.TaskModels {
+		summary[profile] = map[string]any{"models": len(models), "top": models[:min(len(models), 3)]}
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 type channelModelRecoveryHandler struct{}
@@ -65,6 +149,63 @@ func (channelModelRecoveryHandler) Interval() time.Duration {
 }
 
 func (channelModelRecoveryHandler) NewPayload() any { return nil }
+
+// capabilityGateEventCleanupHandler 清理超过保留期的能力门控事件。
+// 它必须是独立任务：挂在渠道恢复任务上时，只要断路器没开、也没有过期的
+// 渠道事件，那个任务就根本不会被调度，门控事件会永远留在库里。
+// ClickHouse 日志库靠表 TTL 过期，HasCapabilityGateEventsBefore 对它恒为 false。
+type capabilityGateEventCleanupHandler struct{}
+
+func (capabilityGateEventCleanupHandler) Type() string {
+	return model.SystemTaskTypeCapabilityGateClean
+}
+
+func (capabilityGateEventCleanupHandler) Enabled() bool {
+	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
+	return model.HasCapabilityGateEventsBefore(time.Now().Add(-retention).Unix())
+}
+
+func (capabilityGateEventCleanupHandler) Interval() time.Duration { return time.Hour }
+
+func (capabilityGateEventCleanupHandler) NewPayload() any { return nil }
+
+func (capabilityGateEventCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	retention := time.Duration(operation_setting.GetCapabilityGateSetting().EventRetentionDays) * 24 * time.Hour
+	deleted, err := model.CleanupCapabilityGateEvents(ctx, time.Now().Add(-retention).Unix())
+	summary := map[string]any{"deleted": deleted}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+// autoRouteLogCleanupHandler 清理超过保留期的选路日志。和门控事件的清理一样是独立任务，
+// 不依赖 auto 是否开启：关掉 auto 之后遗留的日志仍然要按保留期过期。
+// ClickHouse 日志库靠表 TTL 过期，HasAutoRouteLogsBefore 对它恒为 false。
+type autoRouteLogCleanupHandler struct{}
+
+func (autoRouteLogCleanupHandler) Type() string { return model.SystemTaskTypeAutoRouteLogClean }
+
+func (autoRouteLogCleanupHandler) Enabled() bool {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	return model.HasAutoRouteLogsBefore(time.Now().Add(-retention).Unix())
+}
+
+func (autoRouteLogCleanupHandler) Interval() time.Duration { return time.Hour }
+
+func (autoRouteLogCleanupHandler) NewPayload() any { return nil }
+
+func (autoRouteLogCleanupHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	retention := autorouter_setting.GetAutoRouterSetting().RouteLogRetention()
+	deleted, err := model.CleanupAutoRouteLogs(ctx, time.Now().Add(-retention).Unix())
+	summary := map[string]any{"deleted": deleted}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
 
 func (channelModelRecoveryHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary, err := runChannelModelRecoveryTask(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
