@@ -115,7 +115,7 @@ var questions = map[string]jevQuestion{
 	},
 	"mode": {
 		Type:         "choice",
-		Instructions: "只根据这条用户消息本身判断：用户更看重结果的质量与可靠，还是更看重省钱和速度。没有明显倾向就选均衡；任务本身的难易不是依据，不要因为任务简单或复杂而改变选择。",
+		Instructions: "只根据这条用户消息本身判断：用户更看重结果的质量与可靠，还是更看重省钱和速度。",
 		Criteria: map[string]string{
 			PreferenceCapability: "明确强调结果必须正确、严谨、完整，或事关重大：线上事故、生产环境改动、正式提交的材料、涉及资金或合规，希望用最好的模型",
 			PreferenceBalanced:   "没有表现出对质量或成本的特别要求，或者两方面都兼顾",
