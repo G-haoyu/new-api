@@ -36,6 +36,7 @@ const (
 	// ContextKeyAutoRouted is true once the "auto" model has been resolved to a concrete model
 	// for this request, so the usage log can tell it apart from one that asked for that model.
 	ContextKeyAutoRouted ContextKey = "auto_routed"
+	ContextKeyTokenScene ContextKey = "token_scene"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"

@@ -80,6 +80,10 @@ type Log struct {
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
 	IselfEmail        string `json:"iself_email" gorm:"index;default:''"`
+	VendorName        string `json:"vendor_name,omitempty" gorm:"-"`
+	VendorIcon        string `json:"vendor_icon,omitempty" gorm:"-"`
+	UserAvatar        string `json:"user_avatar,omitempty" gorm:"-"`
+	UserDisplayName   string `json:"user_display_name,omitempty" gorm:"-"`
 }
 
 // don't use iota, avoid change log type value
@@ -128,6 +132,70 @@ func formatUserLogs(logs []*Log, startIdx int) {
 func FormatAdminLogs(logs []*Log) {
 	for i := range logs {
 		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityAdmin)
+	}
+}
+
+// FillLogVendors derives vendor info from the current model pricing cache, so
+// historical logs reflect the model's present vendor rather than a stored value.
+func FillLogVendors(logs []*Log) {
+	if len(logs) == 0 {
+		return
+	}
+	vendorByID := make(map[int]PricingVendor)
+	for _, vendor := range GetVendors() {
+		vendorByID[vendor.ID] = vendor
+	}
+	type logVendor struct{ name, icon string }
+	vendorByModel := make(map[string]logVendor)
+	for _, pricing := range GetPricing() {
+		if vendor, ok := vendorByID[pricing.VendorID]; ok {
+			vendorByModel[pricing.ModelName] = logVendor{name: vendor.Name, icon: vendor.Icon}
+		} else if pricing.OwnerBy != "" {
+			vendorByModel[pricing.ModelName] = logVendor{name: pricing.OwnerBy}
+		}
+	}
+	for i := range logs {
+		if vendor, ok := vendorByModel[logs[i].ModelName]; ok {
+			logs[i].VendorName = vendor.name
+			logs[i].VendorIcon = vendor.icon
+		}
+	}
+}
+
+// FillLogUsers loads avatar and display name for the users on one page of logs.
+// Users live in the main DB, which may differ from LOG_DB, so this is a separate
+// lookup. Soft-deleted users are included so historical rows keep their identity.
+func FillLogUsers(logs []*Log) {
+	if len(logs) == 0 {
+		return
+	}
+	idSet := make(map[int]struct{}, len(logs))
+	for _, log := range logs {
+		if log.UserId > 0 {
+			idSet[log.UserId] = struct{}{}
+		}
+	}
+	if len(idSet) == 0 {
+		return
+	}
+	ids := make([]int, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	var users []User
+	if err := DB.Unscoped().Select("id", "avatar", "display_name").Where("id IN ?", ids).Find(&users).Error; err != nil {
+		common.SysError("failed to load log users: " + err.Error())
+		return
+	}
+	userByID := make(map[int]*User, len(users))
+	for i := range users {
+		userByID[users[i].Id] = &users[i]
+	}
+	for _, log := range logs {
+		if user, ok := userByID[log.UserId]; ok {
+			log.UserAvatar = user.Avatar
+			log.UserDisplayName = user.DisplayName
+		}
 	}
 }
 

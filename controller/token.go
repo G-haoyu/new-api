@@ -41,7 +41,8 @@ type tokenRequest struct {
 	AllowUserQuotaQuery *bool `json:"allow_user_quota_query"`
 	// 指针区分“未传”和显式空串（空串表示用平台默认）：更新时未传则保留原值，
 	// 不认识这个字段的老客户端改令牌时不会把偏好清掉。
-	AutoPreference *string `json:"auto_preference"`
+	AutoPreference        *string                       `json:"auto_preference"`
+	RoutingPreferenceMode *common.RoutingPreferenceMode `json:"routing_preference_mode"`
 }
 
 // validAutoPreference 判断请求里的 auto_preference 是否可以写入：未传或空串（平台默认）都可以。
@@ -49,6 +50,10 @@ func (r tokenRequest) validAutoPreference() bool {
 	return r.AutoPreference == nil || *r.AutoPreference == "" || slices.Contains(autorouter.Preferences, *r.AutoPreference)
 }
 
+// 刻意不暴露路由偏好：上游约定令牌列表/详情响应不携带该概念，读取走专用接口
+// GET /token/:id/routing-preference。token_routing_preference_test.go 用
+// strings.Contains(body, "routing_preference") 锁定了这一点，加任何含该子串的
+// 键都会被判定为泄露。
 type tokenResponse struct {
 	*model.Token
 	AutoGroups []string `json:"auto_groups"`
@@ -361,6 +366,7 @@ func AddToken(c *gin.Context) {
 		common.SysLog(common.LogText("failed to generate token key: %s", err.Error()))
 		return
 	}
+
 	cleanToken := model.Token{
 		UserId:             c.GetInt("id"),
 		Name:               token.Name,
@@ -376,11 +382,21 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 		AutoGroups:         token.AutoGroups,
+		Scene:              common.NormalizeTokenScene(string(token.Scene)),
+		Description:        token.Description,
 	}
 	cleanToken.AllowUserQuotaQuery = request.AllowUserQuotaQuery == nil || *request.AllowUserQuotaQuery
 	if request.AutoPreference != nil {
 		cleanToken.AutoPreference = *request.AutoPreference
 	}
+
+	if request.RoutingPreferenceMode != nil {
+		if err := cleanToken.SetRoutingPreferenceMode(*request.RoutingPreferenceMode); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+
 	err = cleanToken.Insert()
 	if err != nil {
 		common.ApiError(c, err)
@@ -486,6 +502,16 @@ func UpdateToken(c *gin.Context) {
 		}
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
+		cleanToken.Scene = common.NormalizeTokenScene(string(token.Scene))
+		cleanToken.Description = token.Description
+
+		if request.RoutingPreferenceMode != nil {
+			if err := cleanToken.SetRoutingPreferenceMode(*request.RoutingPreferenceMode); err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
+
 		if token.Group != "auto" {
 			cleanToken.CrossGroupRetry = false
 			_ = cleanToken.SetAutoGroups(nil)
@@ -499,6 +525,14 @@ func UpdateToken(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	// routing_preference 不在 Update() 的字段白名单里（上游有测试锁定这个隔离性：
+	// 普通编辑不得覆盖专用接口设过的偏好），所以显式传了模式时走专用的单列写入。
+	if statusOnly == "" && request.RoutingPreferenceMode != nil {
+		if err := cleanToken.UpdateRoutingPreference(); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	params["name"] = cleanToken.Name
 	if statusOnly != "" {
@@ -522,6 +556,9 @@ func UpdateToken(c *gin.Context) {
 			{"cross_group_retry", previous.CrossGroupRetry != cleanToken.CrossGroupRetry},
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},
 			{"auto_preference", previous.AutoPreference != cleanToken.AutoPreference},
+			{"scene", previous.Scene != cleanToken.Scene},
+			{"description", previous.Description != cleanToken.Description},
+			{"routing_preference", previous.RoutingPreference != cleanToken.RoutingPreference},
 		} {
 			if field.changed {
 				changedFields = append(changedFields, field.name)

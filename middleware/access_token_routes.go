@@ -67,6 +67,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/user/self/groups":                    accessTokenScopeRule("profile:read"),
 	"GET /api/user/self":                           accessTokenScopeRule("profile:read"),
 	"GET /api/user/models":                         accessTokenScopeRule("profile:read"),
+	"GET /api/user/models/meta":                    accessTokenScopeRule("profile:read"),
 	"PUT /api/user/self":                           accessTokenScopeRule("profile:write"),
 	"DELETE /api/user/self":                        accessTokenScopeRule("account_security:write"),
 	"GET /api/user/access_tokens":                  accessTokenSessionRule,

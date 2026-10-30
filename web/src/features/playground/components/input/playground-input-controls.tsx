@@ -105,7 +105,7 @@ export function PlaygroundInputControls({
 
   return (
     <div className='flex w-full flex-col gap-2.5 md:flex-row md:items-center md:justify-between'>
-      <div className='flex min-w-0 items-center justify-end gap-2 md:hidden'>
+      <div className='flex min-w-0 items-center justify-end md:hidden'>
         {renderSelector()}
       </div>
 

@@ -134,6 +134,8 @@ func GetAllLogs(c *gin.Context) {
 	} else {
 		model.FormatRootLogs(logs)
 	}
+	model.FillLogVendors(logs)
+	model.FillLogUsers(logs)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
@@ -160,6 +162,7 @@ func GetUserLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.FillLogVendors(logs)
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
