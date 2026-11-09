@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +13,13 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/cachex"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -535,4 +539,111 @@ func TestChannelAffinityCacheKey_UserAndModelSegments(t *testing.T) {
 	// 带用户段的键在统计里算有效条目，不会被当成 unknown。
 	stats := GetChannelAffinityCacheStats()
 	require.Equal(t, 1, stats.ByRuleName[rule.Name])
+}
+
+func TestClearChannelAffinityCacheByScope(t *testing.T) {
+	suffix := time.Now().UnixNano()
+	ruleFull := operation_setting.ChannelAffinityRule{
+		Name: fmt.Sprintf("scope-full-%d", suffix), IncludeRuleName: true,
+		IncludeUserID: true, IncludeModelName: true, IncludeUsingGroup: true,
+	}
+	ruleModelOnly := operation_setting.ChannelAffinityRule{
+		Name: fmt.Sprintf("scope-model-%d", suffix), IncludeRuleName: true, IncludeModelName: true,
+	}
+	ruleBare := operation_setting.ChannelAffinityRule{
+		Name: fmt.Sprintf("scope-bare-%d", suffix), IncludeRuleName: true,
+	}
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	originalRules := setting.Rules
+	setting.Rules = []operation_setting.ChannelAffinityRule{ruleFull, ruleModelOnly, ruleBare}
+	t.Cleanup(func() { setting.Rules = originalRules })
+
+	entries := map[string]string{
+		"full/7/llama3:8b": buildChannelAffinityCacheKeySuffix(ruleFull, "llama3:8b", "default", 7, "s1"),
+		"full/7/llama3":    buildChannelAffinityCacheKeySuffix(ruleFull, "llama3", "default", 7, "s2"),
+		"full/8/llama3:8b": buildChannelAffinityCacheKeySuffix(ruleFull, "llama3:8b", "default", 8, "s3"),
+		"full/8/gpt-5":     buildChannelAffinityCacheKeySuffix(ruleFull, "gpt-5", "default", 8, "s4"),
+		"model/llama3:8b":  buildChannelAffinityCacheKeySuffix(ruleModelOnly, "llama3:8b", "default", 7, "s5"),
+		"model/gpt-5":      buildChannelAffinityCacheKeySuffix(ruleModelOnly, "gpt-5", "default", 7, "s6"),
+		"bare":             buildChannelAffinityCacheKeySuffix(ruleBare, "gpt-5", "default", 7, "s7"),
+	}
+
+	tests := []struct {
+		name      string
+		ruleName  string
+		modelName string
+		userID    int
+		wantGone  []string
+	}{
+		// llama3 和 llama3:8b 是两个模型，清 llama3:8b 不能把 llama3 带走。
+		{name: "model across rules", modelName: "llama3:8b", wantGone: []string{"full/7/llama3:8b", "full/8/llama3:8b", "model/llama3:8b"}},
+		{name: "model limited to one rule", ruleName: ruleModelOnly.Name, modelName: "llama3:8b", wantGone: []string{"model/llama3:8b"}},
+		// 没开 include_user_id 的规则键里没有用户，按用户清不会碰它。
+		{name: "user", userID: 7, wantGone: []string{"full/7/llama3:8b", "full/7/llama3"}},
+		{name: "user and model", modelName: "llama3:8b", userID: 8, wantGone: []string{"full/8/llama3:8b"}},
+	}
+	errTests := []struct {
+		name      string
+		ruleName  string
+		modelName string
+		userID    int
+	}{
+		{name: "no scope", ruleName: ruleFull.Name},
+		{name: "unknown rule", ruleName: "no-such-rule", modelName: "gpt-5"},
+		{name: "rule without model in key", ruleName: ruleBare.Name, modelName: "gpt-5"},
+		{name: "rule without user in key", ruleName: ruleModelOnly.Name, userID: 7},
+	}
+
+	// 进程内缓存和 Redis 的 Keys/DeleteMany 是两套实现，两边都要过一遍。
+	for _, useRedis := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redis=%v", useRedis), func(t *testing.T) {
+			if useRedis {
+				previousEnabled, previousClient, previousCache := common.RedisEnabled, common.RDB, getChannelAffinityCache()
+				client := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+				common.RedisEnabled, common.RDB = true, client
+				channelAffinityCache = cachex.NewHybridCache[int](cachex.HybridCacheConfig[int]{
+					Namespace:    cachex.Namespace(channelAffinityCacheNamespace),
+					Redis:        client,
+					RedisEnabled: func() bool { return true },
+					RedisCodec:   cachex.IntCodec{},
+				})
+				t.Cleanup(func() {
+					channelAffinityCache = previousCache
+					common.RedisEnabled, common.RDB = previousEnabled, previousClient
+					_ = client.Close()
+				})
+			}
+			cache := getChannelAffinityCache()
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					for _, key := range entries {
+						require.NoError(t, cache.SetWithTTL(key, 1, time.Minute))
+					}
+					t.Cleanup(func() {
+						for _, key := range entries {
+							_, _ = cache.DeleteMany([]string{key})
+						}
+					})
+
+					deleted, err := ClearChannelAffinityCacheByScope(tt.ruleName, tt.modelName, tt.userID)
+					require.NoError(t, err)
+					assert.Equal(t, len(tt.wantGone), deleted)
+
+					for name, key := range entries {
+						_, found, err := cache.Get(key)
+						require.NoError(t, err)
+						assert.Equal(t, !slices.Contains(tt.wantGone, name), found, name)
+					}
+				})
+			}
+			for _, tt := range errTests {
+				t.Run("error/"+tt.name, func(t *testing.T) {
+					_, err := ClearChannelAffinityCacheByScope(tt.ruleName, tt.modelName, tt.userID)
+					require.Error(t, err)
+				})
+			}
+		})
+	}
 }

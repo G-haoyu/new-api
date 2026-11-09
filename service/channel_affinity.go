@@ -242,6 +242,106 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 	return deleted, nil
 }
 
+// ClearChannelAffinityCacheByScope 清掉某个模型和/或某个用户的亲和绑定，返回删掉的条数。
+// ruleName 为空表示所有规则。只有缓存键里带了对应维度的规则才会被清：按模型要求规则同时开了
+// include_rule_name 和 include_model_name，按用户要求 include_rule_name 和 include_user_id，
+// 两个条件一起给就要求两个维度都在键里。没开的规则键里查不出这个维度，不会动它。
+func ClearChannelAffinityCacheByScope(ruleName string, modelName string, userID int) (int, error) {
+	ruleName = strings.TrimSpace(ruleName)
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" && userID <= 0 {
+		return 0, common.NewMessage("model or user_id is required")
+	}
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil {
+		return 0, common.NewMessage("Channel affinity settings are not initialized")
+	}
+
+	ruleExists := ruleName == ""
+	scopedRules := make([]operation_setting.ChannelAffinityRule, 0, len(setting.Rules))
+	for _, rule := range setting.Rules {
+		if ruleName != "" && strings.TrimSpace(rule.Name) != ruleName {
+			continue
+		}
+		ruleExists = true
+		if !rule.IncludeRuleName || rule.Name == "" {
+			continue
+		}
+		if modelName != "" && !rule.IncludeModelName {
+			continue
+		}
+		if userID > 0 && !rule.IncludeUserID {
+			continue
+		}
+		scopedRules = append(scopedRules, rule)
+	}
+	if !ruleExists {
+		return 0, common.NewMessage("Unknown rule name")
+	}
+	if len(scopedRules) == 0 {
+		return 0, common.NewMessage("No session rule keeps the requested model or user in its cache key, enable include_rule_name together with include_model_name or include_user_id on the rule first")
+	}
+
+	cache := getChannelAffinityCache()
+	keys, err := cache.Keys()
+	if err != nil {
+		return 0, err
+	}
+
+	// 键的段顺序见 buildChannelAffinityCacheKeySuffix：规则名 : 用户 id : 模型 : 分组 : 亲和值。
+	// 用户段是纯数字，模型段的冒号已转义，所以按冒号逐段切开就能精确比较，不用 glob。
+	// 已知边界：规则名里自己带冒号，且恰好是另一条规则名加冒号的前缀时，两条规则的键可能互相误认。
+	wantUser := strconv.Itoa(userID)
+	wantModel := channelAffinityModelEscaper.Replace(modelName)
+	matched := make([]string, 0, 64)
+	for _, key := range keys {
+		afterNamespace, ok := strings.CutPrefix(key, channelAffinityCacheNamespace+":")
+		if !ok {
+			continue
+		}
+		for _, rule := range scopedRules {
+			tail, ok := strings.CutPrefix(afterNamespace, rule.Name+":")
+			if !ok {
+				continue
+			}
+			if rule.IncludeUserID {
+				userSegment, afterUser, found := strings.Cut(tail, ":")
+				if !found {
+					continue
+				}
+				if userID > 0 && userSegment != wantUser {
+					continue
+				}
+				tail = afterUser
+			}
+			if modelName != "" {
+				modelSegment, _, found := strings.Cut(tail, ":")
+				if !found || modelSegment != wantModel {
+					continue
+				}
+			}
+			matched = append(matched, key)
+			break
+		}
+	}
+	if len(matched) == 0 {
+		return 0, nil
+	}
+
+	results, err := cache.DeleteMany(matched)
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, ok := range results {
+		if ok {
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 func matchAnyRegexCached(patterns []string, s string) bool {
 	if len(patterns) == 0 || s == "" {
 		return false
