@@ -211,7 +211,7 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
 	}
 
 	affinityValue := fmt.Sprintf("header-hit-%d", time.Now().UnixNano())
-	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", affinityValue)
+	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", 0, affinityValue)
 
 	cache := getChannelAffinityCache()
 	require.NoError(t, cache.SetWithTTL(cacheKeySuffix, 9528, time.Minute))
@@ -301,7 +301,7 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	require.NotNil(t, codexRule)
 
 	affinityValue := fmt.Sprintf("pc-hit-%d", time.Now().UnixNano())
-	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(*codexRule, "gpt-5", "default", affinityValue)
+	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(*codexRule, "gpt-5", "default", 0, affinityValue)
 
 	cache := getChannelAffinityCache()
 	require.NoError(t, cache.SetWithTTL(cacheKeySuffix, 9527, time.Minute))
@@ -433,7 +433,7 @@ func TestSessionRulesInheritOrOverrideGlobalDefault(t *testing.T) {
 				require.NoError(t, err)
 				*setting = snapshot.Affinity
 				key := t.Name()
-				cacheKey := buildChannelAffinityCacheKeySuffix(rule, "test-model", "default", key)
+				cacheKey := buildChannelAffinityCacheKeySuffix(rule, "test-model", "default", 0, key)
 				cache := getChannelAffinityCache()
 				require.NoError(t, cache.SetWithTTL(cacheKey, 1, time.Minute))
 				t.Cleanup(func() { _, err := cache.DeleteMany([]string{cacheKey}); assert.NoError(t, err) })
@@ -479,4 +479,60 @@ func TestSessionRulesInheritOrOverrideGlobalDefault(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestChannelAffinityCacheKey_UserAndModelSegments(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rule := operation_setting.ChannelAffinityRule{
+		Name:              fmt.Sprintf("user-key-%d", time.Now().UnixNano()),
+		ModelRegex:        []string{"^llama3.*$"},
+		PathRegex:         []string{"/v1/chat/completions"},
+		KeySources:        []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Affinity-Key"}},
+		IncludeRuleName:   true,
+		IncludeUserID:     true,
+		IncludeModelName:  true,
+		IncludeUsingGroup: true,
+	}
+
+	// 顺序固定：规则名 : 用户 : 模型 : 分组 : 亲和值；模型里的冒号被转义，不会多切出一段。
+	require.Equal(t, rule.Name+":7:llama3%3A8b:default:sess-1",
+		buildChannelAffinityCacheKeySuffix(rule, "llama3:8b", "default", 7, "sess-1"))
+	// 取不到用户时写 0，保持用户段位置不变。
+	require.Equal(t, rule.Name+":0:gpt-5:default:sess-1",
+		buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", 0, "sess-1"))
+	// 没开 IncludeUserID 的规则键不受影响。
+	rule.IncludeUserID = false
+	require.Equal(t, rule.Name+":gpt-5:default:sess-1",
+		buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", 7, "sess-1"))
+	rule.IncludeUserID = true
+
+	cache := getChannelAffinityCache()
+	boundKey := buildChannelAffinityCacheKeySuffix(rule, "llama3:8b", "default", 7, "sess-1")
+	require.NoError(t, cache.SetWithTTL(boundKey, 9101, time.Minute))
+	t.Cleanup(func() { _, _ = cache.DeleteMany([]string{boundKey}) })
+
+	setting := operation_setting.GetChannelAffinitySetting()
+	originalRules := setting.Rules
+	setting.Rules = append([]operation_setting.ChannelAffinityRule{rule}, originalRules...)
+	t.Cleanup(func() { setting.Rules = originalRules })
+
+	newRequestContext := func(userID int) *gin.Context {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		ctx.Request.Header.Set("X-Affinity-Key", "sess-1")
+		ctx.Set("id", userID)
+		return ctx
+	}
+
+	// 同一个会话 id、同一个模型，只有绑定时的那个用户能命中。
+	channelID, found := GetPreferredChannelByAffinity(newRequestContext(7), "llama3:8b", "default")
+	require.True(t, found)
+	require.Equal(t, 9101, channelID)
+	_, found = GetPreferredChannelByAffinity(newRequestContext(8), "llama3:8b", "default")
+	require.False(t, found)
+
+	// 带用户段的键在统计里算有效条目，不会被当成 unknown。
+	stats := GetChannelAffinityCacheStats()
+	require.Equal(t, 1, stats.ByRuleName[rule.Name])
 }

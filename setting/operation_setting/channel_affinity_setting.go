@@ -28,6 +28,9 @@ type ChannelAffinityRule struct {
 	IncludeUsingGroup bool `json:"include_using_group"`
 	IncludeModelName  bool `json:"include_model_name"`
 	IncludeRuleName   bool `json:"include_rule_name"`
+	// 缓存键里带上发起请求的 new-api 用户 id，同一个会话 id 在不同用户下各绑各的渠道，
+	// 也让管理员能按用户清空这条规则的绑定。默认关闭，开关前写入的旧键只能等 TTL 过期。
+	IncludeUserID bool `json:"include_user_id"`
 }
 
 type ChannelAffinitySetting struct {

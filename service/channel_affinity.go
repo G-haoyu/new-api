@@ -168,21 +168,16 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 			unknown++
 			continue
 		}
-		if rule.IncludeModelName {
-			if len(parts) < 3 {
-				unknown++
-				continue
+		// 规则名 + 亲和值是必有的两段，其余每开一个维度就多一段。
+		minParts := 2
+		for _, included := range []bool{rule.IncludeUserID, rule.IncludeModelName, rule.IncludeUsingGroup} {
+			if included {
+				minParts++
 			}
 		}
-		if rule.IncludeUsingGroup {
-			minParts := 3
-			if rule.IncludeModelName {
-				minParts = 4
-			}
-			if len(parts) < minParts {
-				unknown++
-				continue
-			}
+		if len(parts) < minParts {
+			unknown++
+			continue
 		}
 		byRuleName[ruleName]++
 	}
@@ -336,13 +331,24 @@ func extractChannelAffinityValue(c *gin.Context, src operation_setting.ChannelAf
 	}
 }
 
-func buildChannelAffinityCacheKeySuffix(rule operation_setting.ChannelAffinityRule, modelName string, usingGroup string, affinityValue string) string {
-	parts := make([]string, 0, 4)
+// channelAffinityModelEscaper 转义缓存键里的模型段。模型名可能带冒号（ollama 的 llama3:8b、
+// 微调模型 ft:gpt-4o:org::id），不转义的话按冒号切键时会把它当成多段，按模型清缓存也会
+// 把 llama3 误清成 llama3:8b。
+var channelAffinityModelEscaper = strings.NewReplacer("%", "%25", ":", "%3A")
+
+// buildChannelAffinityCacheKeySuffix 拼出缓存键（不含命名空间），段的顺序固定为
+// 规则名 : 用户 id : 模型 : 分组 : 亲和值。开了 IncludeUserID 就一定写用户段，取不到用户时写 0，
+// 这样用户段永远是纯数字，按冒号切开后位置不会因为缺段错位。
+func buildChannelAffinityCacheKeySuffix(rule operation_setting.ChannelAffinityRule, modelName string, usingGroup string, userID int, affinityValue string) string {
+	parts := make([]string, 0, 5)
 	if rule.IncludeRuleName && rule.Name != "" {
 		parts = append(parts, rule.Name)
 	}
+	if rule.IncludeUserID {
+		parts = append(parts, strconv.Itoa(max(userID, 0)))
+	}
 	if rule.IncludeModelName && modelName != "" {
-		parts = append(parts, modelName)
+		parts = append(parts, channelAffinityModelEscaper.Replace(modelName))
 	}
 	if rule.IncludeUsingGroup && usingGroup != "" {
 		parts = append(parts, usingGroup)
@@ -563,8 +569,12 @@ func matchChannelAffinityRule(c *gin.Context, setting *operation_setting.Channel
 		path = c.Request.URL.Path
 	}
 	userAgent := ""
+	userID := 0
 	if c != nil && c.Request != nil {
 		userAgent = c.Request.UserAgent()
+	}
+	if c != nil {
+		userID = common.GetContextKeyInt(c, constant.ContextKeyUserId)
 	}
 
 	for _, rule := range setting.Rules {
@@ -596,7 +606,7 @@ func matchChannelAffinityRule(c *gin.Context, setting *operation_setting.Channel
 			rule:           rule,
 			affinityValue:  affinityValue,
 			usedSource:     usedSource,
-			cacheKeySuffix: buildChannelAffinityCacheKeySuffix(rule, modelName, usingGroup, affinityValue),
+			cacheKeySuffix: buildChannelAffinityCacheKeySuffix(rule, modelName, usingGroup, userID, affinityValue),
 			path:           path,
 		}, true
 	}
