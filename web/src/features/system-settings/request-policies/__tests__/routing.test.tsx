@@ -646,6 +646,50 @@ it('cache cleanup uses the existing cache API without saving the draft', async (
   expect(api.patch).not.toHaveBeenCalled()
 })
 
+it('clearing by model or user sends only the filled scope and needs a rule that keeps it in the key', async () => {
+  const [rule] = JSON.parse(options['channel_affinity_setting.rules'])
+  currentOptions['channel_affinity_setting.rules'] = JSON.stringify([
+    { ...rule, include_model_name: true, include_user_id: true },
+  ])
+  vi.spyOn(api, 'delete').mockResolvedValue({
+    data: { success: true, data: { deleted: 3 } },
+  })
+  show()
+  await userEvent.click(
+    await screen.findByRole('button', { name: 'Clear by model or user' })
+  )
+  const dialog = screen.getByRole('alertdialog')
+  const confirm = within(dialog).getByRole('button', { name: 'Clear' })
+  expect(confirm).toBeDisabled()
+
+  await userEvent.type(within(dialog).getByLabelText('User ID'), 'abc')
+  expect(confirm).toBeDisabled()
+  await userEvent.clear(within(dialog).getByLabelText('User ID'))
+  await userEvent.type(within(dialog).getByLabelText('User ID'), '7')
+  await userEvent.type(within(dialog).getByLabelText('Model name'), 'gpt-5')
+  await userEvent.click(confirm)
+
+  await waitFor(() =>
+    expect(api.delete).toHaveBeenCalledWith(
+      '/api/option/channel_affinity_cache',
+      { params: { model: 'gpt-5', user_id: 7, rule_name: undefined } }
+    )
+  )
+  expect(api.patch).not.toHaveBeenCalled()
+})
+
+it('clearing by model or user explains when no rule keeps them in the cache key', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('button', { name: 'Clear by model or user' })
+  )
+  const dialog = screen.getByRole('alertdialog')
+  expect(
+    within(dialog).getByText(/No session rule keeps the model or user/)
+  ).toBeVisible()
+  expect(within(dialog).getByRole('button', { name: 'Clear' })).toBeDisabled()
+})
+
 it('keyboard navigation switches editor tabs and restores the visual draft', async () => {
   const user = userEvent.setup()
   show()

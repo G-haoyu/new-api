@@ -49,6 +49,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { cn } from '@/lib/utils'
 
 import { getCacheStats, clearAllCache, clearRuleCache } from './api'
+import { ClearScopeDialog } from './clear-scope-dialog'
 import { RULE_TEMPLATES, cloneTemplate, makeUniqueName } from './constants'
 import { RuleEditorDialog } from './rule-editor-dialog'
 import { SessionRulesTable } from './session-rules-table'
@@ -92,6 +93,7 @@ export function ChannelAffinitySection(props: Props) {
   const [deletingRule, setDeletingRule] = useState<AffinityRule | null>(null)
   const [clearAllDialogOpen, setClearAllDialogOpen] = useState(false)
   const [clearRuleName, setClearRuleName] = useState<string | null>(null)
+  const [clearScopeDialogOpen, setClearScopeDialogOpen] = useState(false)
   const [fillTemplateDialogOpen, setFillTemplateDialogOpen] = useState(false)
 
   const refreshCache = useCallback(async () => {
@@ -366,6 +368,14 @@ export function ChannelAffinitySection(props: Props) {
             <Button
               variant='ghost'
               size='sm'
+              onClick={() => setClearScopeDialogOpen(true)}
+            >
+              <Trash2 aria-hidden='true' />
+              {t('Clear by model or user')}
+            </Button>
+            <Button
+              variant='ghost'
+              size='sm'
               onClick={() => setClearAllDialogOpen(true)}
             >
               <Trash2 aria-hidden='true' />
@@ -416,6 +426,14 @@ export function ChannelAffinitySection(props: Props) {
         handleConfirm={handleClearAll}
         destructive
       />
+
+      {clearScopeDialogOpen && (
+        <ClearScopeDialog
+          rules={rules}
+          onClose={() => setClearScopeDialogOpen(false)}
+          onCleared={refreshCache}
+        />
+      )}
 
       {clearRuleName !== null && (
         <ConfirmDialog

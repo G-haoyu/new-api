@@ -50,6 +50,25 @@ export async function clearRuleCache(
   return res.data
 }
 
+export async function clearScopeCache(params: {
+  model?: string
+  userId?: number
+  ruleName?: string
+}): Promise<{
+  success: boolean
+  message?: string
+  data?: { deleted: number }
+}> {
+  const res = await api.delete('/api/option/channel_affinity_cache', {
+    params: {
+      model: params.model || undefined,
+      user_id: params.userId,
+      rule_name: params.ruleName || undefined,
+    },
+  })
+  return res.data
+}
+
 export async function getAffinityUsageCache(params: {
   rule_name: string
   using_group: string
