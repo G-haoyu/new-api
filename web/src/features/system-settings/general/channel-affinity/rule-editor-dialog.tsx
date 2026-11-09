@@ -86,6 +86,7 @@ interface RuleFormValues {
   include_using_group: boolean
   include_model_name: boolean
   include_rule_name: boolean
+  include_user_id: boolean
   param_override_template_json: string
 }
 
@@ -137,6 +138,7 @@ export function RuleEditorDialog(props: Props) {
       include_using_group: true,
       include_model_name: false,
       include_rule_name: true,
+      include_user_id: false,
       param_override_template_json: '',
     },
   })
@@ -158,6 +160,7 @@ export function RuleEditorDialog(props: Props) {
       include_using_group: r.include_using_group ?? true,
       include_model_name: !!r.include_model_name,
       include_rule_name: r.include_rule_name ?? true,
+      include_user_id: !!r.include_user_id,
       param_override_template_json: r.param_override_template
         ? JSON.stringify(r.param_override_template, null, 2)
         : '',
@@ -191,6 +194,7 @@ export function RuleEditorDialog(props: Props) {
         include_using_group: true,
         include_model_name: false,
         include_rule_name: true,
+        include_user_id: false,
         param_override_template_json: '',
       })
       setKeySources([createKeySourceRow()])
@@ -247,6 +251,7 @@ export function RuleEditorDialog(props: Props) {
       include_using_group: values.include_using_group,
       include_model_name: values.include_model_name,
       include_rule_name: values.include_rule_name,
+      include_user_id: values.include_user_id,
       param_override_template: paramTemplate,
     }
 
@@ -503,7 +508,7 @@ export function RuleEditorDialog(props: Props) {
               />
             </div>
 
-            <div className='grid gap-3 sm:grid-cols-3'>
+            <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
               <SettingsSwitchField
                 checked={form.watch('include_using_group')}
                 onCheckedChange={(v) => form.setValue('include_using_group', v)}
@@ -514,6 +519,12 @@ export function RuleEditorDialog(props: Props) {
                 checked={form.watch('include_model_name')}
                 onCheckedChange={(v) => form.setValue('include_model_name', v)}
                 label={t('Include Model')}
+                className='py-0'
+              />
+              <SettingsSwitchField
+                checked={form.watch('include_user_id')}
+                onCheckedChange={(v) => form.setValue('include_user_id', v)}
+                label={t('Include User')}
                 className='py-0'
               />
               <SettingsSwitchField

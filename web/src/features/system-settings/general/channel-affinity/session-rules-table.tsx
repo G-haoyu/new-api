@@ -216,12 +216,13 @@ export function SessionRulesTable(props: SessionRulesTableProps) {
             const items = [
               rule.include_using_group && t('Group'),
               rule.include_model_name && t('Model'),
+              rule.include_user_id && t('User'),
               rule.include_rule_name && t('Rule'),
             ].filter(Boolean) as string[]
             return (
               <StatusBadgeList
                 items={items}
-                max={3}
+                max={4}
                 className='flex-wrap gap-1.5'
                 renderItem={(item) => <Badge variant='outline'>{item}</Badge>}
               />

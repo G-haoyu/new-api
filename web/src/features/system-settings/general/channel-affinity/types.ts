@@ -38,6 +38,8 @@ export interface AffinityRule {
   include_using_group: boolean
   include_model_name: boolean
   include_rule_name: boolean
+  // 旧规则 JSON 里没有这个字段，后端按 false 处理
+  include_user_id?: boolean
   param_override_template?: Record<string, unknown> | null
 }
 
